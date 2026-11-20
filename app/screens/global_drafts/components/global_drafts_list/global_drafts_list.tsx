@@ -1,8 +1,8 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import React, {useCallback, useEffect, useState} from 'react';
-import {FlatList, InteractionManager, StyleSheet, View, type LayoutChangeEvent, type ListRenderItemInfo} from 'react-native';
+import React, {useCallback, useRef, useState} from 'react';
+import {FlatList, StyleSheet, View, type LayoutChangeEvent, type ListRenderItemInfo} from 'react-native';
 import Tooltip from 'react-native-walkthrough-tooltip';
 
 import {storeDraftsTutorial} from '@actions/app/global';
@@ -10,8 +10,9 @@ import {Screens} from '@constants';
 import {DRAFT_SCHEDULED_POST_LAYOUT_PADDING, DRAFT_TYPE_DRAFT} from '@constants/draft';
 import {staticStyles} from '@constants/tooltip';
 import useAndroidHardwareBackHandler from '@hooks/android_back_handler';
+import useDidMount from '@hooks/did_mount';
 import DraftTooltip from '@screens/global_drafts/draft_scheduled_post_tooltip';
-import {popTopScreen} from '@screens/navigation';
+import {navigateBack} from '@screens/navigation';
 
 import DraftAndScheduledPostSwipeActions from '../draft_and_scheduled_post_swipe_actions';
 import DraftEmptyComponent from '../draft_empty_component';
@@ -57,6 +58,7 @@ const GlobalDraftsList: React.FC<Props> = ({
 }) => {
     const [layoutWidth, setLayoutWidth] = useState(0);
     const [tooltipVisible, setTooltipVisible] = useState(false);
+    const tutorialTimerRef = useRef<NodeJS.Timeout | undefined>(undefined);
     const onLayout = useCallback((e: LayoutChangeEvent) => {
         if (location === Screens.GLOBAL_DRAFTS) {
             setLayoutWidth(e.nativeEvent.layout.width - DRAFT_SCHEDULED_POST_LAYOUT_PADDING);
@@ -65,23 +67,20 @@ const GlobalDraftsList: React.FC<Props> = ({
 
     const firstDraftId = allDrafts.length ? allDrafts[0].id : '';
 
-    useEffect(() => {
-        if (tutorialWatched) {
-            return;
+    useDidMount(() => {
+        if (!tutorialWatched) {
+            tutorialTimerRef.current = setTimeout(() => {
+                setTooltipVisible(true);
+            }, 300);
         }
-        InteractionManager.runAfterInteractions(() => {
-            setTooltipVisible(true);
-        });
+        return () => {
+            if (tutorialTimerRef.current !== undefined) {
+                clearTimeout(tutorialTimerRef.current);
+            }
+        };
+    });
 
-        // This effect is intended to run only on the first mount, so dependencies are omitted intentionally.
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
-
-    const collapse = useCallback(() => {
-        popTopScreen(Screens.GLOBAL_DRAFTS);
-    }, []);
-
-    useAndroidHardwareBackHandler(Screens.GLOBAL_DRAFTS, collapse);
+    useAndroidHardwareBackHandler(Screens.GLOBAL_DRAFTS, navigateBack);
 
     const close = useCallback(() => {
         setTooltipVisible(false);
@@ -93,7 +92,6 @@ const GlobalDraftsList: React.FC<Props> = ({
             return (
                 <Tooltip
                     isVisible={tooltipVisible}
-                    useInteractionManager={true}
                     contentStyle={styles.tooltipContentStyle}
                     placement={'bottom'}
                     content={

@@ -1,80 +1,74 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import RNUtils from '@mattermost/rnutils';
-import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
-import {DeviceEventEmitter, Platform, StyleSheet, View} from 'react-native';
+import React, {useCallback, useEffect, useRef, useState} from 'react';
+import {DeviceEventEmitter, View} from 'react-native';
+import {useSafeAreaInsets} from 'react-native-safe-area-context';
 
-import {Events} from '@constants';
+import {Events, Screens} from '@constants';
 import useAndroidHardwareBackHandler from '@hooks/android_back_handler';
-import {useIsTablet, useWindowDimensions} from '@hooks/device';
+import {useWindowDimensions} from '@hooks/device';
+import useDidMount from '@hooks/did_mount';
 import {useGalleryControls} from '@hooks/gallery';
-import SecurityManager from '@managers/security_manager';
-import {dismissOverlay, setScreensOrientation} from '@screens/navigation';
-import {freezeOtherScreens} from '@utils/gallery';
+import {navigateBack} from '@screens/navigation';
+import EphemeralStore from '@store/ephemeral_store';
 
 import Footer from './footer';
 import Gallery, {type GalleryRef} from './gallery';
 import Header from './header';
 
 import type {GalleryItemType} from '@typings/screens/gallery';
-import type {AvailableScreens} from '@typings/screens/navigation';
 
-type Props = {
-    componentId: AvailableScreens;
+export type GalleryProps = {
     galleryIdentifier: string;
     hideActions: boolean;
     initialIndex: number;
     items: GalleryItemType[];
 }
 
-const styles = StyleSheet.create({
-    container: {
-        flex: 1,
-    },
-});
-
-const GalleryScreen = ({componentId, galleryIdentifier, hideActions, initialIndex, items}: Props) => {
+const GalleryScreen = ({galleryIdentifier, hideActions, initialIndex, items}: GalleryProps) => {
     const dim = useWindowDimensions();
-    const isTablet = useIsTablet();
+    const {bottom: bottomInset} = useSafeAreaInsets();
     const [localIndex, setLocalIndex] = useState(initialIndex);
-    const {headerAndFooterHidden, hideHeaderAndFooter, headerStyles, footerStyles} = useGalleryControls();
+
+    useDidMount(() => {
+        const previousPostId = EphemeralStore.getCurrentFileViewerPostId();
+        const postId = items[initialIndex]?.postId;
+        if (postId) {
+            EphemeralStore.setCurrentFileViewerPostId(postId);
+        } else {
+            EphemeralStore.clearCurrentFileViewerPostId();
+        }
+        return () => EphemeralStore.setCurrentFileViewerPostId(previousPostId);
+    });
+
+    const {headerAndFooterHidden, hideHeaderAndFooter, headerStyles, footerStyles} = useGalleryControls(bottomInset);
     const galleryRef = useRef<GalleryRef>(null);
 
-    const containerStyle = useMemo(() => {
-        if (Platform.OS === 'ios') {
-            return dim;
-        }
-
-        return styles.container;
-    }, [dim]);
+    const containerStyle = dim;
 
     const onClose = useCallback(() => {
-        // We keep the un freeze here as we want
-        // the screen to be visible when the gallery
-        // starts to dismiss as the hanlder for shouldHandleEvent
-        // of the lightbox is not called
-        freezeOtherScreens(false);
         requestAnimationFrame(() => {
+            hideHeaderAndFooter();
             galleryRef.current?.close();
         });
-    }, []);
+    }, [hideHeaderAndFooter]);
 
     const close = useCallback(() => {
-        setScreensOrientation(isTablet);
-        if (Platform.OS === 'ios' && !isTablet) {
-            // We need both the navigation & the module
-            RNUtils.lockPortrait();
-        }
-        freezeOtherScreens(false);
         requestAnimationFrame(async () => {
-            dismissOverlay(componentId);
+            navigateBack();
         });
-    }, [componentId, isTablet]);
+    }, []);
 
     const onIndexChange = useCallback((index: number) => {
         setLocalIndex(index);
-    }, []);
+        const postId = items[index]?.postId;
+        if (postId) {
+            EphemeralStore.setCurrentFileViewerPostId(postId);
+        } else {
+            EphemeralStore.clearCurrentFileViewerPostId();
+        }
+    }, [items]);
 
     useEffect(() => {
         const listener = DeviceEventEmitter.addListener(Events.CLOSE_GALLERY, () => {
@@ -86,13 +80,10 @@ const GalleryScreen = ({componentId, galleryIdentifier, hideActions, initialInde
         };
     }, [onClose]);
 
-    useAndroidHardwareBackHandler(componentId, close);
+    useAndroidHardwareBackHandler(Screens.GALLERY, close);
 
     return (
-        <View
-            style={containerStyle}
-            nativeID={SecurityManager.getShieldScreenId(componentId)}
-        >
+        <View style={containerStyle}>
             <Header
                 index={localIndex}
                 onClose={onClose}

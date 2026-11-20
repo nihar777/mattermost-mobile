@@ -18,7 +18,7 @@ import {
     serverOneUrl,
     siteOneUrl,
 } from '@support/test_config';
-import {Alert} from '@support/ui/component';
+import {Alert, Autocomplete} from '@support/ui/component';
 import {
     ChannelListScreen,
     ChannelScreen,
@@ -27,8 +27,8 @@ import {
     ServerScreen,
     UserProfileScreen,
 } from '@support/ui/screen';
-import {timeouts, wait} from '@support/utils';
-import {expect} from 'detox';
+import {timeouts, wait, waitForElementToExist} from '@support/utils';
+import {by, element, expect, waitFor} from 'detox';
 
 describe('Messaging - At-Mention', () => {
     const serverOneDisplayName = 'Server 1';
@@ -45,6 +45,9 @@ describe('Messaging - At-Mention', () => {
         testUser = user;
 
         ({user: testOtherUser} = await User.apiCreateUser(siteOneUrl));
+        if (!testOtherUser?.id) {
+            throw new Error('[beforeAll] Failed to create testOtherUser');
+        }
         await Team.apiAddUserToTeam(siteOneUrl, testOtherUser.id, testTeam.id);
         await Channel.apiAddUserToChannel(siteOneUrl, testOtherUser.id, testChannel.id);
 
@@ -67,18 +70,16 @@ describe('Messaging - At-Mention', () => {
         // # Open a channel screen and post a message with lowercase at-mention
         const camelCaseUsernameMessage = `Message @${testUser.username.substring(0, 1).toUpperCase()}${testUser.username.substring(1)}`;
         await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelScreen.postMessage(camelCaseUsernameMessage);
 
         // * Verify at-mention is posted as lowercase
-        const {post: lowerCasePost} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
+        const {post: lowerCasePost} = await ChannelScreen.postMessageAndVerify(camelCaseUsernameMessage, testChannel.id, siteOneUrl);
         await ChannelScreen.hasPostMessage(lowerCasePost.id, `Message @${testUser.username.toLowerCase()}`);
 
         // # Post a message with uppercase at-mention
         const upperCaseUsernameMessage = `Message @${testOtherUser.username.toUpperCase()}`;
-        await ChannelScreen.postMessage(upperCaseUsernameMessage);
 
         // * Verify at-mention is posted as lowercase
-        const {post: upperCasePost} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
+        const {post: upperCasePost} = await ChannelScreen.postMessageAndVerify(upperCaseUsernameMessage, testChannel.id, siteOneUrl);
         await ChannelScreen.hasPostMessage(upperCasePost.id, `Message @${testOtherUser.username.toLowerCase()}`);
 
         // # Go back to channel list screen
@@ -86,12 +87,14 @@ describe('Messaging - At-Mention', () => {
     });
 
     it('MM-T4874_2 - should display confirmation dialog when posting @all, @channel, and @here', async () => {
-        // # Add more users to the channel, open a channel screen, and post @all
-        [...Array(3).keys()].forEach(async (key) => {
+        /* eslint-disable no-await-in-loop -- 3 independent users; adding them sequentially keeps server load flat */
+        for (let key = 0; key < 3; key++) {
             const {user} = await User.apiCreateUser(siteOneUrl, {prefix: `a-${key}-`});
             await Team.apiAddUserToTeam(siteOneUrl, user.id, testTeam.id);
             await Channel.apiAddUserToChannel(siteOneUrl, user.id, testChannel.id);
-        });
+        }
+        /* eslint-enable no-await-in-loop */
+
         await ChannelScreen.open(channelsCategory, testChannel.name);
         await ChannelScreen.postInput.replaceText('@all');
         await ChannelScreen.sendButton.tap();
@@ -101,6 +104,7 @@ describe('Messaging - At-Mention', () => {
 
         // # Tap on confirm button
         await Alert.confirmButton.tap();
+        await wait(timeouts.TWO_SEC);
 
         // * Verify @all is posted
         const {post: atAllPost} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
@@ -116,6 +120,7 @@ describe('Messaging - At-Mention', () => {
 
         // # Tap on confirm button
         await Alert.confirmButton.tap();
+        await wait(timeouts.TWO_SEC);
 
         // * Verify @channel is posted
         const {post: atChannelPost} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
@@ -131,6 +136,7 @@ describe('Messaging - At-Mention', () => {
 
         // # Tap on confirm button
         await Alert.confirmButton.tap();
+        await wait(timeouts.TWO_SEC);
 
         // * Verify @here is posted
         const {post: atHerePost} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
@@ -144,17 +150,58 @@ describe('Messaging - At-Mention', () => {
         // # Open a channel screen, post a message with at-mention, and tap on at-mention
         const message = `@${testUser.username}`;
         await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelScreen.postMessage(message);
-        await element(by.text(message)).tap({x: 5, y: 10});
+        const {post} = await ChannelScreen.postMessageAndVerify(message, testChannel.id, siteOneUrl);
+        const mention = element(by.text(message).withAncestor(by.id(`channel.post_list.post.${post.id}`)));
+        await waitFor(mention).toExist().withTimeout(timeouts.TEN_SEC);
+        await mention.tap({x: 5, y: 10});
         await wait(timeouts.ONE_SEC);
 
         // * Verify on user profile screen
         await UserProfileScreen.toBeVisible();
-        await expect(UserProfileScreen.getUserProfilePicture(testUser.id)).toBeVisible();
+
+        // The user profile bottom sheet can still be animating when its container reports visible,
+        // so the avatar briefly fails a 75% visibility threshold.
+        await waitFor(UserProfileScreen.getUserProfilePicture(testUser.id)).toExist().withTimeout(timeouts.TEN_SEC);
         await expect(UserProfileScreen.userDisplayName).toHaveText(`@${testUser.username}`);
 
         // # Go back to channel list screen
         await UserProfileScreen.close();
+        await ChannelScreen.back();
+    });
+
+    it('MM-T0171_1 - should be able to autocomplete at-mention for out-of-channel member', async () => {
+        // # Create a user who is on the team but not in the channel
+        const {user: outOfChannelUser} = await User.apiCreateUser(siteOneUrl);
+        await Team.apiAddUserToTeam(siteOneUrl, outOfChannelUser.id, testTeam.id);
+
+        // Fresh users can miss the first search until the server index catches up.
+        await User.waitForUserInAutocomplete(siteOneUrl, {
+            teamId: testTeam.id,
+            channelId: testChannel.id,
+            userId: outOfChannelUser.id,
+            name: outOfChannelUser.username,
+            timeoutMs: timeouts.HALF_MIN,
+        });
+
+        // # Open the channel and type "@" then the username.
+        // Android replaceText writes the draft but does not move the cursor, so
+        // AtMention reads value.substring(0, 0) and never opens the list.
+        await ChannelScreen.open(channelsCategory, testChannel.name);
+        await ChannelScreen.postInput.tap();
+        await wait(timeouts.ONE_SEC);
+        await ChannelScreen.postInput.typeText('@');
+        await Autocomplete.toBeVisible();
+        await ChannelScreen.postInput.typeText(outOfChannelUser.username);
+
+        // * Verify at-mention autocomplete contains the out-of-channel user suggestion.
+        const {atMentionItem} = Autocomplete.getAtMentionItem(outOfChannelUser.id);
+        await waitForElementToExist(atMentionItem, timeouts.HALF_MIN);
+
+        // # Clear input and type "@" again to test DM post input scenario
+        await ChannelScreen.postInput.clearText();
+        await Autocomplete.toBeVisible(false);
+
+        // # Go back to channel list screen
         await ChannelScreen.back();
     });
 });

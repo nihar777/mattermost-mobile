@@ -5,17 +5,16 @@ import React, {useCallback} from 'react';
 import {ScrollView, View} from 'react-native';
 import {type Edge, SafeAreaView} from 'react-native-safe-area-context';
 
-import ChannelInfoEnableCalls from '@calls/components/channel_info_enable_calls';
 import ChannelActions from '@components/channel_actions';
-import ConvertToChannelLabel from '@components/channel_actions/convert_to_channel/convert_to_channel_label';
 import ChannelBookmarks from '@components/channel_bookmarks';
-import {General} from '@constants';
+import ChannelInfoAttributes from '@components/channel_info_attributes';
+import {General, Screens} from '@constants';
 import {useServerUrl} from '@context/server';
 import {useTheme} from '@context/theme';
 import useAndroidHardwareBackHandler from '@hooks/android_back_handler';
-import useNavButtonPressed from '@hooks/navigation_button_pressed';
-import SecurityManager from '@managers/security_manager';
-import {dismissModal} from '@screens/navigation';
+import {useFetchRenderPermissions} from '@hooks/render_permissions';
+import {navigateBack} from '@screens/navigation';
+import {isTypeDMorGM} from '@utils/channel';
 import {changeOpacity, makeStyleSheetFromTheme} from '@utils/theme';
 
 import ChannelInfoAppBindings from './app_bindings';
@@ -24,24 +23,19 @@ import Extra from './extra';
 import Options from './options';
 import Title from './title';
 
-import type {AvailableScreens} from '@typings/screens/navigation';
-
 type Props = {
     canAddBookmarks: boolean;
-    canEnableDisableCalls: boolean;
-    canManageSettings: boolean;
     channelId: string;
-    closeButtonId: string;
-    componentId: AvailableScreens;
     isBookmarksEnabled: boolean;
     isCallsEnabledInChannel: boolean;
     isPlaybooksEnabled: boolean;
     groupCallsAllowed: boolean;
     canManageMembers: boolean;
-    isConvertGMFeatureAvailable: boolean;
     isCRTEnabled: boolean;
-    isGuestUser: boolean;
     type?: ChannelType;
+    hasChannelSettingsActions: boolean;
+    isAutotranslationEnabledForThisChannel: boolean;
+    channelDisplayName: string;
 }
 
 const edges: Edge[] = ['bottom', 'left', 'right'];
@@ -63,20 +57,17 @@ const getStyleSheet = makeStyleSheetFromTheme((theme: Theme) => ({
 
 const ChannelInfo = ({
     canAddBookmarks,
-    canEnableDisableCalls,
     canManageMembers,
-    canManageSettings,
     channelId,
-    closeButtonId,
-    componentId,
     isBookmarksEnabled,
     isCallsEnabledInChannel,
     isPlaybooksEnabled,
     groupCallsAllowed,
-    isConvertGMFeatureAvailable,
     isCRTEnabled,
-    isGuestUser,
     type,
+    hasChannelSettingsActions,
+    isAutotranslationEnabledForThisChannel,
+    channelDisplayName,
 }: Props) => {
     const theme = useTheme();
     const serverUrl = useServerUrl();
@@ -89,20 +80,19 @@ const ChannelInfo = ({
         callsAvailable = false;
     }
 
+    // Assigning attributes to a conversation is later Smart Markings work, so a
+    // DM or GM has nothing to show here.
+    const isDMorGM = isTypeDMorGM(type);
+
     const onPressed = useCallback(() => {
-        return dismissModal({componentId});
-    }, [componentId]);
+        return navigateBack();
+    }, []);
 
-    useNavButtonPressed(closeButtonId, componentId, onPressed, [onPressed]);
-    useAndroidHardwareBackHandler(componentId, onPressed);
-
-    const convertGMOptionAvailable = isConvertGMFeatureAvailable && type === General.GM_CHANNEL && !isGuestUser;
+    useAndroidHardwareBackHandler(Screens.CHANNEL_INFO, onPressed);
+    useFetchRenderPermissions(channelId);
 
     return (
-        <View
-            style={styles.flex}
-            nativeID={SecurityManager.getShieldScreenId(componentId)}
-        >
+        <View style={styles.flex}>
             <SafeAreaView
                 edges={edges}
                 style={styles.flex}
@@ -132,33 +122,21 @@ const ChannelInfo = ({
                         callsEnabled={callsAvailable}
                         testID='channel_info.channel_actions'
                     />
+                    {!isDMorGM && <ChannelInfoAttributes channelId={channelId}/>}
                     <Extra channelId={channelId}/>
                     <View style={styles.separator}/>
                     <Options
                         channelId={channelId}
                         type={type}
-                        callsEnabled={callsAvailable}
+                        callsEnabled={isCallsEnabledInChannel}
                         canManageMembers={canManageMembers}
                         isCRTEnabled={isCRTEnabled}
-                        canManageSettings={canManageSettings}
                         isPlaybooksEnabled={isPlaybooksEnabled}
+                        hasChannelSettingsActions={hasChannelSettingsActions}
+                        isAutotranslationEnabledForThisChannel={isAutotranslationEnabledForThisChannel}
+                        channelDisplayName={channelDisplayName}
                     />
                     <View style={styles.separator}/>
-                    {convertGMOptionAvailable &&
-                    <>
-                        <ConvertToChannelLabel channelId={channelId}/>
-                        <View style={styles.separator}/>
-                    </>
-                    }
-                    {canEnableDisableCalls &&
-                        <>
-                            <ChannelInfoEnableCalls
-                                channelId={channelId}
-                                enabled={isCallsEnabledInChannel}
-                            />
-                            <View style={styles.separator}/>
-                        </>
-                    }
                     <ChannelInfoAppBindings
                         channelId={channelId}
                         serverUrl={serverUrl}
@@ -166,8 +144,6 @@ const ChannelInfo = ({
                     />
                     <DestructiveOptions
                         channelId={channelId}
-                        componentId={componentId}
-                        type={type}
                     />
                 </ScrollView>
             </SafeAreaView>

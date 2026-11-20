@@ -1,8 +1,7 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import {getInfoAsync, deleteAsync} from 'expo-file-system';
-import {Platform} from 'react-native';
+import {Directory, File} from 'expo-file-system';
 import Permissions from 'react-native-permissions';
 
 import {getIntlShape} from '@utils/general';
@@ -10,9 +9,9 @@ import {logError} from '@utils/log';
 import {urlSafeBase64Encode} from '@utils/security';
 
 import {
+    deleteDownloadedFiles,
     deleteFileCache,
     deleteFileCacheByDir,
-    deleteV1Data,
     extractFileInfo,
     fileExists,
     fileMaxWarning,
@@ -25,6 +24,7 @@ import {
     getFileType,
     getFormattedFileSize,
     getLocalFilePathFromFile,
+    getUploadErrorMessage,
     hasWriteStoragePermission,
     isDocument,
     isGif,
@@ -33,9 +33,11 @@ import {
     lookupMimeType,
     pathWithPrefix,
     uploadDisabledWarning,
-} from '.';
+} from './index';
 
-jest.mock('expo-file-system');
+import type {RevokedFile} from '@typings/database/database';
+import type {Asset} from 'react-native-image-picker';
+
 jest.mock('react-native', () => {
     const RN = jest.requireActual('react-native');
     return {
@@ -113,28 +115,33 @@ describe('Image utils', () => {
         });
     });
 
-    describe('deleteV1Data', () => {
-        it('should delete V1 data', async () => {
-            await deleteV1Data();
-            expect(deleteAsync).toHaveBeenCalled();
-            Platform.OS = 'android';
-            await deleteV1Data();
-            expect(deleteAsync).toHaveBeenCalled();
-            Platform.OS = 'ios';
-        });
-    });
-
     describe('deleteFileCache', () => {
-        it('should delete file cache', async () => {
-            await deleteFileCache('http://server.com');
-            expect(deleteAsync).toHaveBeenCalled();
+        it('should delete file cache', () => {
+            deleteFileCache('http://server.com');
+            expect(jest.mocked(Directory).mock.instances.length).toBeGreaterThan(0);
         });
     });
 
     describe('deleteFileCacheByDir', () => {
-        it('should delete file cache by dir', async () => {
-            await deleteFileCacheByDir('someDir');
-            expect(deleteAsync).toHaveBeenCalled();
+        it('should delete file cache by dir', () => {
+            deleteFileCacheByDir('someDir');
+            expect(jest.mocked(Directory).mock.instances.length).toBeGreaterThan(0);
+        });
+    });
+
+    describe('deleteDownloadedFiles', () => {
+        it('should remove both the recorded path and the default download path', () => {
+            // Opening a document downloads it to the default path without recording it on the row.
+            jest.mocked(File).mockClear();
+            const file: RevokedFile = {id: 'fileid', name: 'doc.pdf', extension: 'pdf', mime_type: 'application/pdf', localPath: '/data/my%20doc.pdf'};
+
+            deleteDownloadedFiles('http://server.com', [file]);
+
+            const uris = jest.mocked(File).mock.calls.map(([uri]) => uri);
+            expect(uris).toEqual(['file:///data/my doc.pdf', pathWithPrefix('file://', getLocalFilePathFromFile('http://server.com', file))]);
+            for (const result of jest.mocked(File).mock.results) {
+                expect(result.value.delete).toHaveBeenCalled();
+            }
         });
     });
 
@@ -185,6 +192,11 @@ describe('Image utils', () => {
             expect(isImage({name: 'file.jpg', mimeType: 'image/jpeg'} as unknown as FileInfo)).toBe(true);
             expect(isImage({name: 'file.png', mimeType: 'text/plain'} as unknown as FileInfo)).toBe(false);
             expect(isImage({name: 'file.png', extension: '.png'} as unknown as FileInfo)).toBe(true);
+            expect(isImage({name: 'file.png'} as unknown as FileInfo)).toBe(true);
+        });
+
+        it('should return false for a file with no name and no extension', () => {
+            expect(isImage({mime_type: 'image/jpg', localPath: 'file:///draft.jpg'} as unknown as FileInfo)).toBe(false);
         });
     });
 
@@ -228,10 +240,10 @@ describe('Image utils', () => {
 
     describe('getLocalFilePathFromFile', () => {
         it('should return correct local file path from file', () => {
-            expect(getLocalFilePathFromFile('http://server.com', {id: 'someid', name: 'image.png', extension: 'png'} as unknown as FileInfo)).toBe(`file://test-cache-directory/${urlSafeBase64Encode('http://server.com')}/image-someid.png`);
-            expect(getLocalFilePathFromFile('http://server.com', {id: 'someid', name: 'image.png'} as unknown as FileInfo)).toBe(`file://test-cache-directory/${urlSafeBase64Encode('http://server.com')}/image-someid.png`);
-            expect(getLocalFilePathFromFile('http://server.com', {id: 'someid', extension: 'png'} as unknown as FileInfo)).toBe(`file://test-cache-directory/${urlSafeBase64Encode('http://server.com')}/someid.png`);
-            expect(getLocalFilePathFromFile('http://server.com', {id: 'someid'} as unknown as FileInfo)).toBe(`file://test-cache-directory/${urlSafeBase64Encode('http://server.com')}/someid`);
+            expect(getLocalFilePathFromFile('http://server.com', {id: 'someid', name: 'image.png', extension: 'png'} as unknown as FileInfo)).toBe(`file://test-cache-directory/${urlSafeBase64Encode('http://server.com')}/Files/image-someid.png`);
+            expect(getLocalFilePathFromFile('http://server.com', {id: 'someid', name: 'image.png'} as unknown as FileInfo)).toBe(`file://test-cache-directory/${urlSafeBase64Encode('http://server.com')}/Files/image-someid.png`);
+            expect(getLocalFilePathFromFile('http://server.com', {id: 'someid', extension: 'png'} as unknown as FileInfo)).toBe(`file://test-cache-directory/${urlSafeBase64Encode('http://server.com')}/Files/someid.png`);
+            expect(getLocalFilePathFromFile('http://server.com', {id: 'someid'} as unknown as FileInfo)).toBe(`file://test-cache-directory/${urlSafeBase64Encode('http://server.com')}/Files/someid`);
             expect(() => getLocalFilePathFromFile('http://server.com', {extension: 'png'} as unknown as FileInfo)).toThrow('File path could not be set');
         });
     });
@@ -248,6 +260,17 @@ describe('Image utils', () => {
             expect(result).toEqual(expect.any(Array));
             result = await extractFileInfo([{uri: 'file://somefile', size: 12345, fileName: 'file.png', type: 'image/png'}]);
             expect(result).toEqual(expect.any(Array));
+        });
+
+        it('should read the size from the local file when the asset has no file size', async () => {
+            jest.mocked(File).mockImplementationOnce(() => ({info: () => ({exists: true, size: 999})}) as unknown as File);
+
+            const result = await extractFileInfo([{uri: 'file:///tmp/A1B2C3.jpg', fileName: 'A1B2C3.jpg', type: 'image/jpg'}] as unknown as Asset[]);
+
+            expect(result).toHaveLength(1);
+            expect(result[0].name).toBe('A1B2C3.jpg');
+            expect(result[0].size).toBe(999);
+            expect(logError).not.toHaveBeenCalled();
         });
     });
 
@@ -272,11 +295,32 @@ describe('Image utils', () => {
         });
     });
 
+    describe('getUploadErrorMessage', () => {
+        it('should map iOS network errors to user-friendly message', () => {
+            const msg = getUploadErrorMessage(intl, 'URLSessionTask failed with error: The Internet connection appears to be offline.');
+            expect(msg).toBe("File couldn't be uploaded. Check your connection and try again.");
+        });
+
+        it('should map Android network errors to user-friendly message', () => {
+            const msg = getUploadErrorMessage(intl, 'Network error', 'java.net.UnknownHostException');
+            expect(msg).toBe("File couldn't be uploaded. Check your connection and try again.");
+        });
+
+        it('should explain a refusal by a permission policy instead of showing the server text', () => {
+            const msg = getUploadErrorMessage(intl, 'server text', 'api.file.upload_file.abac_denied.app_error');
+            expect(msg).toBe('File uploads are restricted in this channel');
+        });
+
+        it('should return original message for non-network errors', () => {
+            const originalMessage = 'Some other error occurred';
+            const msg = getUploadErrorMessage(intl, originalMessage);
+            expect(msg).toBe(originalMessage);
+        });
+    });
+
     describe('fileExists', () => {
-        it('should check if file exists', async () => {
-            // @ts-expect-error type def
-            getInfoAsync.mockResolvedValue({exists: true});
-            const exists = await fileExists('somePath');
+        it('should check if file exists', () => {
+            const exists = fileExists('somePath');
             expect(exists).toBe(true);
         });
     });
@@ -291,8 +335,8 @@ describe('Image utils', () => {
     });
 
     describe('getAllFilesInCachesDirectory', () => {
-        it('should get all files in caches directory', async () => {
-            const result = await getAllFilesInCachesDirectory('http://server.com');
+        it('should get all files in caches directory', () => {
+            const result = getAllFilesInCachesDirectory('http://server.com');
             expect(result.files).toEqual(expect.any(Array));
         });
     });

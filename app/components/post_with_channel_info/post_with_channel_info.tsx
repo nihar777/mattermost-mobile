@@ -9,11 +9,13 @@ import Post from '@components/post_list/post';
 import ChannelInfo from './channel_info';
 
 import type PostModel from '@typings/database/models/servers/post';
+import type UserModel from '@typings/database/models/servers/user';
 import type {SearchPattern} from '@typings/global/markdown';
 import type {AvailableScreens} from '@typings/screens/navigation';
 
 type Props = {
     appsEnabled: boolean;
+    currentUser: UserModel;
     customEmojiNames: string[];
     isCRTEnabled: boolean;
     post: PostModel;
@@ -22,6 +24,7 @@ type Props = {
     searchPatterns?: SearchPattern[];
     skipSavedPostsHighlight?: boolean;
     isSaved?: boolean;
+    isChannelAutotranslated: boolean;
 }
 
 const styles = StyleSheet.create({
@@ -35,7 +38,19 @@ const styles = StyleSheet.create({
     },
 });
 
-function PostWithChannelInfo({appsEnabled, customEmojiNames, isCRTEnabled, post, location, testID, searchPatterns, skipSavedPostsHighlight = false, isSaved}: Props) {
+function PostWithChannelInfo({
+    appsEnabled,
+    currentUser,
+    customEmojiNames,
+    isCRTEnabled,
+    post,
+    location,
+    testID,
+    searchPatterns,
+    skipSavedPostsHighlight = false,
+    isSaved,
+    isChannelAutotranslated,
+}: Props) {
     return (
         <View style={styles.container}>
             <ChannelInfo
@@ -45,6 +60,7 @@ function PostWithChannelInfo({appsEnabled, customEmojiNames, isCRTEnabled, post,
             <View style={styles.content}>
                 <Post
                     appsEnabled={appsEnabled}
+                    currentUser={currentUser}
                     customEmojiNames={customEmojiNames}
                     isCRTEnabled={isCRTEnabled}
                     post={post}
@@ -59,6 +75,7 @@ function PostWithChannelInfo({appsEnabled, customEmojiNames, isCRTEnabled, post,
                     nextPost={undefined}
                     testID={`${testID}.post`}
                     isSaved={isSaved}
+                    isChannelAutotranslated={isChannelAutotranslated}
                 />
             </View>
         </View>

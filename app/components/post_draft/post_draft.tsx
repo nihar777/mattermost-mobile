@@ -2,14 +2,13 @@
 // See LICENSE.txt for license information.
 
 import React, {useEffect, useState} from 'react';
-import {Platform} from 'react-native';
+import {useSafeAreaInsets} from 'react-native-safe-area-context';
 
 import Autocomplete from '@components/autocomplete';
-import {ExtraKeyboard} from '@context/extra_keyboard';
 import {useServerUrl} from '@context/server';
 import {useAutocompleteDefaultAnimatedValues} from '@hooks/autocomplete';
-import {useKeyboardHeight} from '@hooks/device';
 import {useDefaultHeaderHeight} from '@hooks/header';
+import {useFetchRenderPermissions} from '@hooks/render_permissions';
 
 import Archived from './archived';
 import DraftHandler from './draft_handler';
@@ -33,6 +32,9 @@ type Props = {
     isChannelScreen: boolean;
     canShowPostPriority?: boolean;
     location: AvailableScreens;
+    onPostCreated?: (postId: string) => void;
+    portalName?: string;
+    writeDenied: boolean;
 }
 
 function PostDraft({
@@ -50,23 +52,33 @@ function PostDraft({
     isChannelScreen,
     canShowPostPriority,
     location,
+    onPostCreated,
+    portalName,
+    writeDenied,
 }: Props) {
     const [value, setValue] = useState(message);
     const [cursorPosition, setCursorPosition] = useState(message.length);
     const [postInputTop, setPostInputTop] = useState(0);
     const [isFocused, setIsFocused] = useState(false);
-    const keyboardHeight = useKeyboardHeight();
-    const kbHeight = Platform.OS === 'ios' ? keyboardHeight : 0; // useKeyboardHeight is already deducting the keyboard height on Android
     const headerHeight = useDefaultHeaderHeight();
     const serverUrl = useServerUrl();
+    const {bottom} = useSafeAreaInsets();
+
+    // Above the read-only return, so a locked composer keeps revalidating and unlocks once the policy
+    // is lifted. No decision can unlock an archived or deactivated channel.
+    useFetchRenderPermissions(channelIsArchived || deactivatedChannel ? undefined : channelId);
 
     // Update draft in case we switch channels or threads
     useEffect(() => {
         setValue(message);
         setCursorPosition(message.length);
+
+        // message is intentionally excluded — including it would reset the input on every parent re-render,
+        // overwriting what the user is currently typing. We only want to reset when switching channels/threads.
+        //eslint-disable-next-line react-hooks/exhaustive-deps
     }, [channelId, rootId]);
 
-    const autocompletePosition = AUTOCOMPLETE_ADJUST + kbHeight + postInputTop;
+    const autocompletePosition = (postInputTop - bottom) + AUTOCOMPLETE_ADJUST;
     const autocompleteAvailableSpace = containerHeight - autocompletePosition - (isChannelScreen ? headerHeight : 0);
     const [animatedAutocompletePosition, animatedAutocompleteAvailableSpace] = useAutocompleteDefaultAnimatedValues(autocompletePosition, autocompleteAvailableSpace);
 
@@ -88,6 +100,7 @@ function PostDraft({
         return (
             <ReadOnly
                 testID={readOnlyTestID}
+                writeDenied={writeDenied}
             />
         );
     }
@@ -105,6 +118,8 @@ function PostDraft({
             updateValue={setValue}
             value={value}
             setIsFocused={setIsFocused}
+            onPostCreated={onPostCreated}
+            location={location}
         />
     );
 
@@ -120,6 +135,8 @@ function PostDraft({
             shouldDirectlyReact={!Boolean(files?.length)}
             availableSpace={animatedAutocompleteAvailableSpace}
             serverUrl={serverUrl}
+            usePortal={true}
+            portalName={portalName}
         />
     ) : null;
 
@@ -127,7 +144,6 @@ function PostDraft({
         <>
             {draftHandler}
             {autoComplete}
-            {Platform.OS !== 'android' && <ExtraKeyboard/>}
         </>
     );
 }

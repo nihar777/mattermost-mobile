@@ -3,11 +3,15 @@
 
 import React, {type ComponentProps} from 'react';
 
+import {fetchCustomProfileAttributes} from '@actions/remote/custom_profile';
+import {useNavigationHeaderCallButtonForDM} from '@calls/hooks';
+import {getCallsConfig} from '@calls/state';
+import {DefaultCallsConfig} from '@calls/types/calls';
 import NavigationHeader from '@components/navigation_header';
 import {General} from '@constants';
 import {useServerUrl} from '@context/server';
 import {fetchPlaybookRunsForChannel} from '@playbooks/actions/remote/runs';
-import {goToPlaybookRun, goToPlaybookRuns} from '@playbooks/screens/navigation';
+import {goToCreateQuickChecklist, goToPlaybookRun, goToPlaybookRuns} from '@playbooks/screens/navigation';
 import EphemeralStore from '@store/ephemeral_store';
 import {renderWithIntl, waitFor} from '@test/intl-test-helper';
 
@@ -19,6 +23,7 @@ jest.mock('@components/navigation_header', () => ({
 }));
 jest.mocked(NavigationHeader).mockImplementation((props) => React.createElement('NavigationHeader', {testID: 'navigation-header', ...props}));
 
+jest.mock('@actions/remote/custom_profile');
 jest.mock('@screens/navigation');
 jest.mock('@playbooks/screens/navigation');
 jest.mock('@playbooks/actions/remote/runs');
@@ -29,6 +34,11 @@ jest.mock('@calls/state', () => ({
     }),
 }));
 
+jest.mock('@calls/hooks', () => ({
+    useNavigationHeaderCallButtonForDM: jest.fn(),
+}));
+const navigationHeaderCallButton = {id: 'calls', iconName: 'phone' as const, onPress: jest.fn(), testID: 'channel_header.quick_call.button'};
+
 const serverUrl = 'some.server.url';
 jest.mock('@context/server');
 jest.mocked(useServerUrl).mockReturnValue(serverUrl);
@@ -38,6 +48,7 @@ describe('ChannelHeader', () => {
         return {
             channelId: 'channel-id',
             channelType: 'O',
+            currentUserId: 'current-user-id',
             displayName: 'Test Channel',
             teamId: 'team-id',
             hasPlaybookRuns: false,
@@ -46,6 +57,7 @@ describe('ChannelHeader', () => {
             groupCallsAllowed: false,
             isBookmarksEnabled: false,
             canAddBookmarks: false,
+            canCallDMUser: true,
             hasBookmarks: false,
             shouldRenderBookmarks: false,
             isCustomStatusEnabled: false,
@@ -53,24 +65,156 @@ describe('ChannelHeader', () => {
             isOwnDirectMessage: false,
             shouldRenderChannelBanner: false,
             isPlaybooksEnabled: true,
+            isChannelAutotranslated: false,
+            channelAttributes: [],
+            dmUserPhones: [],
         };
     }
 
     beforeEach(() => {
         jest.clearAllMocks();
+        jest.mocked(getCallsConfig).mockReturnValue({...DefaultCallsConfig, pluginEnabled: false});
+        jest.mocked(useNavigationHeaderCallButtonForDM).mockReturnValue(navigationHeaderCallButton);
     });
 
-    it('does not show playbook button when there are no active runs', () => {
+    function enableCalls(props: ComponentProps<typeof ChannelHeader>) {
+        jest.mocked(getCallsConfig).mockReturnValue({...DefaultCallsConfig, pluginEnabled: true});
+        props.callsEnabledInChannel = true;
+        props.groupCallsAllowed = true;
+    }
+
+    function getRightButtons(navHeader: {props: unknown}) {
+        return (navHeader.props as ComponentProps<typeof NavigationHeader>).rightButtons;
+    }
+
+    function getQuickCallButton(navHeader: {props: unknown}) {
+        return getRightButtons(navHeader)?.find((button) => button.testID === navigationHeaderCallButton.testID);
+    }
+
+    it('should show the quick call button in a DM when calls are available', () => {
+        const props = getBaseProps();
+        props.channelType = General.DM_CHANNEL;
+        enableCalls(props);
+
+        const {getByTestId} = renderWithIntl(<ChannelHeader {...props}/>);
+
+        expect(getQuickCallButton(getByTestId('navigation-header'))).toBeTruthy();
+        expect(useNavigationHeaderCallButtonForDM).toHaveBeenCalledWith('channel-id', General.DM_CHANNEL, undefined, []);
+        expect(fetchCustomProfileAttributes).not.toHaveBeenCalled();
+    });
+
+    it('should fetch the DM user\'s profile attributes when phone dialing is enabled', () => {
+        const props = getBaseProps();
+        props.channelType = General.DM_CHANNEL;
+        props.dmPhoneUserId = 'dm-user-id';
+        enableCalls(props);
+        jest.mocked(getCallsConfig).mockReturnValue({...DefaultCallsConfig, pluginEnabled: true, EnableSIPOutbound: true});
+        jest.mocked(fetchCustomProfileAttributes).mockResolvedValue({attributes: {}, error: undefined});
+
+        renderWithIntl(<ChannelHeader {...props}/>);
+
+        expect(fetchCustomProfileAttributes).toHaveBeenCalledWith(serverUrl, 'dm-user-id', true);
+    });
+
+    it('should refetch the DM user\'s profile attributes on the next mount when the previous fetch failed', async () => {
+        const props = getBaseProps();
+        props.channelType = General.DM_CHANNEL;
+        props.dmPhoneUserId = 'offline-user-id';
+        enableCalls(props);
+        jest.mocked(getCallsConfig).mockReturnValue({...DefaultCallsConfig, pluginEnabled: true, EnableSIPOutbound: true});
+        jest.mocked(fetchCustomProfileAttributes).mockResolvedValue({attributes: {}, error: new Error('offline')});
+
+        const {unmount} = renderWithIntl(<ChannelHeader {...props}/>);
+        await waitFor(() => expect(fetchCustomProfileAttributes).toHaveBeenCalledTimes(1));
+        unmount();
+        renderWithIntl(<ChannelHeader {...props}/>);
+
+        expect(fetchCustomProfileAttributes).toHaveBeenCalledTimes(2);
+    });
+
+    it('should not show the quick call button when calls are disabled in the DM', () => {
+        const props = getBaseProps();
+        props.channelType = General.DM_CHANNEL;
+        enableCalls(props);
+        props.callsEnabledInChannel = false;
+
+        const {getByTestId} = renderWithIntl(<ChannelHeader {...props}/>);
+
+        expect(getQuickCallButton(getByTestId('navigation-header'))).toBeUndefined();
+    });
+
+    it('should not show the quick call button when the DM user cannot be called', () => {
+        const props = getBaseProps();
+        props.channelType = General.DM_CHANNEL;
+        enableCalls(props);
+        props.canCallDMUser = false;
+
+        const {getByTestId} = renderWithIntl(<ChannelHeader {...props}/>);
+
+        expect(getQuickCallButton(getByTestId('navigation-header'))).toBeUndefined();
+    });
+
+    it('should not show the quick call button when the calls plugin is disabled', () => {
+        const props = getBaseProps();
+        props.channelType = General.DM_CHANNEL;
+        enableCalls(props);
+        jest.mocked(getCallsConfig).mockReturnValue({...DefaultCallsConfig, pluginEnabled: false});
+
+        const {getByTestId} = renderWithIntl(<ChannelHeader {...props}/>);
+
+        expect(getQuickCallButton(getByTestId('navigation-header'))).toBeUndefined();
+    });
+
+    it('should not show the quick call button outside of DMs', () => {
+        const props = getBaseProps();
+        enableCalls(props);
+
+        props.channelType = General.GM_CHANNEL;
+        const {getByTestId, rerender} = renderWithIntl(<ChannelHeader {...props}/>);
+        const navHeader = getByTestId('navigation-header');
+        expect(getQuickCallButton(navHeader)).toBeUndefined();
+
+        props.channelType = General.OPEN_CHANNEL;
+        rerender(<ChannelHeader {...props}/>);
+        expect(getQuickCallButton(navHeader)).toBeUndefined();
+    });
+
+    it('should not show the quick call button when the calls hook returns no button', () => {
+        const props = getBaseProps();
+        props.channelType = General.DM_CHANNEL;
+        enableCalls(props);
+        jest.mocked(useNavigationHeaderCallButtonForDM).mockReturnValue(undefined);
+
+        const {getByTestId} = renderWithIntl(<ChannelHeader {...props}/>);
+
+        expect(getQuickCallButton(getByTestId('navigation-header'))).toBeUndefined();
+    });
+
+    it('should place the quick call button before the overflow menu', () => {
+        const props = getBaseProps();
+        props.channelType = General.DM_CHANNEL;
+        enableCalls(props);
+
+        const {getByTestId} = renderWithIntl(<ChannelHeader {...props}/>);
+
+        const rightButtons = (getByTestId('navigation-header').props as ComponentProps<typeof NavigationHeader>).rightButtons;
+        expect(rightButtons?.map((button) => button.iconName)).toEqual(['phone', 'dots-horizontal']);
+    });
+
+    it('shows playbook button with "+" when there are no active runs', () => {
         const props = getBaseProps();
         props.hasPlaybookRuns = false;
         props.playbooksActiveRuns = 0;
-        renderWithIntl(<ChannelHeader {...props}/>);
+        props.isPlaybooksEnabled = true;
 
-        const navHeader = jest.mocked(NavigationHeader).mock.calls[0][0];
-        expect(navHeader.rightButtons).toEqual(
+        const {getByTestId} = renderWithIntl(<ChannelHeader {...props}/>);
+
+        const navHeader = getByTestId('navigation-header');
+        expect(navHeader.props.rightButtons).toEqual(
             expect.arrayContaining([
-                expect.not.objectContaining({
+                expect.objectContaining({
                     iconName: 'product-playbooks',
+                    count: '+',
                 }),
             ]),
         );
@@ -146,7 +290,7 @@ describe('ChannelHeader', () => {
         expect(playbookButton).toBeTruthy();
 
         playbookButton?.onPress();
-        expect(goToPlaybookRun).toHaveBeenCalledWith(expect.anything(), 'run-id');
+        expect(goToPlaybookRun).toHaveBeenCalledWith('run-id');
         expect(goToPlaybookRuns).not.toHaveBeenCalled();
     });
 
@@ -164,8 +308,33 @@ describe('ChannelHeader', () => {
         expect(playbookButton).toBeTruthy();
 
         playbookButton?.onPress();
-        expect(goToPlaybookRuns).toHaveBeenCalledWith(expect.anything(), 'channel-id', 'Test Channel');
+        expect(goToPlaybookRuns).toHaveBeenCalledWith('channel-id', 'Test Channel');
         expect(goToPlaybookRun).not.toHaveBeenCalled();
+    });
+
+    it('navigates to create quick checklist screen when clicking + button with no active runs', () => {
+        const props = getBaseProps();
+        props.playbooksActiveRuns = 0;
+        props.hasPlaybookRuns = false;
+        props.displayName = 'Test Channel';
+
+        const {getByTestId} = renderWithIntl(<ChannelHeader {...props}/>);
+
+        const navHeader = getByTestId('navigation-header');
+        const playbookButton = (navHeader.props as ComponentProps<typeof NavigationHeader>).rightButtons?.find((button) => button.iconName === 'product-playbooks');
+        expect(playbookButton).toBeTruthy();
+        expect(playbookButton?.count).toBe('+');
+
+        playbookButton?.onPress();
+
+        expect(goToCreateQuickChecklist).toHaveBeenCalledWith(
+            'channel-id',
+            'Test Channel',
+            'current-user-id',
+            'team-id',
+        );
+        expect(goToPlaybookRun).not.toHaveBeenCalled();
+        expect(goToPlaybookRuns).not.toHaveBeenCalled();
     });
 
     it('should not fetch runs when playbooks are disabled', async () => {

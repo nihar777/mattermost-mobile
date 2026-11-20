@@ -3,18 +3,19 @@
 
 import {useManagedConfig} from '@mattermost/react-native-emm';
 import Clipboard from '@react-native-clipboard/clipboard';
-import React, {useCallback, useEffect, useMemo} from 'react';
+import React, {useCallback, useMemo} from 'react';
 import {useIntl} from 'react-intl';
 import {type GestureResponderEvent, type StyleProp, StyleSheet, Text, type TextStyle, View} from 'react-native';
 
 import {fetchUserOrGroupsByMentionsInBatch} from '@actions/remote/user';
 import SlideUpPanelItem, {ITEM_HEIGHT} from '@components/slide_up_panel_item';
 import {useServerUrl} from '@context/server';
-import {useTheme} from '@context/theme';
 import GroupModel from '@database/models/server/group';
+import useDidMount from '@hooks/did_mount';
 import {useMemoMentionedGroup, useMemoMentionedUser} from '@hooks/markdown';
-import {bottomSheet, dismissBottomSheet, openUserProfileModal} from '@screens/navigation';
+import {bottomSheet, dismissBottomSheet} from '@screens/navigation';
 import {bottomSheetSnapPoint} from '@utils/helpers';
+import {openUserProfile} from '@utils/navigation';
 import {displayUsername} from '@utils/user';
 
 import type GroupMembershipModel from '@typings/database/models/servers/group_membership';
@@ -30,12 +31,12 @@ type AtMentionProps = {
     mentionKeys?: Array<{key: string }>;
     mentionName: string;
     mentionStyle: StyleProp<TextStyle>;
-    onPostPress?: (e: GestureResponderEvent) => void;
     teammateNameDisplay: string;
     textStyle?: StyleProp<TextStyle>;
     users: UserModelType[];
     groups: GroupModel[];
     groupMemberships: GroupMembershipModel[];
+    theme: Theme;
 }
 
 const style = StyleSheet.create({
@@ -51,16 +52,15 @@ const AtMention = ({
     mentionName,
     mentionKeys,
     mentionStyle,
-    onPostPress,
     teammateNameDisplay,
     textStyle,
     users,
     groups,
     groupMemberships,
+    theme,
 }: AtMentionProps) => {
     const intl = useIntl();
     const managedConfig = useManagedConfig<ManagedConfig>();
-    const theme = useTheme();
     const serverUrl = useServerUrl();
 
     const user = useMemoMentionedUser(users, mentionName);
@@ -83,19 +83,19 @@ const AtMention = ({
     const group = useMemoMentionedGroup(groups, user, mentionName);
 
     // Effects
-    useEffect(() => {
+    useDidMount(() => {
         // Fetches and updates the local db store with the mention
         if (!user?.username && !group?.name) {
             fetchUserOrGroupsByMentionsInBatch(serverUrl, mentionName);
         }
-    }, []);
+    });
 
-    const openUserProfile = () => {
+    const openProfile = () => {
         if (!user) {
             return;
         }
 
-        openUserProfileModal(intl, theme, {
+        openUserProfile({
             location,
             userId: user.id,
             channelId,
@@ -137,15 +137,9 @@ const AtMention = ({
                 );
             };
 
-            bottomSheet({
-                closeButtonId: 'close-at-mention',
-                renderContent,
-                snapPoints: [1, bottomSheetSnapPoint(2, ITEM_HEIGHT)],
-                title: intl.formatMessage({id: 'post.options.title', defaultMessage: 'Options'}),
-                theme,
-            });
+            bottomSheet(renderContent, [1, bottomSheetSnapPoint(2, ITEM_HEIGHT)]);
         }
-    }, [managedConfig?.copyAndPasteProtection, intl, theme, mentionName, user?.username]);
+    }, [managedConfig?.copyAndPasteProtection, intl, mentionName, user?.username]);
 
     const mentionTextStyle: StyleProp<TextStyle> = [];
 
@@ -192,7 +186,7 @@ const AtMention = ({
 
     if (canPress) {
         onLongPress = handleLongPress;
-        onPress = (isSearchResult ? onPostPress : openUserProfile);
+        onPress = (isSearchResult ? undefined : openProfile);
     }
 
     if (suffix) {

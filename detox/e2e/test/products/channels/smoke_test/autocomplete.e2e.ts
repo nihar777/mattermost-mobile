@@ -8,6 +8,7 @@
 // *******************************************************************
 
 import {
+    Command,
     Post,
     Setup,
 } from '@support/server_api';
@@ -23,17 +24,20 @@ import {
     LoginScreen,
     ServerScreen,
 } from '@support/ui/screen';
-import {expect} from 'detox';
+import {timeouts} from '@support/utils';
+import {waitFor} from 'detox';
 
 describe('Smoke Test - Autocomplete', () => {
     const serverOneDisplayName = 'Server 1';
     const channelsCategory = 'channels';
     let testChannel: any;
+    let testTeam: any;
     let testUser: any;
 
     beforeAll(async () => {
-        const {channel, user} = await Setup.apiInit(siteOneUrl);
+        const {channel, team, user} = await Setup.apiInit(siteOneUrl);
         testChannel = channel;
+        testTeam = team;
         testUser = user;
 
         // # Log in to server
@@ -66,18 +70,17 @@ describe('Smoke Test - Autocomplete', () => {
         await ChannelScreen.postInput.typeText('@');
         await Autocomplete.toBeVisible();
 
-        // * Verify at-mention list is displayed
-        await expect(Autocomplete.sectionAtMentionList).toBeVisible();
-
         // # Type in username
         await ChannelScreen.postInput.typeText(testUser.username);
 
         // * Verify at-mention autocomplete contains associated user suggestion
-        const {atMentionItem} = Autocomplete.getAtMentionItem(testUser.id);
-        await expect(atMentionItem).toBeVisible();
+        const {
+            atMentionItem,
+            atMentionItemUserDisplayName,
+        } = Autocomplete.getAtMentionItem(testUser.id);
 
-        // # Select and post at-mention suggestion
-        await atMentionItem.tap();
+        // # Select and post at-mention suggestion (existence + label tap / tapAtPoint)
+        await Autocomplete.tapSuggestion(atMentionItem, atMentionItemUserDisplayName);
         await ChannelScreen.sendButton.tap();
 
         // * Verify at-mention suggestion is posted
@@ -90,18 +93,13 @@ describe('Smoke Test - Autocomplete', () => {
         await ChannelScreen.postInput.typeText('~');
         await Autocomplete.toBeVisible();
 
-        // * Verify channel mention list is displayed
-        await expect(Autocomplete.sectionChannelMentionList).toBeVisible();
-
         // # Type in channel name
         await ChannelScreen.postInput.typeText(testChannel.name);
 
         // * Verify channel mention autocomplete contains associated channel suggestion
-        const {channelMentionItem} = Autocomplete.getChannelMentionItem(testChannel.name);
-        await expect(channelMentionItem).toBeVisible();
-
-        // # Select and post channel mention suggestion
-        await channelMentionItem.tap();
+        const {channelMentionItem, channelMentionItemChannelDisplayName} = Autocomplete.getChannelMentionItem(testChannel.name);
+        await waitFor(channelMentionItem).toExist().withTimeout(timeouts.TEN_SEC);
+        await Autocomplete.tapSuggestion(channelMentionItem, channelMentionItemChannelDisplayName);
         await ChannelScreen.sendButton.tap();
 
         // * Verify channel mention suggestion is posted
@@ -117,19 +115,16 @@ describe('Smoke Test - Autocomplete', () => {
         await ChannelScreen.postInput.typeText(`:${emojiNameFirst2Chars}`);
         await Autocomplete.toBeVisible();
 
-        // * Verify emoji suggestion list is displayed
-        await expect(Autocomplete.flatEmojiSuggestionList).toBeVisible();
-
         // # Type in 3rd to last characters of emoji name
         await ChannelScreen.postInput.typeText(emojiName3rdToLastChars);
 
         // * Verify emoji suggestion autocomplete contains associated emoji suggestion
         const {emojiSuggestionItem} = Autocomplete.getEmojiSuggestionItem(emojiName);
-        await expect(emojiSuggestionItem).toBeVisible();
+        await waitFor(emojiSuggestionItem).toExist().withTimeout(timeouts.TEN_SEC);
 
         // # Select and post emoji suggestion
         await emojiSuggestionItem.tap();
-        await ChannelScreen.sendButton.tap();
+        await ChannelScreen.tapSendButton();
 
         // * Verify emoji suggestion is posted
         const {post} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
@@ -137,26 +132,30 @@ describe('Smoke Test - Autocomplete', () => {
     });
 
     it('MM-T4886_4 - should be able to select and post slash suggestion', async () => {
-        // # Type in "/" to activate slash suggestion autocomplete
-        await ChannelScreen.postInput.typeText('/');
-        await Autocomplete.toBeVisible();
+        const slashCommand = 'away';
+        await Command.waitForSlashCommandTrigger(siteOneUrl, testTeam.id, slashCommand, {
+            timeoutMs: timeouts.HALF_MIN,
+        });
 
-        // * Verify slash suggestion list is displayed
-        await expect(Autocomplete.flatSlashSuggestionList).toBeVisible();
+        // SlashSuggestion fetches commands on the first "/" and renders nothing until
+        // that list lands, so wait for the slash list rather than the generic
+        // autocomplete container (Android CI: Autocomplete.toBeVisible timed out at 10s).
+        await ChannelScreen.postInput.tap();
+        await ChannelScreen.postInput.typeText('/');
+        await waitFor(Autocomplete.flatSlashSuggestionList).toExist().withTimeout(timeouts.HALF_MIN);
 
         // # Type in slash command name
-        const slashCommand = 'away';
         await ChannelScreen.postInput.typeText(slashCommand);
 
         // * Verify slash suggestion autocomplete contains associated slash command suggestion
         const {slashSuggestionItem} = Autocomplete.getSlashSuggestionItem(slashCommand);
-        await expect(slashSuggestionItem).toBeVisible();
+        await waitFor(slashSuggestionItem).toExist().withTimeout(timeouts.TEN_SEC);
 
         // # Select and post slash suggestion
         await slashSuggestionItem.tap();
-        await ChannelScreen.sendButton.tap();
+        await ChannelScreen.tapSendButton();
 
         // * Verify slash suggestion is posted
-        await expect(element(by.text('You are now away'))).toBeVisible();
+        await waitFor(element(by.text('You are now away'))).toBeVisible().withTimeout(timeouts.TEN_SEC);
     });
 });

@@ -5,6 +5,7 @@ import RNUtils, {type SplitViewResult} from '@mattermost/rnutils';
 import moment, {type Moment} from 'moment-timezone';
 import {Platform} from 'react-native';
 
+import License from '@constants/license';
 import {STATUS_BAR_HEIGHT} from '@constants/view';
 
 // isMinimumServerVersion will return true if currentVersion is equal to higher or than
@@ -50,6 +51,33 @@ export const isMinimumServerVersion = (currentVersion = '', minMajorVersion = 0,
     return true;
 };
 
+export type LicenseTierSku = keyof typeof License.LicenseSkuTier;
+
+// isMinimumLicenseTier will return true if the license meets or exceeds the target SKU tier
+// license is a ClientLicense object
+// targetSku is a string, e.g 'professional', 'enterprise', 'advanced'
+export const isMinimumLicenseTier = (license: Partial<ClientLicense> | undefined, targetSku: LicenseTierSku): boolean => {
+    if (!targetSku || !license) {
+        return false;
+    }
+
+    const isLicensed = license.IsLicensed === 'true';
+    if (!isLicensed) {
+        return false;
+    }
+
+    // Only use SkuShortName if it's a valid SKU
+    const sku = license.SkuShortName as LicenseTierSku;
+    if (!sku || !(sku in License.LicenseSkuTier)) {
+        return false;
+    }
+
+    const currentTier = License.LicenseSkuTier[sku];
+    const targetTier = License.LicenseSkuTier[targetSku];
+
+    return Boolean(currentTier) && Boolean(targetTier) && currentTier >= targetTier;
+};
+
 export function buildQueryString(parameters: Dictionary<any>): string {
     const keys = Object.keys(parameters);
     if (keys.length === 0) {
@@ -91,6 +119,10 @@ export function isEmail(email: string): boolean {
 
 export function identity<T>(arg: T): T {
     return arg;
+}
+
+export function safeArrayCast<T>(data: unknown): T[] {
+    return Array.isArray(data) ? data : [];
 }
 
 export function safeParseJSON(rawJson: string | Record<string, unknown> | unknown[]) {

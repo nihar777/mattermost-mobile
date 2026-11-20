@@ -1,16 +1,28 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import {useCallback, useEffect} from 'react';
+import {useCallback} from 'react';
 import {
-    Easing, runOnJS, useAnimatedRef, useAnimatedStyle,
+    Easing, useAnimatedRef, useAnimatedStyle,
     useSharedValue,
     withTiming, type WithTimingConfig,
 } from 'react-native-reanimated';
+import {scheduleOnRN} from 'react-native-worklets';
 
 import {useGallery} from '@context/gallery';
 
-export function diff(context: any, name: string, value: any) {
+import useDidMount from './did_mount';
+
+interface DiffEntry {
+    stash: number;
+    prev: number | null;
+}
+
+export interface DiffContext {
+    ___diffs?: Record<string, DiffEntry>;
+}
+
+export function diff(context: DiffContext, name: string, value: number) {
     'worklet';
 
     if (!context.___diffs) {
@@ -37,7 +49,7 @@ export const translateYConfig: WithTimingConfig = {
     easing: Easing.bezier(0.33, 0.01, 0, 1),
 };
 
-export function useGalleryControls() {
+export function useGalleryControls(bottomInset = 0) {
     const headerAndFooterHidden = useSharedValue(false);
 
     const headerStyles = useAnimatedStyle(() => ({
@@ -54,6 +66,7 @@ export function useGalleryControls() {
     }));
 
     const footerStyles = useAnimatedStyle(() => ({
+        backgroundColor: '#000',
         opacity: headerAndFooterHidden.value ? withTiming(0) : withTiming(1),
         transform: [
             {
@@ -61,10 +74,10 @@ export function useGalleryControls() {
             },
         ],
         position: 'absolute',
-        bottom: 0,
+        bottom: bottomInset,
         width: '100%',
         zIndex: 1,
-    }));
+    }), [bottomInset]);
 
     const hideHeaderAndFooter = useCallback((hidden?: boolean) => {
         'worklet';
@@ -80,7 +93,7 @@ export function useGalleryControls() {
         }
 
         headerAndFooterHidden.value = hidden;
-    }, []);
+    }, [headerAndFooterHidden]);
 
     return {
         headerAndFooterHidden,
@@ -105,16 +118,16 @@ export function useGalleryItem(
         };
     }, []);
 
-    useEffect(() => {
+    useDidMount(() => {
         gallery.registerItem(index, ref);
-    }, []);
+    });
 
     const onGestureEvent = () => {
         'worklet';
 
         activeIndex.value = index;
 
-        runOnJS(onPress)(identifier, index);
+        scheduleOnRN(onPress, identifier, index);
     };
 
     return {

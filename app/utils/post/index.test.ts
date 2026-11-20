@@ -14,9 +14,11 @@ import {toMilliseconds} from '@utils/datetime';
 
 import {
     areConsecutivePosts,
+    hasAiGeneratedMetadata,
     isFromWebhook,
     isEdited,
     isPostEphemeral,
+    restoreEphemeralIdentityFieldsForEdit,
     isPostFailed,
     isPostPendingOrFailed,
     isSystemMessage,
@@ -29,7 +31,11 @@ import {
     hasSpecialMentions,
     persistentNotificationsConfirmation,
     scheduledPostFromPost,
-} from '.';
+    hasInteractivePostContent,
+    isPermalinkEmbedRedacted,
+    getPermalinkRedactedFileCount,
+    isAttachmentDecisionCurrent,
+} from './index';
 
 jest.mock('@actions/local/post', () => ({
     getUsersCountFromMentions: jest.fn(),
@@ -46,6 +52,34 @@ jest.mock('@database/manager', () => ({
 }));
 
 describe('post utils', () => {
+    describe('hasAiGeneratedMetadata', () => {
+        it('should return true when both ai_generated_by and ai_generated_by_username are non-empty strings', () => {
+            const post = TestHelper.fakePostModel({
+                props: {
+                    ai_generated_by: 'bot-user-id',
+                    ai_generated_by_username: 'ai-bot',
+                },
+            });
+
+            expect(hasAiGeneratedMetadata(post)).toBe(true);
+        });
+
+        it('should return false when metadata is missing or invalid', () => {
+            expect(hasAiGeneratedMetadata(TestHelper.fakePostModel({
+                props: {ai_generated_by_username: 'ai-bot'},
+            }))).toBe(false);
+            expect(hasAiGeneratedMetadata(TestHelper.fakePostModel({
+                props: {ai_generated_by: 'bot-user-id'},
+            }))).toBe(false);
+            expect(hasAiGeneratedMetadata(TestHelper.fakePostModel({
+                props: {ai_generated_by: '', ai_generated_by_username: ''},
+            }))).toBe(false);
+            expect(hasAiGeneratedMetadata(TestHelper.fakePostModel({
+                props: {ai_generated_by: 123, ai_generated_by_username: true},
+            }))).toBe(false);
+        });
+    });
+
     describe('areConsecutivePosts', () => {
         it('should return true for consecutive posts from the same user within the collapse timeout', () => {
             const post = TestHelper.fakePostModel({
@@ -59,7 +93,7 @@ describe('post utils', () => {
                 props: {},
             });
 
-            const result = areConsecutivePosts(post, previousPost);
+            const result = areConsecutivePosts(post, previousPost, 'en');
             expect(result).toBe(true);
         });
 
@@ -75,7 +109,26 @@ describe('post utils', () => {
                 props: {},
             });
 
-            const result = areConsecutivePosts(post, previousPost);
+            const result = areConsecutivePosts(post, previousPost, 'en');
+            expect(result).toBe(false);
+        });
+
+        it('should return false for normal post after AI post from same user', () => {
+            const post = TestHelper.fakePostModel({
+                userId: 'user1',
+                createAt: 1000,
+                props: {},
+            });
+            const previousPost = TestHelper.fakePostModel({
+                userId: 'user1',
+                createAt: 500,
+                props: {
+                    ai_generated_by: 'user1',
+                    ai_generated_by_username: 'ai-bot',
+                },
+            });
+
+            const result = areConsecutivePosts(post, previousPost, 'en');
             expect(result).toBe(false);
         });
     });
@@ -141,6 +194,50 @@ describe('post utils', () => {
 
             const result = isPostEphemeral(post);
             expect(result).toBe(false);
+        });
+    });
+
+    describe('restoreEphemeralIdentityFieldsForEdit', () => {
+        it('should preserve create_at and root_id when an edited ephemeral arrives with zero create_at', () => {
+            const incoming = TestHelper.fakePost({
+                id: 'eph1',
+                type: Post.POST_TYPES.EPHEMERAL,
+                message: 'after',
+                create_at: 0,
+                update_at: 9000,
+                root_id: '',
+                user_id: 'user1',
+            });
+
+            const result = restoreEphemeralIdentityFieldsForEdit(incoming, {
+                create_at: 5000,
+                root_id: 'root1',
+                user_id: 'user1',
+            });
+
+            expect(result.create_at).toBe(5000);
+            expect(result.root_id).toBe('root1');
+            expect(result.message).toBe('after');
+            expect(result.update_at).toBe(9000);
+        });
+
+        it('should preserve user_id when an edited ephemeral arrives with empty user_id', () => {
+            const incoming = TestHelper.fakePost({
+                id: 'eph1',
+                type: Post.POST_TYPES.EPHEMERAL,
+                message: 'after',
+                create_at: 5000,
+                update_at: 9000,
+                user_id: '',
+            });
+
+            const result = restoreEphemeralIdentityFieldsForEdit(incoming, {
+                create_at: 5000,
+                user_id: 'creator1',
+            });
+
+            expect(result.user_id).toBe('creator1');
+            expect(result.message).toBe('after');
         });
     });
 
@@ -548,6 +645,100 @@ describe('post utils', () => {
         });
     });
 
+    describe('hasInteractivePostContent', () => {
+        it('should return false when mmBlocksEnabled is false', () => {
+            const post = TestHelper.fakePostModel({
+                props: {
+                    mm_blocks: [{type: 'text', text: {type: 'plain_text', text: 'Hello'}}],
+                },
+            });
+
+            expect(hasInteractivePostContent(post, false)).toBe(false);
+        });
+
+        it('should return false when mmBlocksEnabled is true but props are missing', () => {
+            const post = TestHelper.fakePostModel({props: undefined});
+
+            expect(hasInteractivePostContent(post, true)).toBe(false);
+        });
+
+        it('should return false when all interactive arrays are empty', () => {
+            const post = TestHelper.fakePostModel({
+                props: {
+                    mm_blocks: [],
+                    blocks: [],
+                    cards: [],
+                    attachments: [],
+                },
+            });
+
+            expect(hasInteractivePostContent(post, true)).toBe(false);
+        });
+
+        it('should return false when interactive props are not arrays', () => {
+            const post = TestHelper.fakePostModel({
+                props: {
+                    mm_blocks: 'invalid',
+                    blocks: {},
+                    cards: null,
+                    attachments: 'invalid',
+                },
+            });
+
+            expect(hasInteractivePostContent(post, true)).toBe(false);
+        });
+
+        it('should return true when mm_blocks are present', () => {
+            const post = TestHelper.fakePostModel({
+                props: {
+                    mm_blocks: [{type: 'text', text: {type: 'plain_text', text: 'Hello'}}],
+                },
+            });
+
+            expect(hasInteractivePostContent(post, true)).toBe(true);
+        });
+
+        it('should return true when blocks are present', () => {
+            const post = TestHelper.fakePostModel({
+                props: {
+                    blocks: [{type: 'section', text: {type: 'mrkdwn', text: 'Block content'}}],
+                },
+            });
+
+            expect(hasInteractivePostContent(post, true)).toBe(true);
+        });
+
+        it('should return true when cards are present', () => {
+            const post = TestHelper.fakePostModel({
+                props: {
+                    cards: [{header: {title: 'Card title'}, sections: []}],
+                },
+            });
+
+            expect(hasInteractivePostContent(post, true)).toBe(true);
+        });
+
+        it('should return true when attachments are present', () => {
+            const post = TestHelper.fakePostModel({
+                props: {
+                    attachments: [{text: 'Attachment body'}],
+                },
+            });
+
+            expect(hasInteractivePostContent(post, true)).toBe(true);
+        });
+
+        it('should work with Post objects', () => {
+            const post = TestHelper.fakePost({
+                props: {
+                    attachments: [{text: 'Attachment body'}],
+                },
+            });
+
+            expect(hasInteractivePostContent(post, true)).toBe(true);
+        });
+    });
+
     describe('scheduledPostFromPost', () => {
         const post: Post = mockedPosts.posts[mockedPosts.order[0]];
 
@@ -584,6 +775,17 @@ describe('post utils', () => {
             expect(result.metadata?.files).toEqual(postFiles);
         });
 
+        it('should carry the recurrence through, since the post being scheduled has none', () => {
+            const result: ScheduledPost = scheduledPostFromPost(post, {
+                ...schedulingInfo,
+                repeat_type: 'weekly',
+                repeat_timezone: 'America/New_York',
+            });
+
+            expect(result.repeat_type).toBe('weekly');
+            expect(result.repeat_timezone).toBe('America/New_York');
+        });
+
         it('should return a scheduled post with the same properties as the original post', () => {
             const result: ScheduledPost = scheduledPostFromPost(post, schedulingInfo);
             expect(result.id).toBe(post.id);
@@ -592,6 +794,57 @@ describe('post utils', () => {
             expect(result.create_at).toBe(post.create_at);
             expect(result.update_at).toBe(post.update_at);
             expect(result.user_id).toBe(post.user_id);
+        });
+    });
+
+    describe('permalink redaction', () => {
+        const embed = (metadata: object): PermalinkEmbedData => ({
+            post_id: 'linked-post-id',
+            post: {metadata},
+            team_name: 'team',
+            channel_display_name: 'channel',
+            channel_type: 'O',
+            channel_id: 'channel-id',
+        } as PermalinkEmbedData);
+
+        it('should treat a non-zero embed redacted count as denied', () => {
+            expect(isPermalinkEmbedRedacted(embed({redacted_file_count: 2}))).toBe(true);
+            expect(isPermalinkEmbedRedacted(embed({redacted_file_count: 0}))).toBe(false);
+            expect(isPermalinkEmbedRedacted(undefined)).toBe(false);
+        });
+
+        it('should report the embed count when the embed denies access', () => {
+            expect(getPermalinkRedactedFileCount(embed({redacted_file_count: 2}), 0)).toBe(2);
+        });
+
+        it('should report nothing redacted when the embed lists files', () => {
+            // The embed is authoritative, so a stale stored count must not resurrect the placeholder.
+            expect(getPermalinkRedactedFileCount(embed({files: [{id: 'file-1'}]}), 3)).toBe(0);
+        });
+
+        it('should fall back to the linked post when the embed says neither', () => {
+            expect(getPermalinkRedactedFileCount(embed({}), 3)).toBe(3);
+            expect(getPermalinkRedactedFileCount(undefined, 3)).toBe(3);
+        });
+    });
+
+    describe('isAttachmentDecisionCurrent', () => {
+        it('should render a decision confirmed under the required epoch', () => {
+            expect(isAttachmentDecisionCurrent(true, 3, 3, 2)).toBe(true);
+        });
+
+        it('should gate a decision behind the required epoch while enforced', () => {
+            expect(isAttachmentDecisionCurrent(true, 2, 3, 0)).toBe(false);
+        });
+
+        it('should render allowed attachments behind the epoch once enforcement is off', () => {
+            // Nothing new is redacted, so without a cached denial there is nothing to re-check.
+            expect(isAttachmentDecisionCurrent(false, 0, 3, 0)).toBe(true);
+        });
+
+        it('should re-check a denial cached while enforced once enforcement is off', () => {
+            // Its file rows are gone and no since-fetch re-delivers it.
+            expect(isAttachmentDecisionCurrent(false, 2, 3, 1)).toBe(false);
         });
     });
 });

@@ -1,16 +1,17 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import {Image} from 'expo-image';
 import React, {forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState} from 'react';
 import {BackHandler} from 'react-native';
-import Animated, {runOnJS, runOnUI, useAnimatedReaction, type SharedValue} from 'react-native-reanimated';
+import {useAnimatedReaction, type SharedValue} from 'react-native-reanimated';
+import {scheduleOnRN, scheduleOnUI} from 'react-native-worklets';
 
-import {buildFilePreviewUrl} from '@actions/remote/file';
+import {buildFileUrl} from '@actions/remote/file';
+import {ExpoImageAnimated} from '@components/expo_image';
 import {useGallery} from '@context/gallery';
 import {useServerUrl} from '@context/server';
 import {isGif} from '@utils/file';
-import {freezeOtherScreens, galleryItemToFileInfo, measureItem} from '@utils/gallery';
+import {galleryItemToFileInfo, measureItem} from '@utils/gallery';
 
 import LightboxSwipeout, {type LightboxSwipeoutRef, type RenderItemInfo} from './lightbox_swipeout';
 import Backdrop, {type BackdropProps} from './lightbox_swipeout/backdrop';
@@ -19,8 +20,6 @@ import VideoRenderer from './renderers/video';
 import GalleryViewer from './viewer';
 
 import type {GalleryItemType, GalleryPagerItem} from '@typings/screens/gallery';
-
-const AnimatedImage = Animated.createAnimatedComponent(Image);
 
 interface GalleryProps {
     headerAndFooterHidden: SharedValue<boolean>;
@@ -58,13 +57,13 @@ const Gallery = forwardRef<GalleryRef, GalleryProps>(({
         lightboxRef.current?.closeLightbox();
     };
 
-    const onLocalIndex = (index: number) => {
+    const onLocalIndex = useCallback((index: number) => {
         setLocalIndex(index);
         onIndexChange?.(index);
-    };
+    }, [onIndexChange]);
 
     useEffect(() => {
-        runOnUI(() => {
+        scheduleOnUI(() => {
             'worklet';
 
             const tw = targetDimensions.width;
@@ -72,7 +71,10 @@ const Gallery = forwardRef<GalleryRef, GalleryProps>(({
             const scaleFactor = item.width / targetDimensions.width;
             const th = item.height / scaleFactor;
             sharedValues.targetHeight.value = th;
-        })();
+        });
+
+        // sharedValues do not trigger re-renders
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [item, targetDimensions.width]);
 
     useEffect(() => {
@@ -104,9 +106,9 @@ const Gallery = forwardRef<GalleryRef, GalleryProps>(({
     const onIndexChangeWorklet = useCallback((nextIndex: number) => {
         'worklet';
 
-        runOnJS(onLocalIndex)(nextIndex);
+        scheduleOnRN(onLocalIndex, nextIndex);
         sharedValues.activeIndex.value = nextIndex;
-    }, []);
+    }, [onLocalIndex, sharedValues]);
 
     const renderBackdropComponent = useCallback(
         ({animatedStyles, translateY}: BackdropProps) => {
@@ -131,7 +133,6 @@ const Gallery = forwardRef<GalleryRef, GalleryProps>(({
     function onSwipeFailure() {
         'worklet';
 
-        runOnJS(freezeOtherScreens)(true);
         hideHeaderAndFooter(false);
     }
 
@@ -145,14 +146,16 @@ const Gallery = forwardRef<GalleryRef, GalleryProps>(({
         sharedValues.x.value = 0;
         sharedValues.y.value = 0;
 
-        runOnJS(onHide)();
-    }, []);
+        scheduleOnRN(onHide);
+    }, [onHide, sharedValues]);
 
     const onRenderItem = useCallback((info: RenderItemInfo) => {
-        if (item.type === 'video' && item.posterUri) {
+        const currentItem = items[localIndex];
+        if (currentItem.type === 'video' && currentItem.posterUri) {
             return (
-                <AnimatedImage
-                    placeholder={{uri: item.posterUri}}
+                <ExpoImageAnimated
+                    id={currentItem.cacheKey}
+                    source={{uri: currentItem.posterUri}}
                     style={info.itemStyles}
                     placeholderContentFit='cover'
                 />
@@ -160,7 +163,7 @@ const Gallery = forwardRef<GalleryRef, GalleryProps>(({
         }
 
         return null;
-    }, [item]);
+    }, [items, localIndex]);
 
     const onRenderPage = useCallback((props: GalleryPagerItem, idx: number) => {
         switch (props.item.type) {
@@ -178,16 +181,18 @@ const Gallery = forwardRef<GalleryRef, GalleryProps>(({
                     <DocumentRenderer
                         item={props.item}
                         hideHeaderAndFooter={hideHeaderAndFooter}
+                        width={props.width}
+                        height={props.height}
                     />
                 );
             default:
                 return null;
         }
-    }, []);
+    }, [hideHeaderAndFooter, initialIndex]);
 
     const source = useMemo(() => {
         if (isGif(fileInfo) && fileInfo.id && !fileInfo.id.startsWith('uid')) {
-            return buildFilePreviewUrl(serverUrl, fileInfo.id);
+            return buildFileUrl(serverUrl, fileInfo.id, fileInfo.update_at);
         }
 
         return fileInfo.localPath || fileInfo.uri || item.uri;

@@ -10,13 +10,15 @@ import {StyleSheet, View} from 'react-native';
 import {from as from$} from 'rxjs';
 
 import DatabaseManager from '@database/manager';
+import useDidMount from '@hooks/did_mount';
 import {getActiveServerUrl} from '@queries/app/servers';
 import ContentView from '@share/components/content_view';
 import NoMemberships from '@share/components/error/no_memberships';
 import NoServers from '@share/components/error/no_servers';
+import ZeroPersistenceServers from '@share/components/error/zero_persistence_servers';
 import CloseHeaderButton from '@share/components/header/close_header_button';
 import PostButton from '@share/components/header/post_button';
-import {hasChannels} from '@share/queries';
+import {allActiveServersZeroPersistence, hasChannels} from '@share/queries';
 import {setShareExtensionState, useShareExtensionServerUrl} from '@share/state';
 
 import type {SharedItem} from '@mattermost/rnshare';
@@ -37,6 +39,7 @@ export const errorScreenMessages = defineMessages({
 });
 
 type Props = {
+    allZeroPersistence: boolean;
     hasChannelMemberships: boolean;
     initialServerUrl: string;
     files: SharedItem[];
@@ -51,7 +54,7 @@ const styles = StyleSheet.create({
     },
 });
 
-const ShareScreen = ({hasChannelMemberships, initialServerUrl, files, linkPreviewUrl, message, theme}: Props) => {
+const ShareScreen = ({allZeroPersistence, hasChannelMemberships, initialServerUrl, files, linkPreviewUrl, message, theme}: Props) => {
     const navigator = useNavigation();
     const intl = useIntl();
     const serverUrl = useShareExtensionServerUrl();
@@ -78,9 +81,13 @@ const ShareScreen = ({hasChannelMemberships, initialServerUrl, files, linkPrevie
             {applicationName},
             ),
         });
+
+    // We only care about changes in the locale
+    // navigator should not change in the lifetime of this component.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [intl.locale]);
 
-    useEffect(() => {
+    useDidMount(() => {
         setShareExtensionState({
             files,
             linkPreviewUrl,
@@ -92,17 +99,20 @@ const ShareScreen = ({hasChannelMemberships, initialServerUrl, files, linkPrevie
             headerLeft: () => (<CloseHeaderButton theme={theme}/>),
             headerRight: () => (<PostButton theme={theme}/>),
         });
-    }, []);
+    });
 
     return (
         <View style={styles.container}>
             {!hasServers &&
             <NoServers theme={theme}/>
             }
-            {hasServers && !hasChannelMemberships &&
+            {hasServers && allZeroPersistence &&
+            <ZeroPersistenceServers theme={theme}/>
+            }
+            {hasServers && !allZeroPersistence && !hasChannelMemberships &&
             <NoMemberships theme={theme}/>
             }
-            {hasServers && hasChannelMemberships && Boolean(serverDb) &&
+            {hasServers && !allZeroPersistence && hasChannelMemberships && Boolean(serverDb) &&
             <ContentView
                 database={serverDb!}
                 theme={theme}
@@ -113,6 +123,7 @@ const ShareScreen = ({hasChannelMemberships, initialServerUrl, files, linkPrevie
 };
 
 const enhanced = withObservables([], () => ({
+    allZeroPersistence: from$(allActiveServersZeroPersistence()),
     initialServerUrl: from$(getActiveServerUrl()),
     hasChannelMemberships: from$(hasChannels()),
 }));

@@ -2,7 +2,7 @@
 // See LICENSE.txt for license information.
 
 import React, {forwardRef} from 'react';
-import Animated, {useAnimatedStyle, useDerivedValue} from 'react-native-reanimated';
+import Animated, {useAnimatedStyle, useDerivedValue, type SharedValue} from 'react-native-reanimated';
 
 import {SEARCH_INPUT_HEIGHT, SEARCH_INPUT_MARGIN} from '@constants/view';
 import {useTheme} from '@context/theme';
@@ -10,10 +10,11 @@ import useHeaderHeight, {MAX_OVERSCROLL} from '@hooks/header';
 import {clamp} from '@utils/gallery';
 import {makeStyleSheetFromTheme} from '@utils/theme';
 
-import Header, {type HeaderRightButton} from './header';
+import Header from './header';
 import NavigationHeaderLargeTitle from './large';
 import NavigationSearch from './search';
 
+import type {NavigationButtonProps} from '@components/navigation_button';
 import type {SearchProps, SearchRef} from '@components/search';
 
 type Props = SearchProps & {
@@ -22,14 +23,22 @@ type Props = SearchProps & {
     leftComponent?: React.ReactElement;
     onBackPress?: () => void;
     onTitlePress?: () => void;
-    rightButtons?: HeaderRightButton[];
-    scrollValue?: Animated.SharedValue<number>;
+    rightButtons?: NavigationButtonProps[];
+    scrollValue?: SharedValue<number>;
     lockValue?: number;
     hideHeader?: () => void;
     showBackButton?: boolean;
     subtitle?: string;
     subtitleCompanion?: React.ReactElement;
+
+    // Replaces the subtitle row entirely when provided. The header is a fixed
+    // height with no room for a third line, so a caller that needs to show
+    // something richer than text on that line displaces the subtitle rather than
+    // sitting beside it. Ignored on large-title screens, where the subtitle is
+    // rendered by NavigationHeaderLargeTitle and only accepts a string.
+    subtitleComponent?: React.ReactElement;
     title?: string;
+    titleCompanion?: React.ReactElement;
 }
 
 const getStyleSheet = makeStyleSheetFromTheme((theme: Theme) => ({
@@ -53,7 +62,9 @@ const NavigationHeader = forwardRef<SearchRef, Props>(({
     showBackButton,
     subtitle,
     subtitleCompanion,
+    subtitleComponent,
     title = '',
+    titleCompanion,
     hideHeader,
     ...searchProps
 }: Props, ref) => {
@@ -99,8 +110,10 @@ const NavigationHeader = forwardRef<SearchRef, Props>(({
                 showBackButton={showBackButton}
                 subtitle={subtitle}
                 subtitleCompanion={subtitleCompanion}
+                subtitleComponent={subtitleComponent}
                 theme={theme}
                 title={title}
+                titleCompanion={titleCompanion}
             />
             {isLargeTitle &&
                 <NavigationHeaderLargeTitle

@@ -19,6 +19,23 @@ export function isValidUrl(url = '') {
     return regex.test(url);
 }
 
+export function isUrlSafe(url: string): boolean {
+    let unescaped: string;
+
+    try {
+        unescaped = decodeURIComponent(url);
+    } catch {
+        unescaped = unescape(url);
+    }
+
+    unescaped = unescaped.replace(/[^\w:]/g, '').toLowerCase();
+
+    // eslint-disable-next-line no-script-url
+    return !unescaped.startsWith('javascript:') &&
+        !unescaped.startsWith('vbscript:') &&
+        !unescaped.startsWith('data:');
+}
+
 export function isParsableUrl(url: string): boolean {
     try {
         const parsedUrl = new URL(url);
@@ -28,9 +45,14 @@ export function isParsableUrl(url: string): boolean {
     }
 }
 
+export function isSecureUrl(url: string) {
+    return /^(https|wss):\/\//i.test(url);
+}
+
+// useHttp never downgrades a URL that explicitly uses https.
 export function sanitizeUrl(url: string, useHttp = false) {
     let preUrl = urlParse(url, true);
-    let protocol = useHttp ? 'http:' : preUrl.protocol;
+    let protocol = useHttp && preUrl.protocol !== 'https:' ? 'http:' : preUrl.protocol;
 
     if (!preUrl.host || preUrl.protocol === 'file:') {
         preUrl = urlParse('https://' + stripTrailingSlashes(url), true);
@@ -63,7 +85,7 @@ export async function getServerUrlAfterRedirect(serverUrl: string, useHttp = fal
     let url = sanitizeUrl(serverUrl, useHttp);
 
     const headers = {
-        ...(preauthSecret) ? {[ClientConstants.HEADER_X_MATTERMOST_PREAUTH_SECRET]: preauthSecret} : {},
+        ...(preauthSecret && isSecureUrl(url)) ? {[ClientConstants.HEADER_X_MATTERMOST_PREAUTH_SECRET]: preauthSecret} : {},
     };
 
     try {
@@ -176,10 +198,17 @@ export function cleanUpUrlable(input: string) {
     return cleaned;
 }
 
+const AUTOLINKED_URL_SCHEMES = new Set(['http', 'https', 'ftp', 'mailto', 'tel', 'mattermost']);
+
 export function getScheme(url: string) {
     const match = (/([a-z0-9+.-]+):/i).exec(url);
 
     return match && match[1];
+}
+
+export function isValidAutoLink(url: string): boolean {
+    const scheme = getScheme(url);
+    return scheme ? AUTOLINKED_URL_SCHEMES.has(scheme.toLowerCase()) : false;
 }
 
 export function getYouTubeVideoId(link?: string) {
@@ -275,4 +304,9 @@ export function safeDecodeURIComponent(v: string) {
     } catch {
         return v;
     }
+}
+
+export function getUrlDomain(url: string): string {
+    const parsed = urlParse(url);
+    return parsed.hostname || url;
 }

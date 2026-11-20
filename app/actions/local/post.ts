@@ -1,26 +1,34 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
+import {Q, type Database, type Model} from '@nozbe/watermelondb';
+
+import {getRequiredRedactionEpoch} from '@actions/local/redaction';
 import {fetchPostAuthors} from '@actions/remote/post';
-import {ActionType, Post} from '@constants';
+import {ActionType, General, Post} from '@constants';
 import {MM_TABLES} from '@constants/database';
 import DatabaseManager from '@database/manager';
-import {countUsersFromMentions, getPostById, prepareDeletePost, queryPostsById} from '@queries/servers/post';
-import {getCurrentUserId} from '@queries/servers/system';
+import {queryFilesForPosts} from '@queries/servers/file';
+import {countUsersFromMentions, getPostById, prepareDeletePost, queryNewestThreadReplies, queryPostsById} from '@queries/servers/post';
+import {getCurrentUserId, isRedactionEnforced} from '@queries/servers/system';
 import {getIsCRTEnabled, prepareThreadsFromReceivedPosts} from '@queries/servers/thread';
+import {deleteDownloadedFiles} from '@utils/file';
 import {generateId} from '@utils/general';
+import {safeParseJSON} from '@utils/helpers';
 import {logError} from '@utils/log';
-import {getLastFetchedAtFromPosts} from '@utils/post';
+import {getLastFetchedAtFromPosts, isPostPendingOrFailed, isPostRedactionVerified} from '@utils/post';
 import {getPostIdsForCombinedUserActivityPost} from '@utils/post_list';
 
 import {updateLastPostAt, updateMyChannelLastFetchedAt} from './channel';
 
-import type {Model, Q} from '@nozbe/watermelondb';
+import type {RevokedFile} from '@typings/database/database';
 import type MyChannelModel from '@typings/database/models/servers/my_channel';
 import type PostModel from '@typings/database/models/servers/post';
+import type PostsInChannelModel from '@typings/database/models/servers/posts_in_channel';
+import type PostsInThreadModel from '@typings/database/models/servers/posts_in_thread';
 import type UserModel from '@typings/database/models/servers/user';
 
-const {SERVER: {DRAFT, FILE, POST, POSTS_IN_THREAD, REACTION, THREAD, THREAD_PARTICIPANT, THREADS_IN_TEAM}} = MM_TABLES;
+const {SERVER: {DRAFT, FILE, MY_CHANNEL, POST, POSTS_IN_CHANNEL, POSTS_IN_THREAD, REACTION, THREAD, THREAD_PARTICIPANT, THREADS_IN_TEAM}} = MM_TABLES;
 
 export const sendAddToChannelEphemeralPost = async (serverUrl: string, user: UserModel, addedUsernames: string[], messages: string[], channeId: string, postRootId = '') => {
     try {
@@ -113,36 +121,67 @@ export const sendEphemeralPost = async (serverUrl: string, message: string, chan
     }
 };
 
+/**
+ * Helper function to prepare deletion models for a single post
+ */
+async function preparePostDeletion(database: Database, post: PostModel | Post) {
+    const removeModels: Model[] = [];
+
+    if (post.type === Post.POST_TYPES.COMBINED_USER_ACTIVITY) {
+        const systemPostIds = getPostIdsForCombinedUserActivityPost(post.id);
+        for await (const id of systemPostIds) {
+            const postModel = await getPostById(database, id);
+            if (postModel) {
+                const preparedPost = await prepareDeletePost(postModel);
+                removeModels.push(...preparedPost);
+            }
+        }
+    } else {
+        const postModel = await getPostById(database, post.id);
+        if (postModel) {
+            const preparedPost = await prepareDeletePost(postModel);
+            removeModels.push(...preparedPost);
+        }
+    }
+
+    return removeModels;
+}
+
 export async function removePost(serverUrl: string, post: PostModel | Post) {
     try {
         const {database, operator} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
-        if (post.type === Post.POST_TYPES.COMBINED_USER_ACTIVITY && post.props?.system_post_ids) {
-            const systemPostIds = getPostIdsForCombinedUserActivityPost(post.id);
-            const removeModels = [];
-            for await (const id of systemPostIds) {
-                const postModel = await getPostById(database, id);
-                if (postModel) {
-                    const preparedPost = await prepareDeletePost(postModel);
-                    removeModels.push(...preparedPost);
-                }
-            }
+        const removeModels = await preparePostDeletion(database, post);
 
-            if (removeModels.length) {
-                await operator.batchRecords(removeModels, 'removePost (combined user activity)');
-            }
-        } else {
-            const postModel = await getPostById(database, post.id);
-            if (postModel) {
-                const preparedPost = await prepareDeletePost(postModel);
-                if (preparedPost.length) {
-                    await operator.batchRecords(preparedPost, 'removePost');
-                }
-            }
+        if (removeModels.length) {
+            await operator.batchRecords(removeModels, 'removePost');
         }
 
         return {post};
     } catch (error) {
         logError('Failed removePost', error);
+        return {error};
+    }
+}
+
+export async function removePosts(serverUrl: string, posts: Array<PostModel | Post>) {
+    try {
+        const {database, operator} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
+
+        // Prepare all post deletions in parallel
+        const allModels = await Promise.all(
+            posts.map((post) => preparePostDeletion(database, post)),
+        );
+
+        // Flatten the array of arrays into a single array
+        const removeModels = allModels.flat();
+
+        if (removeModels.length) {
+            await operator.batchRecords(removeModels, 'removePosts');
+        }
+
+        return {posts};
+    } catch (error) {
+        logError('Failed removePosts', error);
         return {error};
     }
 }
@@ -183,7 +222,7 @@ export async function markPostAsDeleted(serverUrl: string, post: Post, prepareRe
  * @param {string} previousPostId the previous post id
  * @param {UserProfile[]} authors the authors of the posts
  * @param {boolean} isCRTEnabled whether CRT is enabled for this channel
- * @returns {Promise<Model[]>} the models
+ * @returns {Promise<{models: Model[]; revokedFiles: RevokedFile[]}>} the models, and the files whose downloaded bytes must be deleted once the models are committed
  */
 export async function prepareModelsForChannelPosts(
     serverUrl: string,
@@ -194,16 +233,18 @@ export async function prepareModelsForChannelPosts(
     previousPostId: string,
     authors: UserProfile[],
     isCRTEnabled: boolean,
-): Promise<Model[]> {
+    redactionVerifiedEpoch?: number,
+): Promise<{models: Model[]; revokedFiles: RevokedFile[]}> {
     const {operator} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
     const models = [];
 
-    const postModels = await operator.handlePosts({
+    const {models: postModels, revokedFiles} = await operator.handlePosts({
         actionType,
         order,
         posts,
         previousPostId,
         prepareRecordsOnly: true,
+        redactionVerifiedEpoch,
     });
     models.push(...postModels);
 
@@ -212,9 +253,11 @@ export async function prepareModelsForChannelPosts(
         models.push(...userModels);
     }
 
+    // A thread payload doesn't cover the channel timeline, so it must not advance the
+    // channel watermark; handlePosts skips PostsInChannel for the same reason.
     const lastFetchedAt = getLastFetchedAtFromPosts(posts);
     let myChannelModel: MyChannelModel | undefined;
-    if (lastFetchedAt) {
+    if (lastFetchedAt && actionType !== ActionType.POSTS.RECEIVED_IN_THREAD) {
         const {member} = await updateMyChannelLastFetchedAt(serverUrl, channelId, lastFetchedAt, true);
         myChannelModel = member;
     }
@@ -245,19 +288,29 @@ export async function prepareModelsForChannelPosts(
         }
     }
 
-    return models;
+    return {models, revokedFiles};
+}
+
+/**
+ * Commits the batch and, only once it is saved, removes the downloaded bytes of files the
+ * server reported as redacted. Throws when the batch fails, so the files are kept.
+ */
+export async function batchRecordsAndDeleteRevokedFiles(serverUrl: string, models: Model[], revokedFiles: RevokedFile[], description: string) {
+    const {operator} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
+    await operator.batchRecords(models, description, true);
+    deleteDownloadedFiles(serverUrl, revokedFiles);
 }
 
 export async function storePostsForChannel(
     serverUrl: string, channelId: string, posts: Post[], order: string[], previousPostId: string,
-    actionType: string, authors: UserProfile[], prepareRecordsOnly = false,
+    actionType: string, authors: UserProfile[], prepareRecordsOnly = false, redactionVerifiedEpoch?: number,
 ) {
     try {
-        const {database, operator} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
+        const {database} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
 
         const isCRTEnabled = await getIsCRTEnabled(database);
 
-        const models = await prepareModelsForChannelPosts(
+        const {models, revokedFiles} = await prepareModelsForChannelPosts(
             serverUrl,
             channelId,
             posts,
@@ -266,13 +319,14 @@ export async function storePostsForChannel(
             previousPostId,
             authors,
             isCRTEnabled,
+            redactionVerifiedEpoch,
         );
 
         if (models.length && !prepareRecordsOnly) {
-            await operator.batchRecords(models, 'storePostsForChannel');
+            await batchRecordsAndDeleteRevokedFiles(serverUrl, models, revokedFiles, 'storePostsForChannel');
         }
 
-        return {models};
+        return {models, revokedFiles};
     } catch (error) {
         logError('storePostsForChannel', error);
         return {error};
@@ -358,27 +412,129 @@ export async function deletePosts(serverUrl: string, postIds: string[]) {
     try {
         const {database} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
 
-        const postsFormatted = `'${postIds.join("','")}'`;
+        const placeholders = postIds.map(() => '?').join(',');
 
         await database.write(() => {
             return database.adapter.unsafeExecute({
                 sqls: [
-                    [`DELETE FROM ${POST} where id IN (${postsFormatted})`, []],
-                    [`DELETE FROM ${REACTION} where post_id IN (${postsFormatted})`, []],
-                    [`DELETE FROM ${FILE} where post_id IN (${postsFormatted})`, []],
-                    [`DELETE FROM ${DRAFT} where root_id IN (${postsFormatted})`, []],
+                    [`DELETE FROM ${POST} where id IN (${placeholders})`, postIds],
+                    [`DELETE FROM ${REACTION} where post_id IN (${placeholders})`, postIds],
+                    [`DELETE FROM ${FILE} where post_id IN (${placeholders})`, postIds],
+                    [`DELETE FROM ${DRAFT} where root_id IN (${placeholders})`, postIds],
 
-                    [`DELETE FROM ${POSTS_IN_THREAD} where root_id IN (${postsFormatted})`, []],
+                    [`DELETE FROM ${POSTS_IN_THREAD} where root_id IN (${placeholders})`, postIds],
 
-                    [`DELETE FROM ${THREAD} where id IN (${postsFormatted})`, []],
-                    [`DELETE FROM ${THREAD_PARTICIPANT} where thread_id IN (${postsFormatted})`, []],
-                    [`DELETE FROM ${THREADS_IN_TEAM} where thread_id IN (${postsFormatted})`, []],
+                    [`DELETE FROM ${THREAD} where id IN (${placeholders})`, postIds],
+                    [`DELETE FROM ${THREAD_PARTICIPANT} where thread_id IN (${placeholders})`, postIds],
+                    [`DELETE FROM ${THREADS_IN_TEAM} where thread_id IN (${placeholders})`, postIds],
                 ],
             });
         });
         return {error: false};
     } catch (error) {
         return {error};
+    }
+}
+
+export async function deletePostsInChannelsByCutoff(
+    serverUrl: string,
+    channelIds: string[],
+    cutoff: number,
+    excludedPostIds: Set<string> = new Set(),
+): Promise<{error: unknown; deletedCount: number}> {
+    if (channelIds.length === 0) {
+        return {error: undefined, deletedCount: 0};
+    }
+
+    try {
+        const {database, operator} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
+
+        const channelPlaceholders = channelIds.map(() => '?').join(',');
+        const excludedIds = [...excludedPostIds];
+        const exclusionClause = excludedIds.length > 0 ? ` AND id NOT IN (${excludedIds.map(() => '?').join(',')})` : '';
+
+        // A thread with a reply on or after the cutoff is alive even if its root is older;
+        // keep the root so the surviving reply's root_id never dangles.
+        const hasActiveReply = `EXISTS (SELECT 1 FROM ${POSTS_IN_THREAD} WHERE ${POSTS_IN_THREAD}.root_id = ${POST}.id AND ${POSTS_IN_THREAD}.latest >= ${cutoff})`;
+
+        // Keep the root so a draft reply's root_id never dangles.
+        const hasDraft = `EXISTS (SELECT 1 FROM ${DRAFT} WHERE ${DRAFT}.root_id = ${POST}.id)`;
+
+        const postCondition = `channel_id IN (${channelPlaceholders}) AND create_at < ${cutoff} AND NOT ${hasActiveReply} AND NOT ${hasDraft}${exclusionClause}`;
+        const postConditionArgs = [...channelIds, ...excludedIds];
+        const postSubquery = `SELECT id FROM ${POST} WHERE ${postCondition}`;
+
+        // Scopes PostsInThread trimming to roots in these channels.
+        const rootInChannelsExists = `EXISTS (SELECT 1 FROM ${POST} WHERE ${POST}.id = ${POSTS_IN_THREAD}.root_id AND ${POST}.channel_id IN (${channelPlaceholders}))`;
+
+        const deletedCount = await database.write(async () => {
+            // fetch count inside the write transaction to ensure exact count is returned.
+            const count = await database.get<PostModel>(POST).query(
+                Q.where('channel_id', Q.oneOf(channelIds)),
+                Q.where('create_at', Q.lt(cutoff)),
+                ...(excludedPostIds.size > 0 ? [Q.where('id', Q.notIn([...excludedPostIds]))] : []),
+                Q.unsafeSqlExpr(`NOT ${hasActiveReply}`),
+                Q.unsafeSqlExpr(`NOT ${hasDraft}`),
+            ).fetchCount();
+
+            await database.adapter.unsafeExecute({
+                sqls: [
+                    [`DELETE FROM ${REACTION} WHERE post_id IN (${postSubquery})`, postConditionArgs],
+                    [`DELETE FROM ${FILE} WHERE post_id IN (${postSubquery})`, postConditionArgs],
+
+                    // PostsInThread bookkeeping, delete or update values depending on replies left in the thread after the cutoff
+                    [`DELETE FROM ${POSTS_IN_THREAD} WHERE latest < ${cutoff} AND ${rootInChannelsExists}`, channelIds],
+                    [`UPDATE ${POSTS_IN_THREAD} SET earliest = ${cutoff} WHERE earliest < ${cutoff} AND ${rootInChannelsExists}`, channelIds],
+
+                    [`DELETE FROM ${THREAD} WHERE id IN (${postSubquery})`, postConditionArgs],
+                    [`DELETE FROM ${THREAD_PARTICIPANT} WHERE thread_id IN (${postSubquery})`, postConditionArgs],
+                    [`DELETE FROM ${THREADS_IN_TEAM} WHERE thread_id IN (${postSubquery})`, postConditionArgs],
+                    [`DELETE FROM ${POST} WHERE ${postCondition}`, postConditionArgs],
+
+                    // PostsInChannel bookkeeping, delete or update values depending on posts left in the channel after the cutoff
+                    [`DELETE FROM ${POSTS_IN_CHANNEL} WHERE channel_id IN (${channelPlaceholders}) AND latest < ${cutoff}`, channelIds],
+                    [`UPDATE ${POSTS_IN_CHANNEL} SET earliest = ${cutoff} WHERE channel_id IN (${channelPlaceholders}) AND earliest < ${cutoff}`, channelIds],
+
+                    // MyChannel bookkeeping, reset last_fetched_at for channels that have no posts left after the cutoff
+                    [`UPDATE ${MY_CHANNEL} SET last_fetched_at = 0 WHERE id IN (${channelPlaceholders}) AND last_fetched_at > 0 AND NOT EXISTS (SELECT 1 FROM ${POSTS_IN_CHANNEL} WHERE channel_id = ${MY_CHANNEL}.id)`, channelIds],
+                ],
+            });
+
+            return count;
+        });
+
+        // Re-apply the raw-SQL bookkeeping through the model layer so cached rows and
+        // mounted observers reflect it too - unsafeExecute writes bypass both.
+        const channelIdFilter = Q.oneOf(channelIds);
+        const picRows = await database.get<PostsInChannelModel>(POSTS_IN_CHANNEL).query(Q.where('channel_id', channelIdFilter)).fetch();
+        const pitRows = await database.get<PostsInThreadModel>(POSTS_IN_THREAD).query(Q.on(POST, Q.where('channel_id', channelIdFilter))).fetch();
+        const myChannelRows = await database.get<MyChannelModel>(MY_CHANNEL).query(Q.where('id', channelIdFilter)).fetch();
+        const channelsWithSurvivingPosts = new Set(picRows.map((row) => row.channelId));
+
+        const prepared: Model[] = [
+            ...picRows.
+                filter((row) => row.earliest < cutoff).
+                map((row) => row.prepareUpdate((r) => {
+                    r.earliest = cutoff;
+                })),
+            ...pitRows.
+                filter((row) => row.earliest < cutoff).
+                map((row) => row.prepareUpdate((r) => {
+                    r.earliest = cutoff;
+                })),
+            ...myChannelRows.
+                filter((row) => row.lastFetchedAt > 0 && !channelsWithSurvivingPosts.has(row.id)).
+                map((row) => row.prepareUpdate((r) => {
+                    r.lastFetchedAt = 0;
+                })),
+        ];
+        if (prepared.length > 0) {
+            await operator.batchRecords(prepared, 'deletePostsInChannelsByCutoff.reconcile');
+        }
+
+        return {error: undefined, deletedCount};
+    } catch (error) {
+        return {error, deletedCount: 0};
     }
 }
 
@@ -390,3 +546,71 @@ export function getUsersCountFromMentions(serverUrl: string, mentions: string[])
         return Promise.resolve(0);
     }
 }
+
+export const updatePostTranslation = async (serverUrl: string, postId: string, language: string, translation: PostTranslation) => {
+    try {
+        const {database} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
+        const post = await getPostById(database, postId);
+        if (!post) {
+            return {error: 'Post not found'};
+        }
+        await database.write(async () => {
+            post.update((v) => {
+                // At this point, the metadata is a string, so we need to parse it
+                let metadata: PostMetadata = safeParseJSON(v.metadata as string) as PostMetadata;
+                if (!metadata) {
+                    metadata = {};
+                }
+                if (!metadata.translations) {
+                    metadata.translations = {};
+                }
+                metadata.translations[language] = translation;
+                v.metadata = JSON.stringify(metadata) as any;
+            });
+        });
+        return {error: undefined};
+    } catch (error) {
+        logError('Failed updatePostTranslation', error);
+        return {error};
+    }
+};
+
+const hasPermalinkEmbed = (post: PostModel) => Boolean(post.metadata?.embeds?.some((embed) => embed.type === 'permalink'));
+
+/**
+ * A policy or attribute change while the user was elsewhere leaves cached posts behind the epoch
+ * they now must satisfy. Read from the stored posts rather than remembered, so it survives a restart.
+ *
+ * Callers pass only the newest page, because that is all a re-verification page can re-stamp; older
+ * posts are revalidated one by one when they come on screen. Within it, only posts whose rendering
+ * depends on the decision count: a text-only or pending post is never re-stamped by anything, so
+ * counting it would page the channel again on every visit.
+ */
+export const hasUnverifiedAttachmentPosts = async (database: Database, channelId: string, posts: PostModel[]) => {
+    if (!posts.length || !(await isRedactionEnforced(database))) {
+        return false;
+    }
+    const requiredEpoch = await getRequiredRedactionEpoch(database, channelId);
+    const unverified = posts.filter((p) => !isPostPendingOrFailed(p) && !isPostRedactionVerified(p.redactionVerifiedEpoch, requiredEpoch));
+    if (!unverified.length) {
+        return false;
+    }
+    if (unverified.some((p) => (p.metadata?.redacted_file_count ?? 0) > 0 || hasPermalinkEmbed(p))) {
+        return true;
+    }
+    const files = await queryFilesForPosts(database, unverified.map((p) => p.id)).fetch();
+    return files.length > 0;
+};
+
+/**
+ * Thread counterpart of hasUnverifiedAttachmentPosts over the root and the newest page of replies,
+ * the posts a thread page fetch re-stamps. False when the root is not stored: nothing to re-verify.
+ */
+export const hasUnverifiedAttachmentPostsInThread = async (database: Database, rootId: string) => {
+    const root = await getPostById(database, rootId);
+    if (!root) {
+        return false;
+    }
+    const replies = await queryNewestThreadReplies(database, rootId, General.POST_CHUNK_SIZE).fetch();
+    return hasUnverifiedAttachmentPosts(database, root.channelId, [root, ...replies]);
+};

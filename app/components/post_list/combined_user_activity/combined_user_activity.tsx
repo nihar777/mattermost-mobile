@@ -11,10 +11,8 @@ import SystemAvatar from '@components/system_avatar';
 import SystemHeader from '@components/system_header';
 import {Post as PostConstants, Screens} from '@constants';
 import {useServerUrl} from '@context/server';
-import {useIsTablet} from '@hooks/device';
-import {bottomSheetModalOptions, showModal, showModalOverCurrentContext} from '@screens/navigation';
+import {navigateToScreen} from '@screens/navigation';
 import {emptyFunction} from '@utils/general';
-import {getMarkdownTextStyles} from '@utils/markdown';
 import {isUserActivityProp} from '@utils/post_list';
 import {changeOpacity, makeStyleSheetFromTheme} from '@utils/theme';
 import {secureGetFromRecord} from '@utils/types';
@@ -67,9 +65,7 @@ const CombinedUserActivity = ({
     post, showJoinLeave, testID, theme, usernamesById = {}, style,
 }: Props) => {
     const intl = useIntl();
-    const isTablet = useIsTablet();
     const serverUrl = useServerUrl();
-    const textStyles = getMarkdownTextStyles(theme);
     const styles = getStyleSheet(theme);
     const content = [];
     const removedUserIds: string[] = [];
@@ -107,16 +103,11 @@ const CombinedUserActivity = ({
             return;
         }
 
+        delete post.props?.user_activity_posts;
         const passProps = {post, sourceScreen: location};
         Keyboard.dismiss();
-        const title = isTablet ? intl.formatMessage({id: 'post.options.title', defaultMessage: 'Options'}) : '';
-
-        if (isTablet) {
-            showModal(Screens.POST_OPTIONS, title, passProps, bottomSheetModalOptions(theme, 'close-post-options'));
-        } else {
-            showModalOverCurrentContext(Screens.POST_OPTIONS, passProps, bottomSheetModalOptions(theme));
-        }
-    }, [canDelete, post, location, isTablet, intl, theme]);
+        navigateToScreen(Screens.POST_OPTIONS, passProps);
+    }, [canDelete, post, location]);
 
     const renderMessage = (postType: string, userIds: string[], actorId?: string) => {
         if (!post) {
@@ -172,7 +163,6 @@ const CombinedUserActivity = ({
                 key={postType + actorId}
                 baseTextStyle={styles.baseText}
                 location={location}
-                textStyles={textStyles}
                 value={formattedMessage}
                 theme={theme}
             />
@@ -193,7 +183,7 @@ const CombinedUserActivity = ({
         if (allUsernames.length) {
             fetchMissingProfilesByUsernames(serverUrl, allUsernames);
         }
-    }, [userActivity?.allUserIds, userActivity?.allUsernames]);
+    }, [serverUrl, userActivity]);
 
     if (!post) {
         return null;

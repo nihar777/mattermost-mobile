@@ -22,9 +22,10 @@ import {
     HomeScreen,
     LoginScreen,
     ServerScreen,
+    ThreadScreen,
 } from '@support/ui/screen';
-import {timeouts, wait} from '@support/utils';
-import {expect} from 'detox';
+import {disableSynchronization, enableSynchronization, isAndroid, timeouts, wait} from '@support/utils';
+import {expect, waitFor} from 'detox';
 
 describe('Messaging - Channel Link', () => {
     const serverOneDisplayName = 'Server 1';
@@ -32,6 +33,9 @@ describe('Messaging - Channel Link', () => {
     let testChannel: any;
     let testTeam: any;
     let testUser: any;
+    let replyThreadChannelLink: string;
+    let replyThreadTargetDisplayName: string;
+    let replyThreadPostId: string;
 
     beforeAll(async () => {
         const {channel, team, user} = await Setup.apiInit(siteOneUrl);
@@ -42,6 +46,18 @@ describe('Messaging - Channel Link', () => {
         // # Log in to server
         await ServerScreen.connectToServer(serverOneUrl, serverOneDisplayName);
         await LoginScreen.login(testUser);
+
+        // # Set up MM-T4877_2: pre-create the target channel and a plain-text parent post.
+        const {channel: targetChannel} = await Channel.apiCreateChannel(siteOneUrl, {teamId: testTeam.id});
+        await Channel.apiAddUserToChannel(siteOneUrl, testUser.id, targetChannel.id);
+        replyThreadChannelLink = `${serverOneUrl}/${testTeam.name}/channels/${targetChannel.name}`;
+        replyThreadTargetDisplayName = targetChannel.display_name;
+
+        const {post: parentPost} = await Post.apiCreatePost(siteOneUrl, {
+            channelId: testChannel.id,
+            message: 'Reply thread parent message',
+        });
+        replyThreadPostId = parentPost.id;
     });
 
     beforeEach(async () => {
@@ -63,8 +79,8 @@ describe('Messaging - Channel Link', () => {
         await ChannelScreen.postMessage(channelLink);
 
         // # Tap on channel link
-        await element(by.text(channelLink)).tap({x: 5, y: 10});
-        await wait(timeouts.ONE_SEC);
+        await element(by.text(channelLink)).tap();
+        await wait(timeouts.FOUR_SEC);
 
         // * Verify redirected to target channel
         await expect(ChannelScreen.headerTitle).toHaveText(targetChannel.display_name);
@@ -73,21 +89,54 @@ describe('Messaging - Channel Link', () => {
         await ChannelScreen.back();
     });
 
-    it('MM-T4877_2 - should be able to open joined channel by tapping on channel link from reply thread', async () => {
-        // # Open a channel screen, post a channel link to target channel, tap on post to open reply thread, and tap on channel link
+    it('MM-T66560_1 - should be able to open joined channel by tapping on channel link that ends in a channel ID', async () => {
+        // # Open a channel screen and post a channel link to target channel
         await ChannelScreen.open(channelsCategory, testChannel.name);
         const {channel: targetChannel} = await Channel.apiCreateChannel(siteOneUrl, {teamId: testTeam.id});
         await Channel.apiAddUserToChannel(siteOneUrl, testUser.id, targetChannel.id);
-        const channelLink = `${serverOneUrl}/${testTeam.name}/channels/${targetChannel.name}`;
+        const channelLink = `${serverOneUrl}/${testTeam.name}/channels/${targetChannel.id}`;
         await ChannelScreen.postMessage(channelLink);
-        const {post} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
-        const {postListPostItem} = ChannelScreen.getPostListPostItem(post.id);
-        await postListPostItem.tap({x: 1, y: 1});
-        await element(by.text(channelLink)).tap({x: 5, y: 10});
-        await wait(timeouts.ONE_SEC);
+
+        // # Tap on channel link
+        await waitFor(element(by.text(channelLink))).toExist().withTimeout(timeouts.TEN_SEC);
+        await element(by.text(channelLink)).tap();
 
         // * Verify redirected to target channel
-        await expect(ChannelScreen.headerTitle).toHaveText(targetChannel.display_name);
+        await waitFor(ChannelScreen.headerTitle).toHaveText(targetChannel.display_name).withTimeout(timeouts.HALF_MIN);
+
+        // # Go back to channel list screen
+        await ChannelScreen.back();
+    });
+
+    it('MM-T4877_2 - should be able to open joined channel by tapping on channel link from reply thread', async () => {
+        // # Open testChannel and open the reply thread for the pre-posted plain-text parent.
+        await ChannelScreen.open(channelsCategory, testChannel.name);
+        await ChannelScreen.openReplyThreadFor(replyThreadPostId, 'Reply thread parent message');
+
+        // # Post the channel link as a reply inside the thread
+        await ThreadScreen.postMessage(replyThreadChannelLink);
+        await wait(timeouts.TWO_SEC);
+
+        if (isAndroid()) {
+            // Dismiss the soft keyboard so the reply text is not occluded. Assert we are still in the
+            // thread first — pressBack pops the thread when the keyboard is already closed.
+            await disableSynchronization();
+            try {
+                await device.pressBack();
+                await wait(timeouts.THREE_SEC);
+            } finally {
+                await enableSynchronization();
+            }
+            await ThreadScreen.toBeVisible();
+        }
+
+        // # Tap on channel link from within the reply thread
+        await waitFor(element(by.text(replyThreadChannelLink)).atIndex(0)).toExist().withTimeout(timeouts.TEN_SEC);
+        await element(by.text(replyThreadChannelLink)).atIndex(0).tap();
+        await wait(timeouts.FOUR_SEC);
+
+        // * Verify redirected to target channel
+        await expect(ChannelScreen.headerTitle).toHaveText(replyThreadTargetDisplayName);
 
         // # Go back to channel list screen
         await ChannelScreen.back();

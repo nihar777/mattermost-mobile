@@ -56,13 +56,14 @@ const PostButton = ({theme}: Props) => {
                 preauthSecret: credentials.preauthSecret,
             });
         }
-    }, [serverUrl, channelId, message, files, linkPreviewUrl, userId]);
+    }, [serverUrl, channelId, userId, message, linkPreviewUrl, closeExtension, files]);
 
     return (
         <TouchableOpacity
             disabled={disabled}
             onPress={onPress}
             hitSlop={hitSlop}
+            testID='share_extension.post.button'
         >
             <View style={[styles.right]}>
                 <CompassIcon

@@ -130,6 +130,7 @@ type AppForm = {
     footer?: string;
     icon?: string;
     submit_buttons?: string;
+    submit_label?: string;
     cancel_button?: boolean;
     submit_on_cancel?: boolean;
     fields?: AppField[];
@@ -148,7 +149,7 @@ type AppForm = {
     depends_on?: string[];
 };
 
-type AppFormValue = string | boolean | number | AppSelectOption | AppSelectOption[] | null;
+type AppFormValue = string | boolean | number | AppSelectOption | AppSelectOption[] | string[] | null;
 type AppFormValues = {[name: string]: AppFormValue};
 
 type AppSelectOption = {
@@ -178,6 +179,7 @@ type AppField = {
     position?: number;
 
     modal_label?: string;
+    label_position?: 'before' | 'after';
 
     // Select props
     refresh?: boolean;
@@ -185,10 +187,48 @@ type AppField = {
     multiselect?: boolean;
     lookup?: AppCall;
 
+    // Checkbox matrix props
+    matrix_config?: {
+        rows: AppSelectOption[];
+        columns: AppSelectOption[];
+        row_selection?: 'multiple' | 'single';
+    };
+
+    // File props
+    allow_multiple?: boolean;
+
     // Text props
     subtype?: string;
     min_length?: number;
     max_length?: number;
+
+    // Date/DateTime props
+    min_date?: string;
+    max_date?: string;
+    time_interval?: number;
+    datetime_config?: DateTimeConfig;
+
+    // Action button props
+    action_button_url?: string;
+    action_button_context?: Record<string, string>;
+
+    // Collapsible section props
+    collapsible_config?: AppCollapsibleConfig;
+};
+
+type AppCollapsibleConfig = {
+    fields?: AppField[];
+    expanded?: boolean;
+    bordered?: boolean;
+};
+
+type DateTimeConfig = {
+    time_interval?: number;
+    location_timezone?: string;
+    manual_time_entry?: boolean;
+
+    /** @deprecated Renamed to `manual_time_entry`; v12.0 stopped emitting it, 11.x still does. */
+    allow_manual_time_entry?: boolean;
 };
 
 type AutocompleteElement = AppField;

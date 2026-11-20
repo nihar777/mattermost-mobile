@@ -27,6 +27,9 @@ declare class MyChannelModel extends Model {
     /** mentions_count : The number of mentions on this channel */
     mentionsCount: number;
 
+    /** urgent_mention_count : The number of unread urgent mentions on this channel */
+    urgentMentionCount: number;
+
     /** message_count : The derived number of unread messages on this channel */
     messageCount: number;
 
@@ -41,6 +44,12 @@ declare class MyChannelModel extends Model {
 
     /** last_playbook_runs_fetch_at : The timestamp of the last successful fetch of playbook runs for this channel, used as the "since" parameter for incremental updates */
     lastPlaybookRunsFetchAt: number;
+
+    /** autotranslation : Whether the channel has automatic translation enabled for this user */
+    autotranslationDisabled: boolean;
+
+    /** redaction_required_epoch : Local-only. Raised when an ABAC change affects this channel alone. */
+    redactionRequiredEpoch: number;
 
     /** channel : The relation pointing to the CHANNEL table */
     channel: Relation<ChannelModel>;

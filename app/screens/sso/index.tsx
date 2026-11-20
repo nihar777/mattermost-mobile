@@ -2,36 +2,36 @@
 // See LICENSE.txt for license information.
 
 import React, {useCallback, useState} from 'react';
-import {StyleSheet, View} from 'react-native';
+import {useIntl} from 'react-intl';
+import {Platform, StyleSheet, View} from 'react-native';
 import Animated from 'react-native-reanimated';
 import {SafeAreaView} from 'react-native-safe-area-context';
 
-import {ssoLogin, ssoLoginWithCodeExchange} from '@actions/remote/session';
+import {nativeEntraLogin, ssoLogin, ssoLoginWithCodeExchange} from '@actions/remote/session';
 import {Screens, Sso} from '@constants';
+import License from '@constants/license';
 import useAndroidHardwareBackHandler from '@hooks/android_back_handler';
-import useNavButtonPressed from '@hooks/navigation_button_pressed';
 import {useScreenTransitionAnimation} from '@hooks/screen_transition_animation';
-import NetworkManager from '@managers/network_manager';
-import SecurityManager from '@managers/security_manager';
+import {getPreauthSecret} from '@init/credentials';
 import Background from '@screens/background';
-import {dismissModal, popTopScreen, resetToHome} from '@screens/navigation';
+import {navigateBack, navigateToScreen} from '@screens/navigation';
+import EphemeralStore from '@store/ephemeral_store';
 import {getFullErrorMessage, isErrorWithUrl} from '@utils/errors';
-import {logWarning} from '@utils/log';
+import {isMinimumLicenseTier} from '@utils/helpers';
+import {getIntuneErrorMessage} from '@utils/intune_errors';
 
 import SSOAuthentication from './sso_authentication';
 import SSOAuthenticationWithExternalBrowser from './sso_authentication_with_external_browser';
+import SSOIntune from './sso_intune';
 
 import type {LaunchProps} from '@typings/launch';
-import type {AvailableScreens} from '@typings/screens/navigation';
 
-interface SSOProps extends LaunchProps {
-    closeButtonId?: string;
-    componentId: AvailableScreens;
+export interface SSOProps extends LaunchProps {
+    isModal?: boolean;
     config: Partial<ClientConfig>;
     license: Partial<ClientLicense>;
     ssoType: string;
     serverDisplayName: string;
-    serverPreauthSecret?: string;
     theme: Theme;
 }
 
@@ -44,12 +44,30 @@ const styles = StyleSheet.create({
 });
 
 const SSO = ({
-    closeButtonId, componentId, config, extra,
-    launchError, launchType, serverDisplayName,
-    serverPreauthSecret, serverUrl, ssoType, theme,
+    isModal, config, extra,
+    launchError, launchType, license, serverDisplayName,
+    serverUrl, ssoType, theme,
 }: SSOProps) => {
+    const intl = useIntl();
     const [loginError, setLoginError] = useState<string>('');
+
+    // Validate serverUrl is provided
+    if (!serverUrl) {
+        return (
+            <View style={styles.flex}>
+                <Background theme={theme}/>
+            </View>
+        );
+    }
+
     let loginUrl = '';
+    let shouldUseNativeEntra = false;
+
+    shouldUseNativeEntra = Platform.OS === 'ios' &&
+            config.IntuneMAMEnabled === 'true' && config.IntuneAuthService?.toLocaleLowerCase() === ssoType.toLocaleLowerCase() &&
+            Boolean(config.IntuneScope) &&
+            isMinimumLicenseTier(license, License.SKU_SHORT_NAME.EnterpriseAdvanced);
+
     switch (ssoType) {
         case Sso.GOOGLE: {
             loginUrl = `${serverUrl}/oauth/google/mobile_login`;
@@ -75,10 +93,16 @@ const SSO = ({
             break;
     }
 
-    const onLoadEndError = (e: unknown) => {
-        logWarning('Failed to set store from local data', e);
+    const onLoadEndError = useCallback((e: unknown, isEntraLogin = false) => {
         if (typeof e === 'string') {
             setLoginError(e);
+            return;
+        }
+
+        // For Entra login errors, use intune error mapping
+        if (isEntraLogin) {
+            const errorMessage = getIntuneErrorMessage(e, intl);
+            setLoginError(errorMessage);
             return;
         }
 
@@ -87,63 +111,88 @@ const SSO = ({
             errorMessage += `\nURL: ${e.url}`;
         }
         setLoginError(errorMessage);
-    };
+    }, [intl]);
 
-    const doSSOLogin = async (bearerToken: string, csrfToken: string) => {
-        const result: LoginActionResponse = await ssoLogin(serverUrl!, serverDisplayName, config.DiagnosticId!, bearerToken, csrfToken, serverPreauthSecret);
-        if (result?.error && result.failed) {
-            onLoadEndError(result.error);
-            return;
-        }
-        goToHome(result.error);
-    };
-
-    const doSSOCodeExchange = async (loginCode: string, samlChallenge: {codeVerifier: string; state: string}) => {
-        const result: LoginActionResponse = await ssoLoginWithCodeExchange(serverUrl!, serverDisplayName, config.DiagnosticId!, loginCode, samlChallenge, serverPreauthSecret);
-        if (result?.error && result.failed) {
-            onLoadEndError(result.error);
-            return;
-        }
-        goToHome(result.error);
-    };
-
-    const goToHome = (error?: unknown) => {
+    const goToHome = useCallback((error?: unknown) => {
         const hasError = launchError || Boolean(error);
-        resetToHome({extra, launchError: hasError, launchType, serverUrl});
-    };
+        navigateToScreen(Screens.HOME, {extra, launchError: hasError, launchType, serverUrl}, true);
+    }, [extra, launchError, launchType, serverUrl]);
 
-    const dismiss = useCallback(() => {
-        if (serverUrl) {
-            NetworkManager.invalidateClient(serverUrl);
+    const doEntraLogin = useCallback(async () => {
+        const result = await nativeEntraLogin(
+            serverUrl,
+            serverDisplayName,
+            config.DiagnosticId!,
+            config.IntuneScope!,
+        );
+
+        if (result?.error && result.failed) {
+            onLoadEndError(result.error, true);
+            return false;
         }
-        dismissModal({componentId});
-    }, [componentId, serverUrl]);
+        goToHome();
+        return true;
+    }, [serverUrl, serverDisplayName, config.DiagnosticId, config.IntuneScope, goToHome, onLoadEndError]);
 
-    const animatedStyles = useScreenTransitionAnimation(Screens.SSO);
+    const doSSOLogin = useCallback(async (bearerToken: string, csrfToken: string) => {
+        // Add-server keeps the candidate in EphemeralStore until a session exists; re-login
+        // resolves from the keychain so the secret is never serialized into Expo Router params.
+        const preauthSecret = EphemeralStore.getPendingPreauthSecret(serverUrl) ?? await getPreauthSecret(serverUrl);
+        const result: LoginActionResponse = await ssoLogin(serverUrl, serverDisplayName, config.DiagnosticId!, bearerToken, csrfToken, preauthSecret);
+        if (result?.error && result.failed) {
+            onLoadEndError(result.error);
+            return;
+        }
+        EphemeralStore.clearPendingPreauthSecret(serverUrl);
+        goToHome(result.error);
+    }, [config.DiagnosticId, goToHome, onLoadEndError, serverDisplayName, serverUrl]);
 
-    useNavButtonPressed(closeButtonId || '', componentId, dismiss, []);
+    const doSSOCodeExchange = useCallback(async (loginCode: string, samlChallenge: {codeVerifier: string; state: string}) => {
+        const preauthSecret = EphemeralStore.getPendingPreauthSecret(serverUrl) ?? await getPreauthSecret(serverUrl);
+        const result: LoginActionResponse = await ssoLoginWithCodeExchange(serverUrl, serverDisplayName, config.DiagnosticId!, loginCode, samlChallenge, preauthSecret);
+        if (result?.error && result.failed) {
+            onLoadEndError(result.error);
+            return;
+        }
+        EphemeralStore.clearPendingPreauthSecret(serverUrl);
+        goToHome(result.error);
+    }, [config.DiagnosticId, goToHome, onLoadEndError, serverDisplayName, serverUrl]);
+
+    const animatedStyles = useScreenTransitionAnimation(!isModal);
 
     const onBackPressed = useCallback(() => {
-        if (closeButtonId) {
-            dismiss();
+        if (isModal) {
+            navigateBack();
             return;
         }
 
-        popTopScreen(componentId);
-    }, [closeButtonId, dismiss, componentId]);
-    useAndroidHardwareBackHandler(componentId, onBackPressed);
+        navigateBack();
+    }, [isModal]);
+    useAndroidHardwareBackHandler(Screens.SSO, onBackPressed);
 
     const props = {
         doSSOLogin,
         doSSOCodeExchange,
         loginError,
         loginUrl,
+        serverUrl,
         setLoginError,
         theme,
     };
 
     let authentication;
-    if (config.MobileExternalBrowser === 'true') {
+
+    // Don't show web SSO if native Entra login is in progress or should be used
+    if (shouldUseNativeEntra) {
+        authentication = (
+            <SSOIntune
+                doEntraLogin={doEntraLogin}
+                loginError={loginError}
+                setLoginError={setLoginError}
+                theme={theme}
+            />
+        );
+    } else if (config.MobileExternalBrowser === 'true') {
         authentication = (
             <SSOAuthenticationWithExternalBrowser
                 {...props}
@@ -158,10 +207,7 @@ const SSO = ({
     }
 
     return (
-        <View
-            nativeID={SecurityManager.getShieldScreenId(componentId, false, true)}
-            style={styles.flex}
-        >
+        <View style={styles.flex}>
             <Background theme={theme}/>
             <AnimatedSafeArea style={[styles.flex, animatedStyles]}>
                 {authentication}

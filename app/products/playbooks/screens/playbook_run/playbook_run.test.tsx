@@ -1,27 +1,33 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import React, {type ComponentProps} from 'react';
+import React, {act, type ComponentProps} from 'react';
 import {Alert} from 'react-native';
 
 import UserChip from '@components/chips/user_chip';
+import CompassIcon from '@components/compass_icon';
 import UserAvatarsStack from '@components/user_avatars_stack';
-import {General} from '@constants';
+import {General, Screens} from '@constants';
 import {useServerUrl} from '@context/server';
 import DatabaseManager from '@database/manager';
+import useAndroidHardwareBackHandler from '@hooks/android_back_handler';
 import {finishRun, setOwner} from '@playbooks/actions/remote/runs';
-import {openUserProfileModal} from '@screens/navigation';
+import {PLAYBOOK_RUN_TYPES} from '@playbooks/constants/playbook_run';
+import {DEFAULT_TASK_FILTERS} from '@playbooks/utils/task_filters';
+import {bottomSheet, navigateBack} from '@screens/navigation';
 import {fireEvent, renderWithEverything, waitFor} from '@test/intl-test-helper';
 import TestHelper from '@test/test_helper';
+import {openUserProfile} from '@utils/navigation';
 import {showPlaybookErrorSnackbar} from '@utils/snack_bar';
 
-import {goToSelectUser} from '../navigation';
+import {goToEditPlaybookRun, goToSelectUser} from '../navigation';
 
 import ChecklistList from './checklist_list';
 import ErrorState from './error_state';
 import OutOfDateHeader from './out_of_date_header/index';
 import PlaybookRun from './playbook_run';
 import StatusUpdateIndicator from './status_update_indicator';
+import TaskFilter from './task_filter';
 
 import type {Database} from '@nozbe/watermelondb';
 import type {PlaybookRunModel} from '@playbooks/database/models';
@@ -30,22 +36,30 @@ const serverUrl = 'some.server.url';
 
 jest.mock('@utils/snack_bar');
 
+jest.mock('@components/compass_icon', () => ({
+    __esModule: true,
+    default: jest.fn(),
+}));
+jest.mocked(CompassIcon).mockImplementation(
+    (props) => React.createElement('CompassIcon', {testID: 'compass-icon', ...props}) as any, // override the type since it is expecting a class component
+);
+
 jest.mock('@context/server');
 jest.mocked(useServerUrl).mockReturnValue(serverUrl);
 
 jest.mock('@components/chips/user_chip');
 jest.mocked(UserChip).mockImplementation(
-    (props) => React.createElement('UserChip', {testID: 'user-chip', ...props}),
+    (props: ComponentProps<typeof UserChip>) => React.createElement('UserChip', {testID: 'user-chip', ...props}),
 );
 
 jest.mock('@components/user_avatars_stack');
 jest.mocked(UserAvatarsStack).mockImplementation(
-    (props) => React.createElement('UserAvatarsStack', {testID: 'user-avatars-stack', ...props}),
+    (props: ComponentProps<typeof UserAvatarsStack>) => React.createElement('UserAvatarsStack', {testID: 'user-avatars-stack', ...props}),
 );
 
 jest.mock('./checklist_list');
 jest.mocked(ChecklistList).mockImplementation(
-    (props) => React.createElement('ChecklistList', {testID: 'checklist-list', ...props}),
+    (props: ComponentProps<typeof ChecklistList>) => React.createElement('ChecklistList', {testID: 'checklist-list', ...props}),
 );
 
 jest.mock('./error_state');
@@ -55,22 +69,40 @@ jest.mocked(ErrorState).mockImplementation(
 
 jest.mock('./out_of_date_header');
 jest.mocked(OutOfDateHeader).mockImplementation(
-    (props) => React.createElement('OutOfDateHeader', {testID: 'out-of-date-header', ...props}),
+    (props: ComponentProps<typeof OutOfDateHeader>) => React.createElement('OutOfDateHeader', {testID: 'out-of-date-header', ...props}),
 );
 
 jest.mock('./status_update_indicator');
 jest.mocked(StatusUpdateIndicator).mockImplementation(
-    (props) => React.createElement('StatusUpdateIndicator', {testID: 'status-update-indicator', ...props}),
+    (props: ComponentProps<typeof StatusUpdateIndicator>) => React.createElement('StatusUpdateIndicator', {testID: 'status-update-indicator', ...props}),
 );
 
 jest.mock('../navigation', () => ({
+    goToEditPlaybookRun: jest.fn(),
     goToSelectUser: jest.fn(),
 }));
 
 jest.mock('@playbooks/actions/remote/runs', () => ({
-    setOwner: jest.fn(),
     finishRun: jest.fn(),
+    setOwner: jest.fn(),
 }));
+
+jest.mock('@screens/navigation');
+jest.mock('@utils/navigation');
+jest.mock('@hooks/android_back_handler');
+
+const timelineEvent: TimelineEvent = {
+    id: 'event-1',
+    playbook_run_id: 'run-1',
+    create_at: 1000,
+    event_at: 1000,
+    event_type: 'task_state_modified',
+    summary: '',
+    details: '{"action":"check"}',
+    post_id: '',
+    subject_user_id: 'user-1',
+    creator_user_id: 'user-1',
+};
 
 describe('PlaybookRun', () => {
     let database: Database;
@@ -91,6 +123,7 @@ describe('PlaybookRun', () => {
             summary: 'Test summary',
             endAt: 0, // Not finished
             lastSyncAt: 12345,
+            timelineEvents: [timelineEvent],
         });
 
         const mockOwner = TestHelper.fakeUserModel({
@@ -117,15 +150,16 @@ describe('PlaybookRun', () => {
         ];
 
         return {
+            playbookRunId: mockPlaybookRun.id,
             playbookRun: mockPlaybookRun,
             owner: mockOwner,
             participants: mockParticipants,
-            componentId: 'PlaybookRun',
             checklists: mockChecklists,
             overdueCount: 2,
             pendingCount: 3,
             currentUserId: 'current-user',
             teammateNameDisplay: General.TEAMMATE_NAME_DISPLAY.SHOW_USERNAME,
+            canEditSummary: true,
         };
     }
 
@@ -180,17 +214,17 @@ describe('PlaybookRun', () => {
         expect(ownerChip.props.action).toBe(undefined);
 
         ownerChip.props.onPress();
-        expect(openUserProfileModal).toHaveBeenCalledWith(expect.anything(), expect.anything(), {
+        expect(openUserProfile).toHaveBeenCalledWith({
             userId: props.owner!.id,
             channelId: (props.playbookRun as PlaybookRunModel).channelId,
-            location: 'PlaybookRun',
+            location: Screens.PLAYBOOK_RUN,
         });
 
         expect(getByText('Participants')).toBeTruthy();
         const userAvatarsStack = getByTestId('user-avatars-stack');
         expect(userAvatarsStack.props.users).toBe(props.participants);
-        expect(userAvatarsStack.props.location).toBe('PlaybookRun');
-        expect(userAvatarsStack.props.bottomSheetTitle.defaultMessage).toBe('Run Participants');
+        expect(userAvatarsStack.props.location).toBe(Screens.PLAYBOOK_RUN);
+        expect(userAvatarsStack.props.bottomSheetTitle.defaultMessage).toBe('Participants');
 
         props.owner = undefined;
         rerender(<PlaybookRun {...props}/>);
@@ -220,16 +254,15 @@ describe('PlaybookRun', () => {
         ownerChip.props.action.onPress();
 
         expect(goToSelectUser).toHaveBeenCalledWith(
-            expect.anything(),
             'Test Playbook Run',
             'Owner',
             [...props.participants.map((p) => p.id), props.owner!.id],
             props.owner!.id,
             expect.any(Function),
         );
-        expect(openUserProfileModal).not.toHaveBeenCalled();
+        expect(openUserProfile).not.toHaveBeenCalled();
 
-        let handleSelect = jest.mocked(goToSelectUser).mock.calls[0][5];
+        let handleSelect = jest.mocked(goToSelectUser).mock.calls[0][4];
         handleSelect(TestHelper.fakeUser({id: 'user-2'}));
 
         expect(setOwner).toHaveBeenCalledWith(
@@ -246,16 +279,15 @@ describe('PlaybookRun', () => {
         ownerChip.props.onPress();
 
         expect(goToSelectUser).toHaveBeenCalledWith(
-            expect.anything(),
             'Test Playbook Run',
             'Owner',
             [...props.participants.map((p) => p.id), props.owner!.id],
             props.owner!.id,
             expect.any(Function),
         );
-        expect(openUserProfileModal).not.toHaveBeenCalled();
+        expect(openUserProfile).not.toHaveBeenCalled();
 
-        handleSelect = jest.mocked(goToSelectUser).mock.calls[0][5];
+        handleSelect = jest.mocked(goToSelectUser).mock.calls[0][4];
         handleSelect(TestHelper.fakeUser({id: 'user-2'}));
 
         expect(setOwner).toHaveBeenCalledWith(
@@ -275,7 +307,7 @@ describe('PlaybookRun', () => {
         const ownerChip = getByTestId('user-chip');
         ownerChip.props.onPress();
 
-        const handleSelect = jest.mocked(goToSelectUser).mock.calls[0][5];
+        const handleSelect = jest.mocked(goToSelectUser).mock.calls[0][4];
         handleSelect(TestHelper.fakeUser({id: 'user-2'}));
 
         await waitFor(() => {
@@ -292,6 +324,7 @@ describe('PlaybookRun', () => {
 
         const checklistList = getByTestId('checklist-list');
         expect(checklistList.props.checklists).toBe(props.checklists);
+        expect(checklistList.props.timelineEvents).toBeUndefined();
         expect(checklistList.props.channelId).toBe((props.playbookRun as PlaybookRunModel).channelId);
         expect(checklistList.props.playbookRunId).toBe(props.playbookRun!.id);
         expect(checklistList.props.isFinished).toBe(false);
@@ -327,7 +360,7 @@ describe('PlaybookRun', () => {
 
         const {getByText} = renderWithEverything(<PlaybookRun {...props}/>, {database});
 
-        expect(getByText('Finish Run')).toBeTruthy();
+        expect(getByText('Finish')).toBeTruthy();
     });
 
     it('handles finish run button press', () => {
@@ -335,12 +368,35 @@ describe('PlaybookRun', () => {
         props.participants.push(TestHelper.fakeUserModel({id: props.currentUserId}));
         const {getByText} = renderWithEverything(<PlaybookRun {...props}/>, {database});
 
-        const finishRunButton = getByText('Finish Run');
+        const finishRunButton = getByText('Finish');
         fireEvent.press(finishRunButton);
 
         expect(Alert.alert).toHaveBeenCalledWith(
-            'Finish Run',
-            'There are 3 tasks pending.\n\nAre you sure you want to finish the run for all participants?',
+            'Finish',
+            'There are 3 tasks pending.\n\nAre you sure you want to finish the checklist for all participants?',
+            [
+                {text: 'Cancel', style: 'cancel'},
+                {text: 'Finish', style: 'destructive', onPress: expect.any(Function)},
+            ],
+        );
+        const finishAction = jest.mocked(Alert.alert).mock.calls[0][2]![1];
+        finishAction.onPress?.();
+        expect(finishRun).toHaveBeenCalledWith(serverUrl, props.playbookRun!.id);
+    });
+
+    it('handles finish run button press with no pending tasks', () => {
+        const props = getBaseProps();
+        props.participants.push(TestHelper.fakeUserModel({id: props.currentUserId}));
+        props.pendingCount = 0;
+        jest.mocked(Alert.alert).mockClear();
+        const {getByText} = renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+        const finishRunButton = getByText('Finish');
+        fireEvent.press(finishRunButton);
+
+        expect(Alert.alert).toHaveBeenCalledWith(
+            'Finish',
+            'Are you sure you want to finish the checklist for all participants?',
             [
                 {text: 'Cancel', style: 'cancel'},
                 {text: 'Finish', style: 'destructive', onPress: expect.any(Function)},
@@ -355,7 +411,7 @@ describe('PlaybookRun', () => {
         const props = getBaseProps();
         const {queryByText} = renderWithEverything(<PlaybookRun {...props}/>, {database});
 
-        expect(queryByText('Finish Run')).toBeNull();
+        expect(queryByText('Finish')).toBeNull();
     });
 
     it('shows the error snackbar when finishing run fails', async () => {
@@ -364,7 +420,7 @@ describe('PlaybookRun', () => {
         jest.mocked(finishRun).mockResolvedValue({error: 'error'});
         const {getByText} = renderWithEverything(<PlaybookRun {...props}/>, {database});
 
-        const finishRunButton = getByText('Finish Run');
+        const finishRunButton = getByText('Finish');
         fireEvent.press(finishRunButton);
 
         const finishAction = jest.mocked(Alert.alert).mock.calls[0][2]![1];
@@ -372,6 +428,336 @@ describe('PlaybookRun', () => {
 
         await waitFor(() => {
             expect(showPlaybookErrorSnackbar).toHaveBeenCalled();
+        });
+    });
+
+    it('does android hardware back handler', () => {
+        const props = getBaseProps();
+        renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+        expect(useAndroidHardwareBackHandler).toHaveBeenCalledWith(Screens.PLAYBOOK_RUN, expect.any(Function));
+
+        const closeHandler = jest.mocked(useAndroidHardwareBackHandler).mock.calls[0][1];
+        closeHandler();
+
+        expect(navigateBack).toHaveBeenCalled();
+    });
+
+    it('does not render StatusUpdateIndicator for ChannelChecklistType', () => {
+        const props = getBaseProps();
+        (props.playbookRun as PlaybookRunModel).type = PLAYBOOK_RUN_TYPES.ChannelChecklistType;
+        const {queryByTestId} = renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+        expect(queryByTestId('status-update-indicator')).toBeNull();
+    });
+
+    it('renders StatusUpdateIndicator for PlaybookType', () => {
+        const props = getBaseProps();
+        (props.playbookRun as PlaybookRunModel).type = PLAYBOOK_RUN_TYPES.PlaybookType;
+        const {getByTestId} = renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+        expect(getByTestId('status-update-indicator')).toBeTruthy();
+    });
+
+    it('handles openOwnerProfile when owner is undefined', () => {
+        const props = getBaseProps();
+        props.owner = undefined;
+        jest.mocked(openUserProfile).mockClear();
+        const {queryByTestId} = renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+        // Should not crash, but owner chip won't be rendered
+        expect(queryByTestId('user-chip')).toBeNull();
+    });
+
+    it('handles openChangeOwnerModal when owner is undefined', () => {
+        const props = getBaseProps();
+        props.owner = undefined;
+        jest.mocked(goToSelectUser).mockClear();
+        const {queryByTestId} = renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+        // Should not crash, but owner chip won't be rendered
+        expect(queryByTestId('user-chip')).toBeNull();
+        expect(goToSelectUser).not.toHaveBeenCalled();
+    });
+
+    it('handles handleSelectOwner when playbookRun is undefined', () => {
+        // This test verifies the early return in handleSelectOwner
+        // Since the component shows ErrorState when playbookRun is undefined,
+        // we can't test the callback directly, but we verify the component handles it gracefully
+        const props = getBaseProps();
+        props.playbookRun = undefined;
+        const {getByTestId} = renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+        // Component should render ErrorState when playbookRun is undefined
+        expect(getByTestId('error-state')).toBeTruthy();
+    });
+
+    it('handles handleFinishRun when playbookRun is undefined', () => {
+        const props = getBaseProps();
+        props.participants.push(TestHelper.fakeUserModel({id: props.currentUserId}));
+        props.playbookRun = undefined;
+        jest.mocked(Alert.alert).mockClear();
+        renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+        // Should not show alert when playbookRun is undefined
+        expect(Alert.alert).not.toHaveBeenCalled();
+    });
+
+    it('handles channelId from model type', () => {
+        const props = getBaseProps();
+        (props.playbookRun as PlaybookRunModel).channelId = 'channel-id-123';
+        const {getByTestId} = renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+        const checklistList = getByTestId('checklist-list');
+        expect(checklistList.props.channelId).toBe('channel-id-123');
+    });
+
+    it('should pass timeline events down only for a run absent from the database', () => {
+        const props = getBaseProps();
+
+        const {getByTestId, rerender} = renderWithEverything(<PlaybookRun {...props}/>, {database});
+        expect(getByTestId('checklist-list').props.timelineEvents).toBeUndefined();
+
+        props.playbookRun = TestHelper.fakePlaybookRun({
+            id: 'run-1',
+            name: 'Test Playbook Run',
+            timeline_events: [timelineEvent],
+        });
+        rerender(<PlaybookRun {...props}/>);
+
+        expect(getByTestId('checklist-list').props.timelineEvents).toEqual([timelineEvent]);
+    });
+
+    it('handles channel_id from API type', () => {
+        const props = getBaseProps();
+        const apiRun = TestHelper.fakePlaybookRun({
+            id: 'run-1',
+            name: 'Test Playbook Run',
+            summary: 'Test summary',
+            channel_id: 'api-channel-id-456',
+        });
+        props.playbookRun = apiRun;
+        const {getByTestId} = renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+        const checklistList = getByTestId('checklist-list');
+        expect(checklistList.props.channelId).toBe('api-channel-id-456');
+    });
+
+    it('defaults channelId to empty string when missing', () => {
+        const props = getBaseProps();
+        const apiRun = TestHelper.fakePlaybookRun({
+            id: 'run-1',
+            name: 'Test Playbook Run',
+            summary: 'Test summary',
+        });
+        const runWithoutChannelId = {...apiRun} as Record<string, unknown>;
+        delete runWithoutChannelId.channel_id;
+        props.playbookRun = runWithoutChannelId as unknown as PlaybookRunModel;
+        const {getByTestId} = renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+        const checklistList = getByTestId('checklist-list');
+        expect(checklistList.props.channelId).toBe('');
+    });
+
+    it('handles lastSyncAt from model type', () => {
+        const props = getBaseProps();
+        (props.playbookRun as PlaybookRunModel).lastSyncAt = 99999;
+        const {getByTestId} = renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+        const outOfDateHeader = getByTestId('out-of-date-header');
+        expect(outOfDateHeader.props.lastSyncAt).toBe(99999);
+    });
+
+    it('defaults lastSyncAt to 0 when missing', () => {
+        const props = getBaseProps();
+        const apiRun = TestHelper.fakePlaybookRun({
+            id: 'run-1',
+            name: 'Test Playbook Run',
+            summary: 'Test summary',
+        });
+        props.playbookRun = apiRun;
+        const {getByTestId} = renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+        const outOfDateHeader = getByTestId('out-of-date-header');
+        expect(outOfDateHeader.props.lastSyncAt).toBe(0);
+    });
+
+    it('sets isParticipant to true when owner is current user', () => {
+        const props = getBaseProps();
+        props.owner = TestHelper.fakeUserModel({id: props.currentUserId});
+        props.participants = [];
+        const {getByTestId} = renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+        const checklistList = getByTestId('checklist-list');
+        expect(checklistList.props.isParticipant).toBe(true);
+    });
+
+    it('sets readOnly to true when finished even if user is participant', () => {
+        const props = getBaseProps();
+        props.participants.push(TestHelper.fakeUserModel({id: props.currentUserId}));
+        (props.playbookRun as PlaybookRunModel).currentStatus = 'Finished';
+        const {queryByText} = renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+        // Finish button should not be rendered when readOnly is true
+        expect(queryByText('Finish')).toBeNull();
+    });
+
+    it('defaults playbookRunType to PlaybookType when type is undefined but playbookId exists', () => {
+        const props = getBaseProps();
+        const run = props.playbookRun as PlaybookRunModel;
+        delete (run as Partial<PlaybookRunModel>).type;
+        run.playbookId = 'playbook-id-123';
+        const {getByTestId} = renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+        // StatusUpdateIndicator should be rendered for PlaybookType
+        expect(getByTestId('status-update-indicator')).toBeTruthy();
+    });
+
+    it('defaults playbookRunType to ChannelChecklistType when type is undefined and playbookId is empty', () => {
+        const props = getBaseProps();
+        const run = props.playbookRun as PlaybookRunModel;
+        delete (run as Partial<PlaybookRunModel>).type;
+        run.playbookId = '';
+        const {queryByTestId} = renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+        // StatusUpdateIndicator should not be rendered for ChannelChecklistType
+        expect(queryByTestId('status-update-indicator')).toBeNull();
+    });
+
+    it('handles playbookRunType with playbook_id from API type', () => {
+        const props = getBaseProps();
+        const apiRun = TestHelper.fakePlaybookRun({
+            id: 'run-1',
+            name: 'Test Playbook Run',
+            summary: 'Test summary',
+            playbook_id: 'api-playbook-id-789',
+        });
+        const runWithoutType = {...apiRun} as Record<string, unknown>;
+        delete runWithoutType.type;
+        props.playbookRun = runWithoutType as unknown as PlaybookRunModel;
+        const {getByTestId} = renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+        // StatusUpdateIndicator should be rendered for PlaybookType
+        expect(getByTestId('status-update-indicator')).toBeTruthy();
+    });
+
+    it('handles playbookRunType with empty playbook_id from API type', () => {
+        const props = getBaseProps();
+        const apiRun = TestHelper.fakePlaybookRun({
+            id: 'run-1',
+            name: 'Test Playbook Run',
+            summary: 'Test summary',
+            playbook_id: '',
+        });
+        const runWithoutType = {...apiRun} as Record<string, unknown>;
+        delete runWithoutType.type;
+        props.playbookRun = runWithoutType as unknown as PlaybookRunModel;
+        const {queryByTestId} = renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+        // StatusUpdateIndicator should not be rendered for ChannelChecklistType
+        expect(queryByTestId('status-update-indicator')).toBeNull();
+    });
+
+    it('renders edit icon when not read only', () => {
+        const props = getBaseProps();
+        props.participants.push(TestHelper.fakeUserModel({id: props.currentUserId}));
+        const {getByTestId} = renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+        const editIcon = getByTestId('playbook-run.edit-icon');
+        expect(editIcon).toBeTruthy();
+    });
+
+    it('does not render edit icon when read only', () => {
+        const props = getBaseProps();
+        const {queryByTestId} = renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+        const editIcon = queryByTestId('playbook-run.edit-icon');
+        expect(editIcon).toBeNull();
+    });
+
+    it('handles edit icon press', () => {
+        const props = getBaseProps();
+        props.participants.push(TestHelper.fakeUserModel({id: props.currentUserId}));
+        const {getByTestId} = renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+        const editIcon = getByTestId('playbook-run.edit-icon');
+        act(() => {
+            fireEvent.press(editIcon);
+        });
+        expect(goToEditPlaybookRun).toHaveBeenCalledWith(
+            'Test Playbook Run',
+            'Test summary',
+            props.playbookRun!.id,
+            {canEditSummary: true},
+        );
+    });
+
+    describe('tasks header controls', () => {
+        it('should start expanded with no filters applied', () => {
+            const props = getBaseProps();
+            const {getByTestId} = renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+            const checklistList = getByTestId('checklist-list');
+            expect(checklistList.props.expandedById).toEqual({});
+            expect(checklistList.props.filters).toEqual(DEFAULT_TASK_FILTERS);
+            expect(checklistList.props.currentUserId).toBe(props.currentUserId);
+        });
+
+        it('should collapse and expand every checklist from the header control', () => {
+            const props = getBaseProps();
+            const {getByTestId} = renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+            const button = getByTestId('playbook-run.collapse-all-button');
+            const checklistIds = props.checklists.map((checklist) => checklist.id);
+
+            act(() => {
+                fireEvent.press(button);
+            });
+
+            let checklistList = getByTestId('checklist-list');
+            expect(checklistList.props.expandedById).toEqual(
+                Object.fromEntries(checklistIds.map((id) => [id, false])),
+            );
+
+            act(() => {
+                fireEvent.press(button);
+            });
+
+            checklistList = getByTestId('checklist-list');
+            expect(checklistList.props.expandedById).toEqual(
+                Object.fromEntries(checklistIds.map((id) => [id, true])),
+            );
+        });
+
+        it('should open the task filter bottom sheet', () => {
+            const props = getBaseProps();
+            const {getByTestId} = renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+            act(() => {
+                fireEvent.press(getByTestId('playbook-run.filter-tasks-button'));
+            });
+
+            expect(bottomSheet).toHaveBeenCalled();
+        });
+
+        it('should apply the filters chosen in the bottom sheet to the checklists', () => {
+            const props = getBaseProps();
+            const {getByTestId} = renderWithEverything(<PlaybookRun {...props}/>, {database});
+
+            act(() => {
+                fireEvent.press(getByTestId('playbook-run.filter-tasks-button'));
+            });
+
+            // Drive the callback the sheet is handed, as the sheet itself renders in its own screen.
+            const renderContent = jest.mocked(bottomSheet).mock.calls[0][0];
+            const sheet = renderContent() as React.ReactElement<ComponentProps<typeof TaskFilter>>;
+            const newFilters = {...DEFAULT_TASK_FILTERS, showChecked: false};
+
+            act(() => {
+                sheet.props.onFiltersChanged(newFilters);
+            });
+
+            expect(getByTestId('checklist-list').props.filters).toEqual(newFilters);
         });
     });
 });

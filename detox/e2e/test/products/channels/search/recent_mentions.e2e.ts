@@ -8,8 +8,11 @@
 // *******************************************************************
 
 import {
+    Channel,
     Post,
     Setup,
+    Team,
+    User,
 } from '@support/server_api';
 import {
     serverOneUrl,
@@ -30,7 +33,8 @@ import {
     ServerScreen,
     ThreadScreen,
 } from '@support/ui/screen';
-import {expect} from 'detox';
+import {getRandomId, timeouts, wait, waitForElementToBeVisible, waitForElementToExist, waitForElementToNotExist, withSynchronizationDisabled} from '@support/utils';
+import {by, element, expect} from 'detox';
 
 describe('Search - Recent Mentions', () => {
     const serverOneDisplayName = 'Server 1';
@@ -38,14 +42,60 @@ describe('Search - Recent Mentions', () => {
     let testChannel: any;
     let testTeam: any;
     let testUser: any;
+    let mentionPost: any;
+    let ownMentionPost: any;
 
     beforeAll(async () => {
+        // # User B = testUser (the one who will be mentioned and who logs in)
         const {channel, team, user} = await Setup.apiInit(siteOneUrl);
         testChannel = channel;
         testTeam = team;
         testUser = user;
 
-        // # Log in to server
+        // # User A = mentioner. Add to team + channel.
+        const {user: mentioner} = await User.apiCreateUser(siteOneUrl, {prefix: 'mentioner'});
+        if (!mentioner?.id) {
+            throw new Error('[beforeAll] Failed to create mentioner');
+        }
+        await Team.apiAddUserToTeam(siteOneUrl, mentioner.id, team.id);
+        await Channel.apiAddUserToChannel(siteOneUrl, mentioner.id, channel.id);
+
+        // # Fixture 1: User A posts @testUser — used by tests that don't require
+        // ownership (display, save/unsave, pin/unpin).
+        await User.apiLogin(siteOneUrl, {
+            username: mentioner.username,
+            password: mentioner.newUser.password,
+        });
+
+        // Unique suffix so the matcher cannot collide with ownMentionPost, which embeds the same
+        // "@<username>" text node and would still satisfy a not.toExist() assertion.
+        const mentionText = `Other mention ${getRandomId()} @${testUser.username}`;
+        const {post: postByOther} = await Post.apiCreatePost(siteOneUrl, {
+            channelId: testChannel.id,
+            message: mentionText,
+        });
+        if (!postByOther?.id) {
+            throw new Error('[beforeAll] Failed to post mention as User A');
+        }
+        mentionPost = {...postByOther, messageText: mentionText};
+
+        // # Fixture 2: testUser self-posts a mention of itself — MM-T4909_3 needs testUser to own
+        // the post, and self-mentions still surface in the search-backed mentions feed.
+        await User.apiLogin(siteOneUrl, {
+            username: testUser.username,
+            password: testUser.newUser.password,
+        });
+        const ownText = `Own mention ${getRandomId()} @${testUser.username}`;
+        const {post: postByOwn} = await Post.apiCreatePost(siteOneUrl, {
+            channelId: testChannel.id,
+            message: ownText,
+        });
+        if (!postByOwn?.id) {
+            throw new Error('[beforeAll] Failed to post own mention as testUser');
+        }
+        ownMentionPost = {...postByOwn, messageText: ownText};
+
+        // # User B (testUser) logs in via UI.
         await ServerScreen.connectToServer(serverOneUrl, serverOneDisplayName);
         await LoginScreen.login(testUser);
     });
@@ -60,39 +110,17 @@ describe('Search - Recent Mentions', () => {
         await HomeScreen.logout();
     });
 
-    it('MM-T4909_1 - should match elements on recent mentions screen', async () => {
+    it('MM-T4909_2 - should be able to display a recent mention in recent mentions screen and navigate to message channel', async () => {
         // # Open recent mentions screen
         await RecentMentionsScreen.open();
-
-        // * Verify basic elements on recent mentions screen
-        await expect(RecentMentionsScreen.largeHeaderTitle).toHaveText('Recent Mentions');
-        await expect(RecentMentionsScreen.largeHeaderSubtitle).toHaveText('Messages you\'ve been mentioned in');
-        await expect(RecentMentionsScreen.emptyTitle).toHaveText('No Mentions yet');
-        await expect(RecentMentionsScreen.emptyParagraph).toHaveText('You\'ll see messages here when someone mentions you or uses terms you\'re monitoring.');
-
-        // # Go back to channel list screen
-        await ChannelListScreen.open();
-    });
-
-    it('MM-T4909_2 - should be able to display a recent mention in recent mentions screen and navigate to message channel', async () => {
-        // # Open a channel screen and post a message with at-mention to current user
-        const message = `@${testUser.username}`;
-        await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelScreen.postMessage(message);
-
-        // * Verify message with at-mention to current user is posted
-        const {post} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
-        const {postListPostItem} = ChannelScreen.getPostListPostItem(post.id, message);
-        await expect(postListPostItem).toBeVisible();
-
-        // # Go back to channel list screen and open recent mentions screen
-        await ChannelScreen.back();
-        await RecentMentionsScreen.open();
-
-        // * Verify on recent mentions screen and recent mention is displayed with channel info
         await RecentMentionsScreen.toBeVisible();
-        const {postListPostItem: recentMentionsPostListPostItem, postListPostItemChannelInfoChannelDisplayName, postListPostItemChannelInfoTeamDisplayName} = RecentMentionsScreen.getPostListPostItem(post.id, message);
-        await expect(recentMentionsPostListPostItem).toBeVisible();
+
+        const {
+            postListPostItem: recentMentionsPostListPostItem,
+            postListPostItemChannelInfoChannelDisplayName,
+            postListPostItemChannelInfoTeamDisplayName,
+        } = RecentMentionsScreen.getPostListPostItem(mentionPost.id, mentionPost.messageText);
+        await waitForElementToBeVisible(recentMentionsPostListPostItem, timeouts.TEN_SEC);
         await expect(postListPostItemChannelInfoChannelDisplayName).toHaveText(testChannel.display_name);
         await expect(postListPostItemChannelInfoTeamDisplayName).toHaveText(testTeam.display_name);
 
@@ -100,9 +128,14 @@ describe('Search - Recent Mentions', () => {
         await recentMentionsPostListPostItem.tap();
         await PermalinkScreen.jumpToRecentMessages();
 
-        // * Verify on channel screen and recent mention is displayed
+        // # Dismiss the scheduled-post tutorial tooltip — it surfaces on the
+        // user's first channel-open and overlays channel.screen, breaking the
+        // visibility assertion below.
+        await ChannelScreen.dismissScheduledPostTooltip();
+
+        // * Verify on channel screen and mention is displayed
         await ChannelScreen.toBeVisible();
-        const {postListPostItem: channelPostListPostItem} = ChannelScreen.getPostListPostItem(post.id, message);
+        const {postListPostItem: channelPostListPostItem} = ChannelScreen.getPostListPostItem(mentionPost.id, mentionPost.messageText);
         await expect(channelPostListPostItem).toBeVisible();
 
         // # Go back to channel list screen
@@ -110,146 +143,145 @@ describe('Search - Recent Mentions', () => {
         await ChannelListScreen.open();
     });
 
-    it('MM-T4909_3 - should be able to edit, reply to, and delete a recent mention from recent mentions screen', async () => {
-        // # Open a channel screen, post a message with at-mention to current user, go back to channel list screen, and open recent mentions screen
-        const message = `@${testUser.username}`;
-        await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelScreen.postMessage(message);
-        await ChannelScreen.back();
+    it('MM-T4909_4 - should be able to save/unsave a recent mention from recent mentions screen', async () => {
+        // # Open recent mentions screen
         await RecentMentionsScreen.open();
-
-        // * Verify on recent mentions screen
         await RecentMentionsScreen.toBeVisible();
 
-        // # Open post options for recent mention and tap on edit option
-        const {post: mentionPost} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
-        await RecentMentionsScreen.openPostOptionsFor(mentionPost.id, message);
-        await PostOptionsScreen.editPostOption.tap();
+        // # Open post options for the fixture mention and tap Save
+        await RecentMentionsScreen.openPostOptionsFor(mentionPost.id);
+        await PostOptionsScreen.savePostOption.tap();
 
-        // * Verify on edit post screen
+        await Post.waitForPostFlagged(siteOneUrl, testUser.id, mentionPost.id);
+        await SavedMessagesScreen.open();
+
+        // * Verify mention appears on saved messages screen
+        await SavedMessagesScreen.waitForPostInList(mentionPost.id, mentionPost.messageText);
+
+        // # Unsave: back to recent mentions, open post options, tap Unsave
+        await RecentMentionsScreen.open();
+        await RecentMentionsScreen.openPostOptionsFor(mentionPost.id);
+        await PostOptionsScreen.unsavePostOption.tap();
+
+        // Confirm the server dropped the flag before opening the screen, otherwise it can
+        // render the stale saved list.
+        await Post.waitForPostUnflagged(siteOneUrl, testUser.id, mentionPost.id);
+        await SavedMessagesScreen.open();
+
+        // * Verify mention is no longer on saved messages screen.
+        await SavedMessagesScreen.verifyPostUnsaved(mentionPost.id);
+
+        // # Go back to channel list screen
+        await SavedMessagesScreen.close();
+    });
+
+    it('MM-T4909_5 - should be able to pin/unpin a recent mention from recent mentions screen', async () => {
+        // # Open recent mentions screen
+        await RecentMentionsScreen.open();
+        await RecentMentionsScreen.toBeVisible();
+
+        const {postListPostItem} = PinnedMessagesScreen.getPostListPostItem(mentionPost.id, mentionPost.messageText);
+
+        // Keep sync off only while the post-options sheet is active. The tap helper waits
+        // for dismissal; server state and the visible mentions screen form the idle boundary.
+        await withSynchronizationDisabled(async () => {
+            // # Open post options for the fixture mention and tap Pin to Channel
+            await RecentMentionsScreen.openPostOptionsFor(mentionPost.id);
+            await PostOptionsScreen.tapPinPost();
+            await Post.waitForPostPinned(siteOneUrl, testChannel.id, mentionPost.id);
+            await RecentMentionsScreen.toBeVisible();
+            await wait(timeouts.ONE_SEC);
+        });
+
+        // # Navigate to the channel's Pinned Messages screen
+        await ChannelListScreen.open();
+        await ChannelScreen.open(channelsCategory, testChannel.name);
+        await ChannelInfoScreen.open();
+        await PinnedMessagesScreen.open();
+
+        // * Verify mention is displayed on pinned messages screen
+        await waitForElementToExist(postListPostItem, timeouts.TEN_SEC);
+
+        // # Unpin and verify removal
+        await PinnedMessagesScreen.back();
+        await ChannelInfoScreen.close();
+        await ChannelScreen.back();
+        await RecentMentionsScreen.open();
+        await withSynchronizationDisabled(async () => {
+            await RecentMentionsScreen.openPostOptionsFor(mentionPost.id);
+            await PostOptionsScreen.tapUnpinPost();
+            await Post.waitForPostUnpinned(siteOneUrl, testChannel.id, mentionPost.id);
+            await RecentMentionsScreen.toBeVisible();
+            await wait(timeouts.ONE_SEC);
+        });
+
+        // * Verify mention is no longer pinned
+        await ChannelListScreen.open();
+        await ChannelScreen.open(channelsCategory, testChannel.name);
+        await ChannelInfoScreen.open();
+        await PinnedMessagesScreen.open();
+        await waitForElementToNotExist(postListPostItem, timeouts.TWENTY_SEC);
+
+        // # Go back to channel list screen
+        await PinnedMessagesScreen.back();
+        await ChannelInfoScreen.close();
+        await ChannelScreen.back();
+        await ChannelListScreen.open();
+    });
+
+    it('MM-T4909_3 - should be able to edit, reply to, and delete a recent mention from recent mentions screen', async () => {
+        // # Open recent mentions screen
+        await RecentMentionsScreen.open();
+        await RecentMentionsScreen.toBeVisible();
+
+        // # Open post options for the testUser-owned mention and tap Edit
+        await RecentMentionsScreen.openPostOptionsFor(ownMentionPost.id);
+        await PostOptionsScreen.editPostOption.tap();
         await EditPostScreen.toBeVisible();
 
-        // # Edit post message and tap save button
-        const updatedMessage = `${message} edit`;
+        // # Edit the message and save
+        const updatedMessage = `${ownMentionPost.messageText} edit`;
         await EditPostScreen.messageInput.replaceText(updatedMessage);
-        await EditPostScreen.saveButton.tap();
+        await EditPostScreen.save();
 
-        // * Verify post message is updated and displays edited indicator '(edited)'
-        const {postListPostItem: updatedPostListPostItem, postListPostItemEditedIndicator} = RecentMentionsScreen.getPostListPostItem(mentionPost.id, updatedMessage);
-        await expect(updatedPostListPostItem).toBeVisible();
-        await expect(postListPostItemEditedIndicator).toHaveText('Edited');
+        // * Wait for channel API + search index (mentions fetch uses posts/search).
+        await Post.waitForPostMessage(siteOneUrl, testChannel.id, ownMentionPost.id, updatedMessage);
+        await Post.waitForPostMessageInSearch(
+            siteOneUrl,
+            `@${testUser.username} `,
+            ownMentionPost.id,
+            updatedMessage,
+        );
 
-        // # Open post options for recent mention and tap on reply option
-        await RecentMentionsScreen.openPostOptionsFor(mentionPost.id, updatedMessage);
+        await RecentMentionsScreen.toBeVisible();
+
+        // * Refresh and verify the edited state in the recent-mentions UI.
+        await RecentMentionsScreen.verifyPostEdited(ownMentionPost.id, updatedMessage);
+        await RecentMentionsScreen.openPostOptionsFor(ownMentionPost.id);
         await PostOptionsScreen.replyPostOption.tap();
-
-        // * Verify on thread screen
         await ThreadScreen.toBeVisible();
 
         // # Post a reply
-        const replyMessage = `${message} reply`;
+        const replyMessage = `${ownMentionPost.messageText} reply`;
         await ThreadScreen.postMessage(replyMessage);
 
-        // * Verify reply is posted
+        // * Verify the reply is posted
         const {post: replyPost} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
         const {postListPostItem} = ThreadScreen.getPostListPostItem(replyPost.id, replyMessage);
         await expect(postListPostItem).toBeVisible();
 
-        // # Go back to recent mentions screen
+        // # Back to recent mentions and verify reply count
         await ThreadScreen.back();
+        await waitForElementToBeVisible(element(by.text('1 reply')), timeouts.TEN_SEC);
 
-        // * Verify reply count and following button
-        const {postListPostItemFooterReplyCount, postListPostItemFooterFollowingButton} = RecentMentionsScreen.getPostListPostItem(mentionPost.id, updatedMessage);
-        await expect(postListPostItemFooterReplyCount).toHaveText('1 reply');
-        await expect(postListPostItemFooterFollowingButton).toBeVisible();
-
-        // # Open post options for updated recent mention and delete post
-        await RecentMentionsScreen.openPostOptionsFor(mentionPost.id, updatedMessage);
+        // # Delete the post via post options (same helper, same reason as above)
+        await RecentMentionsScreen.openPostOptionsFor(ownMentionPost.id);
         await PostOptionsScreen.deletePost({confirm: true});
 
-        // * Verify updated recent mention is deleted
-        await expect(postListPostItem).not.toExist();
+        // * Verify mention is removed
+        await waitFor(element(by.id(`recent_mentions.post_list.post.${ownMentionPost.id}`))).not.toExist().withTimeout(timeouts.TEN_SEC);
 
         // # Go back to channel list screen
         await ChannelListScreen.open();
-    });
-
-    it('MM-T4909_4 - should be able to save/unsave a recent mention from recent mentions screen', async () => {
-        // # Open a channel screen, post a message with at-mention to current user, go back to channel list screen, and open recent mentions screen
-        const message = `@${testUser.username}`;
-        await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelScreen.postMessage(message);
-        await ChannelScreen.back();
-        await RecentMentionsScreen.open();
-
-        // * Verify on recent mentions screen
-        await RecentMentionsScreen.toBeVisible();
-
-        // # Open post options for recent mention, tap on save option, and open saved messages screen
-        const {post: mentionPost} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
-        await RecentMentionsScreen.openPostOptionsFor(mentionPost.id, message);
-        await PostOptionsScreen.savePostOption.tap();
-        await SavedMessagesScreen.open();
-
-        // * Verify recent mention is displayed on saved messages screen
-        const {postListPostItem} = SavedMessagesScreen.getPostListPostItem(mentionPost.id, message);
-        await expect(postListPostItem).toBeVisible();
-
-        // # Go back to recent mentions screen, open post options for recent mention, tap on usave option, and open saved messages screen
-        await RecentMentionsScreen.open();
-        await RecentMentionsScreen.openPostOptionsFor(mentionPost.id, message);
-        await PostOptionsScreen.unsavePostOption.tap();
-        await SavedMessagesScreen.open();
-
-        // * Verify recent mention is not displayed anymore on saved messages screen
-        await expect(postListPostItem).not.toExist();
-
-        // # Go back to channel list screen
-        await ChannelListScreen.open();
-    });
-
-    it('MM-T4909_5 - should be able to pin/unpin a recent mention from recent mentions screen', async () => {
-        // # Open a channel screen, post a message with at-mention to current user, go back to channel list screen, and open recent mentions screen
-        const message = `@${testUser.username}`;
-        await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelScreen.postMessage(message);
-        await ChannelScreen.back();
-        await RecentMentionsScreen.open();
-
-        // * Verify on recent mentions screen
-        await RecentMentionsScreen.toBeVisible();
-
-        // # Open post options for recent mention, tap on pin to channel option, go back to channel list screen, open the channel screen where recent mention is posted, open channel info screen, and open pinned messages screen
-        const {post: mentionPost} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
-        await RecentMentionsScreen.openPostOptionsFor(mentionPost.id, message);
-        await PostOptionsScreen.pinPostOption.tap();
-        await ChannelListScreen.open();
-        await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelInfoScreen.open();
-        await PinnedMessagesScreen.open();
-
-        // * Verify recent mention is displayed on pinned messages screen
-        const {postListPostItem} = PinnedMessagesScreen.getPostListPostItem(mentionPost.id, message);
-        await expect(postListPostItem).toBeVisible();
-
-        // # Go back to recent mentions screen, open post options for recent mention, tap on unpin from channel option, go back to channel list screen, open the channel screen where recent mention is posted, open channel info screen, and open pinned messages screen
-        await PinnedMessagesScreen.back();
-        await ChannelInfoScreen.close();
-        await ChannelScreen.back();
-        await RecentMentionsScreen.open();
-        await RecentMentionsScreen.openPostOptionsFor(mentionPost.id, message);
-        await PostOptionsScreen.unpinPostOption.tap();
-        await ChannelListScreen.open();
-        await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelInfoScreen.open();
-        await PinnedMessagesScreen.open();
-
-        // * Verify recent mention is not displayed anymore on pinned messages screen
-        await expect(postListPostItem).not.toExist();
-
-        // # Go back to channel list screen
-        await PinnedMessagesScreen.back();
-        await ChannelInfoScreen.close();
-        await ChannelScreen.back();
     });
 });

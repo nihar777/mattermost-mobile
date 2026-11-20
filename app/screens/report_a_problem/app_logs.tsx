@@ -1,5 +1,6 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
+
 import TurboLogger from '@mattermost/react-native-turbo-log';
 import RNUtils from '@mattermost/rnutils';
 import React, {useCallback, useEffect, useState} from 'react';
@@ -8,9 +9,12 @@ import {View, Text, ActivityIndicator, Platform} from 'react-native';
 import Share from 'react-native-share';
 
 import Button from '@components/button';
+import {useServerUrl} from '@context/server';
 import {useTheme} from '@context/theme';
+import SecurityManager from '@managers/security_manager';
 import {deleteFile, pathWithPrefix} from '@utils/file';
 import {logDebug} from '@utils/log';
+import {EXCLUDE_THIS_APP_FROM_FILE_SHARE} from '@utils/share_targets';
 import {makeStyleSheetFromTheme} from '@utils/theme';
 
 import LogFileItem from './log_file_item';
@@ -31,6 +35,7 @@ const AppLogs = () => {
     const theme = useTheme();
     const styles = getStyleSheet(theme);
     const intl = useIntl();
+    const serverUrl = useServerUrl();
 
     const [logFiles, setLogFiles] = useState<string[]>([]);
     const [isLoading, setIsLoading] = useState(true);
@@ -57,7 +62,10 @@ const AppLogs = () => {
             } else {
                 await Share.open({
                     url: pathWithPrefix('file://', zipFilePath),
-                    saveToFiles: true,
+
+                    // If Allowing to save to Files app, save it there, otherwise show share dialog
+                    saveToFiles: SecurityManager.canSaveToLocation(serverUrl, 'FilesApp'),
+                    excludedActivityTypes: EXCLUDE_THIS_APP_FROM_FILE_SHARE,
                 });
             }
         } catch (error) {
@@ -66,12 +74,12 @@ const AppLogs = () => {
 
         if (zipFilePath) {
             try {
-                await deleteFile(zipFilePath);
+                deleteFile(zipFilePath);
             } catch (error) {
                 logDebug('Failed to delete zip file', error);
             }
         }
-    }, [logFiles]);
+    }, [logFiles, serverUrl]);
 
     const hasLogs = logFiles.length > 0;
 
@@ -105,6 +113,7 @@ const AppLogs = () => {
                     theme={theme}
                     iconName='download-outline'
                     disabled={!hasLogs}
+                    testID='app_logs_download_button'
                 />
             </View>
         </View>

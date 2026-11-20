@@ -4,11 +4,14 @@
 import {withDatabase, withObservables} from '@nozbe/watermelondb/react';
 import React from 'react';
 import {combineLatest, of as of$} from 'rxjs';
-import {switchMap} from 'rxjs/operators';
+import {filter, switchMap} from 'rxjs/operators';
 
 import {General, Permissions} from '@constants';
+import {RenderPermissionAction} from '@constants/access_control';
+import {withServerUrl} from '@context/server';
 import {observeChannel, observeIsReadOnlyChannel} from '@queries/servers/channel';
 import {queryDraft, observeFirstDraft} from '@queries/servers/drafts';
+import {observeChannelActionDenied} from '@queries/servers/render_permissions';
 import {observePermissionForChannel} from '@queries/servers/role';
 import {observeCurrentChannelId} from '@queries/servers/system';
 import {observeCurrentUser, observeUser} from '@queries/servers/user';
@@ -22,10 +25,11 @@ type OwnProps = {
     channelId: string;
     channelIsArchived?: boolean;
     rootId?: string;
+    serverUrl: string;
 }
 
 const enhanced = withObservables(['channelId', 'rootId', 'channelIsArchived'], (ownProps: WithDatabaseArgs & OwnProps) => {
-    const {database, rootId = ''} = ownProps;
+    const {database, rootId = '', serverUrl} = ownProps;
     let channelId = of$(ownProps.channelId);
     if (!ownProps.channelId) {
         channelId = observeCurrentChannelId(database);
@@ -47,7 +51,16 @@ const enhanced = withObservables(['channelId', 'rootId', 'channelIsArchived'], (
     );
 
     const canPost = combineLatest([channel, currentUser]).pipe(switchMap(([c, u]) => (c && u ? observePermissionForChannel(database, c, u, Permissions.CREATE_POST, true) : of$(true))));
-    const channelIsArchived = channel.pipe(switchMap((c) => (ownProps.channelIsArchived ? of$(true) : of$(c?.deleteAt !== 0))));
+    const writeDenied = channelId.pipe(
+        switchMap((id) => observeChannelActionDenied(database, serverUrl, id, RenderPermissionAction.ChannelWriteAccess)),
+    );
+
+    // Filter transient `undefined` emissions so the archived banner doesn't
+    // flicker off during the archive-modal dismiss transition.
+    const channelIsArchived = channel.pipe(
+        filter((c): c is NonNullable<typeof c> => c != null),
+        switchMap((c) => (ownProps.channelIsArchived ? of$(true) : of$(c.deleteAt !== 0))),
+    );
 
     const channelIsReadOnly = observeIsReadOnlyChannel(database, ownProps.channelId);
 
@@ -76,7 +89,8 @@ const enhanced = withObservables(['channelId', 'rootId', 'channelIsArchived'], (
         deactivatedChannel,
         files,
         message,
+        writeDenied,
     };
 });
 
-export default React.memo(withDatabase(enhanced(PostDraft)));
+export default React.memo(withDatabase(withServerUrl(enhanced(PostDraft))));

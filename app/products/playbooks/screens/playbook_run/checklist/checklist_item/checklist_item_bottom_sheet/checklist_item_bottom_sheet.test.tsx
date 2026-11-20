@@ -5,17 +5,18 @@
 import {BottomSheetScrollView} from '@gorhom/bottom-sheet';
 import {act, fireEvent, waitFor} from '@testing-library/react-native';
 import React, {type ComponentProps} from 'react';
-import {ScrollView} from 'react-native';
+import {Alert, ScrollView} from 'react-native';
 
 import OptionBox from '@components/option_box';
 import OptionItem from '@components/option_item';
-import {Preferences} from '@constants';
+import {Preferences, Screens} from '@constants';
 import {useIsTablet} from '@hooks/device';
-import {setAssignee, setChecklistItemCommand, setDueDate} from '@playbooks/actions/remote/checklist';
-import {goToEditCommand, goToSelectDate, goToSelectUser} from '@playbooks/screens/navigation';
-import {dismissBottomSheet, openUserProfileModal} from '@screens/navigation';
+import {setAssignee, setChecklistItemCommand, setDueDate, deleteChecklistItem, updateChecklistItemTitleAndDescription} from '@playbooks/actions/remote/checklist';
+import {goToEditChecklistItem, goToEditCommand, goToSelectDate, goToSelectUser} from '@playbooks/screens/navigation';
+import {dismissBottomSheet} from '@screens/navigation';
 import {renderWithIntl} from '@test/intl-test-helper';
 import TestHelper from '@test/test_helper';
+import {openUserProfile} from '@utils/navigation';
 import {showPlaybookErrorSnackbar} from '@utils/snack_bar';
 
 import ChecklistItemBottomSheet from './checklist_item_bottom_sheet';
@@ -44,6 +45,8 @@ jest.mock('@context/server', () => ({
 
 jest.mock('@playbooks/screens/navigation');
 jest.mock('@utils/snack_bar');
+jest.mock('@screens/navigation');
+jest.mock('@utils/navigation');
 
 describe('ChecklistItemBottomSheet', () => {
     const mockOnCheck = jest.fn();
@@ -93,6 +96,7 @@ describe('ChecklistItemBottomSheet', () => {
             teammateNameDisplay: mockTeammateNameDisplay,
             isDisabled: false,
             currentUserTimezone: {useAutomaticTimezone: false, automaticTimezone: '', manualTimezone: 'America/New_York'},
+            isMilitaryTime: false,
             participantIds: ['user-1', 'user-2'],
             conditionReason: '',
             showConditionIcon: false,
@@ -103,7 +107,19 @@ describe('ChecklistItemBottomSheet', () => {
     beforeEach(() => {
         jest.clearAllMocks();
         jest.mocked(useIsTablet).mockReturnValue(false);
+        jest.mocked(dismissBottomSheet).mockResolvedValue(undefined);
     });
+
+    function mockDeferredDismiss() {
+        let resolveDismiss: () => void = () => {
+            // noop until assigned
+        };
+        const dismissPromise = new Promise<void>((resolve) => {
+            resolveDismiss = resolve;
+        });
+        jest.mocked(dismissBottomSheet).mockReturnValue(dismissPromise);
+        return {resolveDismiss};
+    }
 
     it('renders correctly with all props', () => {
         const props = getBaseProps();
@@ -126,6 +142,16 @@ describe('ChecklistItemBottomSheet', () => {
 
         expect(getByText('Test Checklist Item')).toBeVisible();
         expect(queryByText('This is a test description')).toBeNull();
+    });
+
+    it('renders the latest task activity details when available', () => {
+        const props = getBaseProps();
+        props.activity = {action: 'check', actorUserId: mockAssignee.id, timestamp: Date.now()};
+        props.activityActor = mockAssignee;
+
+        const {getByTestId} = renderWithIntl(<ChecklistItemBottomSheet {...props}/>);
+
+        expect(getByTestId('playbook_run.checklist_item.task_activity.detail')).toBeVisible();
     });
 
     it('renders correctly without assignee', () => {
@@ -394,26 +420,34 @@ describe('ChecklistItemBottomSheet', () => {
     });
 
     it('opens the command modal when the command is clicked', async () => {
+        const {resolveDismiss} = mockDeferredDismiss();
         const props = getBaseProps();
         props.checklistNumber = 2;
         props.itemNumber = 4;
         const {getByTestId} = renderWithIntl(<ChecklistItemBottomSheet {...props}/>);
         const commandItem = getByTestId('checklist_item.command');
 
+        let actionPromise!: Promise<void>;
         act(() => {
-            commandItem.props.action();
+            actionPromise = commandItem.props.action();
+        });
+
+        expect(dismissBottomSheet).toHaveBeenCalled();
+        expect(goToEditCommand).not.toHaveBeenCalled();
+
+        await act(async () => {
+            resolveDismiss();
+            await actionPromise;
         });
 
         expect(goToEditCommand).toHaveBeenCalledWith(
-            expect.anything(),
-            expect.anything(),
             'Run 1',
             'test command',
             'channel-1',
             expect.any(Function),
         );
 
-        const updateCommand = jest.mocked(goToEditCommand).mock.calls[0][5];
+        const updateCommand = jest.mocked(goToEditCommand).mock.calls[0][3];
         await act(async () => {
             updateCommand('new command');
         });
@@ -429,6 +463,7 @@ describe('ChecklistItemBottomSheet', () => {
     });
 
     it('opens the set date modal when the due date is clicked', async () => {
+        const {resolveDismiss} = mockDeferredDismiss();
         const props = getBaseProps();
         props.checklistNumber = 2;
         props.itemNumber = 4;
@@ -438,18 +473,27 @@ describe('ChecklistItemBottomSheet', () => {
         });
         const {getByTestId} = renderWithIntl(<ChecklistItemBottomSheet {...props}/>);
         const dueDateItem = getByTestId('checklist_item.due_date');
+
+        let actionPromise!: Promise<void>;
         act(() => {
-            dueDateItem.props.action();
+            actionPromise = dueDateItem.props.action();
         });
+
+        expect(dismissBottomSheet).toHaveBeenCalled();
+        expect(goToSelectDate).not.toHaveBeenCalled();
+
+        await act(async () => {
+            resolveDismiss();
+            await actionPromise;
+        });
+
         expect(goToSelectDate).toHaveBeenCalledWith(
-            expect.anything(),
-            expect.anything(),
             'Run 1',
             expect.any(Function),
             1640995200000,
         );
 
-        const setDate = jest.mocked(goToSelectDate).mock.calls[0][3];
+        const setDate = jest.mocked(goToSelectDate).mock.calls[0][1];
         await act(async () => {
             setDate(1672531200000);
         });
@@ -482,17 +526,16 @@ describe('ChecklistItemBottomSheet', () => {
             onPress('user-1');
         });
 
-        expect(openUserProfileModal).toHaveBeenCalledWith(
-            expect.anything(), // intl
-            expect.anything(), // theme
+        expect(openUserProfile).toHaveBeenCalledWith(
             {
                 userId: 'user-1',
-                location: 'PlaybookRun',
+                location: Screens.PLAYBOOK_RUN,
             },
         );
     });
 
     it('opens the select assigneed screen when the assignee option item is pressed', async () => {
+        const {resolveDismiss} = mockDeferredDismiss();
         const props = getBaseProps();
         props.checklistNumber = 2;
         props.itemNumber = 4;
@@ -501,12 +544,20 @@ describe('ChecklistItemBottomSheet', () => {
         const assigneeItem = getByTestId('checklist_item.assignee');
         const onPress = assigneeItem.props.action;
 
+        let actionPromise!: Promise<void>;
+        act(() => {
+            actionPromise = onPress('user-1');
+        });
+
+        expect(dismissBottomSheet).toHaveBeenCalled();
+        expect(goToSelectUser).not.toHaveBeenCalled();
+
         await act(async () => {
-            onPress('user-1');
+            resolveDismiss();
+            await actionPromise;
         });
 
         expect(goToSelectUser).toHaveBeenCalledWith(
-            expect.anything(),
             'Run 1',
             'Assignee',
             ['user-1', 'user-2'],
@@ -515,8 +566,8 @@ describe('ChecklistItemBottomSheet', () => {
             expect.any(Function),
         );
 
-        const handleSelect = jest.mocked(goToSelectUser).mock.calls[0][5];
-        const handleRemove = jest.mocked(goToSelectUser).mock.calls[0][6];
+        const handleSelect = jest.mocked(goToSelectUser).mock.calls[0][4];
+        const handleRemove = jest.mocked(goToSelectUser).mock.calls[0][5];
 
         await act(async () => {
             handleSelect(TestHelper.fakeUser({id: 'user-1'}));
@@ -556,11 +607,11 @@ describe('ChecklistItemBottomSheet', () => {
         const onPress = assigneeItem.props.action;
 
         await act(async () => {
-            onPress('user-1');
+            await onPress('user-1');
         });
 
-        const handleSelect = jest.mocked(goToSelectUser).mock.calls[0][5];
-        const handleRemove = jest.mocked(goToSelectUser).mock.calls[0][6];
+        const handleSelect = jest.mocked(goToSelectUser).mock.calls[0][4];
+        const handleRemove = jest.mocked(goToSelectUser).mock.calls[0][5];
 
         await act(async () => {
             handleSelect(TestHelper.fakeUser({id: 'user-1'}));
@@ -679,7 +730,7 @@ describe('ChecklistItemBottomSheet', () => {
             const {getByTestId} = renderWithIntl(<ChecklistItemBottomSheet {...props}/>);
 
             const icon = getByTestId('checklist_item_bottom_sheet.condition_icon');
-            expect(icon.props.color).toBe(Preferences.THEMES.denim.centerChannelColor);
+            expect(icon).toHaveStyle({color: Preferences.THEMES.denim.centerChannelColor});
         });
 
         it('should use the correct icon color (error color)', () => {
@@ -690,7 +741,7 @@ describe('ChecklistItemBottomSheet', () => {
             const {getByTestId} = renderWithIntl(<ChecklistItemBottomSheet {...props}/>);
 
             const icon = getByTestId('checklist_item_bottom_sheet.condition_icon');
-            expect(icon.props.color).toBe(Preferences.THEMES.denim.errorTextColor);
+            expect(icon).toHaveStyle({color: Preferences.THEMES.denim.errorTextColor});
         });
 
         it('should display the correct text structure', () => {
@@ -721,14 +772,244 @@ describe('ChecklistItemBottomSheet', () => {
         });
 
         it('should use source-branch icon with size 24', () => {
+            // CompassIcon (name='source-branch') renders as a Text node; the `name` prop is consumed
+            // internally and does not appear on rendered props. Verify the glyph (0xf062c) instead.
+            const SOURCE_BRANCH = String.fromCodePoint(0xf062c);
             const props = getBaseProps();
             props.showConditionIcon = true;
             props.conditionReason = 'Condition reason';
             const {getByTestId} = renderWithIntl(<ChecklistItemBottomSheet {...props}/>);
 
             const icon = getByTestId('checklist_item_bottom_sheet.condition_icon');
-            expect(icon.props.name).toBe('source-branch');
-            expect(icon.props.size).toBe(24);
+            expect(icon.props.children).toContain(SOURCE_BRANCH);
+        });
+    });
+
+    describe('delete button', () => {
+        beforeEach(() => {
+            jest.spyOn(Alert, 'alert');
+        });
+
+        it('should render delete button when isDisabled is false', () => {
+            const props = getBaseProps();
+            props.isDisabled = false;
+            const {getByTestId} = renderWithIntl(<ChecklistItemBottomSheet {...props}/>);
+
+            expect(getByTestId('checklist_item_bottom_sheet.delete_button')).toBeVisible();
+        });
+
+        it('should not render delete button when isDisabled is true', () => {
+            const props = getBaseProps();
+            props.isDisabled = true;
+            const {queryByTestId} = renderWithIntl(<ChecklistItemBottomSheet {...props}/>);
+
+            expect(queryByTestId('checklist_item_bottom_sheet.delete_button')).toBeNull();
+        });
+
+        it('should show confirmation alert when delete button is pressed', () => {
+            const props = getBaseProps();
+            const {getByTestId} = renderWithIntl(<ChecklistItemBottomSheet {...props}/>);
+
+            const deleteButton = getByTestId('checklist_item_bottom_sheet.delete_button');
+            fireEvent.press(deleteButton);
+
+            expect(Alert.alert).toHaveBeenCalledWith(
+                'Delete task',
+                'Are you sure you want to delete this task? This action cannot be undone.',
+                expect.arrayContaining([
+                    expect.objectContaining({text: 'Cancel', style: 'cancel'}),
+                    expect.objectContaining({text: 'Delete', style: 'destructive'}),
+                ]),
+            );
+        });
+
+        it('should call deleteChecklistItem and dismissBottomSheet when confirmed', async () => {
+            jest.mocked(deleteChecklistItem).mockResolvedValue({data: true});
+            const props = getBaseProps();
+            props.checklistNumber = 2;
+            props.itemNumber = 3;
+            const {getByTestId} = renderWithIntl(<ChecklistItemBottomSheet {...props}/>);
+
+            const deleteButton = getByTestId('checklist_item_bottom_sheet.delete_button');
+            fireEvent.press(deleteButton);
+
+            // Get the onPress callback from the Delete button in the alert
+            const alertCall = jest.mocked(Alert.alert).mock.calls[0];
+            const buttons = alertCall[2] as Array<{text: string; onPress?: () => void}>;
+            const deleteButtonConfig = buttons.find((b) => b.text === 'Delete');
+
+            await act(async () => {
+                deleteButtonConfig?.onPress?.();
+            });
+
+            expect(dismissBottomSheet).toHaveBeenCalled();
+            expect(deleteChecklistItem).toHaveBeenCalledWith(
+                'server-url',
+                'run-1',
+                'item-1',
+                2,
+                3,
+            );
+        });
+
+        it('should not call deleteChecklistItem when cancelled', () => {
+            const props = getBaseProps();
+            const {getByTestId} = renderWithIntl(<ChecklistItemBottomSheet {...props}/>);
+
+            const deleteButton = getByTestId('checklist_item_bottom_sheet.delete_button');
+            fireEvent.press(deleteButton);
+
+            // Get the onPress callback from the Cancel button in the alert
+            const alertCall = jest.mocked(Alert.alert).mock.calls[0];
+            const buttons = alertCall[2] as Array<{text: string; onPress?: () => void}>;
+            const cancelButtonConfig = buttons.find((b) => b.text === 'Cancel');
+
+            // Cancel button doesn't have onPress, it just closes the alert
+            expect(cancelButtonConfig?.onPress).toBeUndefined();
+            expect(deleteChecklistItem).not.toHaveBeenCalled();
+        });
+
+        it('should show error snackbar when deleteChecklistItem fails', async () => {
+            jest.mocked(deleteChecklistItem).mockResolvedValue({error: 'Delete failed'});
+            const props = getBaseProps();
+            const {getByTestId} = renderWithIntl(<ChecklistItemBottomSheet {...props}/>);
+
+            const deleteButton = getByTestId('checklist_item_bottom_sheet.delete_button');
+            fireEvent.press(deleteButton);
+
+            const alertCall = jest.mocked(Alert.alert).mock.calls[0];
+            const buttons = alertCall[2] as Array<{text: string; onPress?: () => void}>;
+            const deleteButtonConfig = buttons.find((b) => b.text === 'Delete');
+
+            await act(async () => {
+                deleteButtonConfig?.onPress?.();
+            });
+
+            await waitFor(() => {
+                expect(showPlaybookErrorSnackbar).toHaveBeenCalled();
+            });
+        });
+    });
+
+    describe('edit button', () => {
+        it('should render edit button when isDisabled is false', () => {
+            const props = getBaseProps();
+            props.isDisabled = false;
+            const {getByTestId} = renderWithIntl(<ChecklistItemBottomSheet {...props}/>);
+
+            expect(getByTestId('checklist_item.edit_button')).toBeVisible();
+        });
+
+        it('should not render edit button when isDisabled is true', () => {
+            const props = getBaseProps();
+            props.isDisabled = true;
+            const {queryByTestId} = renderWithIntl(<ChecklistItemBottomSheet {...props}/>);
+
+            expect(queryByTestId('checklist_item.edit_button')).toBeNull();
+        });
+
+        it('should open edit modal when edit button is pressed', async () => {
+            const {resolveDismiss} = mockDeferredDismiss();
+            const props = getBaseProps();
+            props.item = TestHelper.fakePlaybookChecklistItemModel({
+                id: 'item-1',
+                title: 'Test Checklist Item',
+                description: 'This is a test description',
+                state: '',
+                command: 'test command',
+            });
+            const {getByTestId} = renderWithIntl(<ChecklistItemBottomSheet {...props}/>);
+
+            const editButton = getByTestId('checklist_item.edit_button');
+            fireEvent.press(editButton);
+
+            expect(dismissBottomSheet).toHaveBeenCalled();
+            expect(goToEditChecklistItem).not.toHaveBeenCalled();
+
+            await act(async () => {
+                resolveDismiss();
+            });
+
+            expect(goToEditChecklistItem).toHaveBeenCalledWith(
+                'Run 1',
+                'Test Checklist Item',
+                'This is a test description',
+                expect.any(Function),
+            );
+        });
+
+        it('should open edit modal with undefined description when item has no description', async () => {
+            const {resolveDismiss} = mockDeferredDismiss();
+            const props = getBaseProps();
+            props.item = TestHelper.fakePlaybookChecklistItemModel({
+                ...mockItem,
+                description: '',
+            });
+            const {getByTestId} = renderWithIntl(<ChecklistItemBottomSheet {...props}/>);
+
+            const editButton = getByTestId('checklist_item.edit_button');
+            fireEvent.press(editButton);
+
+            expect(dismissBottomSheet).toHaveBeenCalled();
+            expect(goToEditChecklistItem).not.toHaveBeenCalled();
+
+            await act(async () => {
+                resolveDismiss();
+            });
+
+            expect(goToEditChecklistItem).toHaveBeenCalledWith(
+                'Run 1',
+                'Test Checklist Item',
+                undefined,
+                expect.any(Function),
+            );
+        });
+
+        it('should call updateChecklistItemTitleAndDescription when edit is saved', async () => {
+            jest.mocked(updateChecklistItemTitleAndDescription).mockResolvedValue({data: true});
+            const props = getBaseProps();
+            props.checklistNumber = 2;
+            props.itemNumber = 3;
+            const {getByTestId} = renderWithIntl(<ChecklistItemBottomSheet {...props}/>);
+
+            const editButton = getByTestId('checklist_item.edit_button');
+            await act(async () => {
+                fireEvent.press(editButton);
+            });
+
+            const handleEditItem = jest.mocked(goToEditChecklistItem).mock.calls[0][3];
+            await act(async () => {
+                handleEditItem({title: 'New Title', description: 'New Description'});
+            });
+
+            expect(updateChecklistItemTitleAndDescription).toHaveBeenCalledWith(
+                'server-url',
+                'run-1',
+                'item-1',
+                2,
+                3,
+                {title: 'New Title', description: 'New Description'},
+            );
+        });
+
+        it('should show error snackbar when updateChecklistItemTitleAndDescription fails', async () => {
+            jest.mocked(updateChecklistItemTitleAndDescription).mockResolvedValue({error: 'Update failed'});
+            const props = getBaseProps();
+            const {getByTestId} = renderWithIntl(<ChecklistItemBottomSheet {...props}/>);
+
+            const editButton = getByTestId('checklist_item.edit_button');
+            await act(async () => {
+                fireEvent.press(editButton);
+            });
+
+            const handleEditItem = jest.mocked(goToEditChecklistItem).mock.calls[0][3];
+            await act(async () => {
+                handleEditItem({title: 'New Title', description: 'New Description'});
+            });
+
+            await waitFor(() => {
+                expect(showPlaybookErrorSnackbar).toHaveBeenCalled();
+            });
         });
     });
 });

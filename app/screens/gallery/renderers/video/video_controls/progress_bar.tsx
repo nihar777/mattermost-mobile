@@ -1,17 +1,16 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import React, {useRef} from 'react';
+import React, {useEffect, useRef} from 'react';
 import {StyleSheet, View} from 'react-native';
 import {Gesture, GestureDetector} from 'react-native-gesture-handler';
 import Animated, {
     useAnimatedStyle,
     useSharedValue,
-    runOnJS,
     withTiming,
     interpolate,
-    runOnUI,
 } from 'react-native-reanimated';
+import {scheduleOnRN, scheduleOnUI} from 'react-native-worklets';
 
 interface ProgressBarProps {
     progress: number;
@@ -70,13 +69,13 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
     const localProgress = useSharedValue(progress);
     const seekTimestamp = useSharedValue(0);
 
-    React.useEffect(() => {
-        runOnUI(() => {
+    useEffect(() => {
+        scheduleOnUI(() => {
             'worklet';
             if (!isDraggingShared.value) {
                 localProgress.value = progress;
             }
-        })();
+        });
 
     // no need to add shared values to the dependency array
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -114,20 +113,20 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
             if (now - lastSeekTime > 100) {
                 seekTimestamp.value = now;
                 const newTime = newProgress * duration;
-                runOnJS(onSeek)(newTime);
+                scheduleOnRN(onSeek, newTime);
             }
         }).
         onEnd(() => {
             // Always seek to final position
             const finalProgress = dragPosition.value / progressWidth.value;
             const finalTime = finalProgress * duration;
-            runOnJS(onSeek)(finalTime);
-            runOnJS(stopDragging)();
+            scheduleOnRN(onSeek, finalTime);
+            scheduleOnRN(stopDragging);
         }).
         onFinalize(() => {
             // Ensure we stop dragging even if gesture is cancelled
             seekTimestamp.value = 0; // Reset timestamp
-            runOnJS(stopDragging)();
+            scheduleOnRN(stopDragging);
         });
 
     const tapGesture = Gesture.Tap().
@@ -135,7 +134,7 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
             const newProgress = event.x / progressWidth.value;
             localProgress.value = newProgress;
             const newTime = newProgress * duration;
-            runOnJS(onSeek)(newTime);
+            scheduleOnRN(onSeek, newTime);
         });
 
     const combinedGesture = Gesture.Race(progressGesture, tapGesture);

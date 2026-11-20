@@ -5,7 +5,7 @@
 
 import {chunk} from 'lodash';
 
-import {updateChannelsDisplayName} from '@actions/local/channel';
+import {updateChannelsDisplayName, deletePostsForChannelsWithAutotranslation} from '@actions/local/channel';
 import {updateRecentCustomStatuses, updateLocalUser} from '@actions/local/user';
 import {fetchRolesIfNeeded} from '@actions/remote/role';
 import {General} from '@constants';
@@ -15,7 +15,7 @@ import NetworkManager from '@managers/network_manager';
 import {getMembersCountByChannelsId, queryChannelsByTypes} from '@queries/servers/channel';
 import {queryGroupsByNames} from '@queries/servers/group';
 import {getCurrentUserId, setCurrentUserId} from '@queries/servers/system';
-import {getCurrentUser, prepareUsers, queryAllUsers, queryUsersById, queryUsersByIdsOrUsernames, queryUsersByUsername} from '@queries/servers/user';
+import {getCurrentUser, getUserById, prepareUsers, queryAllUsers, queryUsersById, queryUsersByIdsOrUsernames, queryUsersByUsername} from '@queries/servers/user';
 import {getFullErrorMessage} from '@utils/errors';
 import {logDebug} from '@utils/log';
 import {getDeviceTimezone} from '@utils/timezone';
@@ -47,30 +47,29 @@ export type ProfilesInChannelRequest = {
 export const fetchMe = async (serverUrl: string, fetchOnly = false, groupLabel?: RequestGroupLabel): Promise<MyUserRequest> => {
     try {
         const client = NetworkManager.getClient(serverUrl);
-        const {operator} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
+        const {database, operator} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
 
-        const resultSettled = await Promise.allSettled([client.getMe(groupLabel), client.getStatus('me', groupLabel)]);
-        let user: UserProfile|undefined;
-        let userStatus: UserStatus|undefined;
-        for (const result of resultSettled) {
-            if (result.status === 'fulfilled') {
-                const {value} = result;
-                if ('email' in value) {
-                    user = value;
-                } else {
-                    userStatus = value;
-                }
-            }
-        }
+        const [meResult, statusResult] = await Promise.allSettled([client.getMe(groupLabel), client.getStatus('me', groupLabel)]);
+        const user = meResult.status === 'fulfilled' && 'email' in meResult.value ? meResult.value : undefined;
+        const userStatus = statusResult.status === 'fulfilled' ? statusResult.value : undefined;
 
         if (!user) {
-            throw new Error('User not found');
+            // surface the actual rejection (e.g. a 401) instead of masking it so forceLogoutIfNecessary can act on it
+            throw meResult.status === 'rejected' ? meResult.reason : new Error('User not found');
         }
 
         user.status = userStatus?.status;
 
         if (!fetchOnly) {
             await operator.handleUsers({users: [user], prepareRecordsOnly: false});
+
+            const currentUser = await getUserById(database, user.id);
+            if (currentUser) {
+                const localeChanged = currentUser.locale !== user.locale;
+                if (localeChanged) {
+                    await deletePostsForChannelsWithAutotranslation(serverUrl);
+                }
+            }
         }
 
         return {user};
@@ -83,18 +82,22 @@ export const fetchMe = async (serverUrl: string, fetchOnly = false, groupLabel?:
 
 export const refetchCurrentUser = async (serverUrl: string, currentUserId: string | undefined) => {
     logDebug('re-fetching self');
-    const {user} = await fetchMe(serverUrl);
-    if (!user || currentUserId) {
-        return;
+    const {user, error} = await fetchMe(serverUrl);
+    if (currentUserId) {
+        return {currentUserId};
+    }
+    if (!user) {
+        return {error};
     }
 
     logDebug('missing currentUserId');
     const operator = DatabaseManager.serverDatabases[serverUrl]?.operator;
     if (!operator) {
         logDebug('missing operator');
-        return;
+        return {error: 'Cannot get operator for server'};
     }
-    setCurrentUserId(operator, user.id);
+
+    return setCurrentUserId(operator, user.id);
 };
 
 export async function fetchProfilesInChannel(
@@ -355,7 +358,9 @@ export async function fetchStatusByIds(serverUrl: string, userIds: string[], fet
         const client = NetworkManager.getClient(serverUrl);
         const {database, operator} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
 
-        const statuses = await client.getStatusesByIds(userIds);
+        const chunks = chunk(userIds, General.MAX_IDS_PER_STATUS_REQUEST);
+        const results = await Promise.allSettled(chunks.map((batchIds) => client.getStatusesByIds(batchIds)));
+        const statuses = results.flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
 
         if (!fetchOnly) {
             const users = await queryUsersById(database, userIds).fetch();
@@ -645,7 +650,9 @@ export async function updateAllUsersSince(serverUrl: string, since: number, fetc
 
         const currentUserId = await getCurrentUserId(database);
         const userIds = (await queryAllUsers(database).fetchIds()).filter((id) => id !== currentUserId);
-        userUpdates = await client.getProfilesByIds(userIds, {since}, groupLabel);
+        const chunks = chunk(userIds, General.MAX_IDS_PER_PROFILES_REQUEST);
+        const results = await Promise.allSettled(chunks.map((batchIds) => client.getProfilesByIds(batchIds, {since}, groupLabel)));
+        userUpdates = results.flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
         if (userUpdates.length && !fetchOnly) {
             const modelsToBatch: Model[] = [];
             const userModels = await operator.handleUsers({users: userUpdates, prepareRecordsOnly: true});
@@ -685,7 +692,7 @@ export async function updateUsersNoLongerVisible(serverUrl: string, prepareRecor
             }
         }
         if (models.length && !prepareRecordsOnly) {
-            operator.batchRecords(models, 'updateUsersNoLongerVisible');
+            await operator.batchRecords(models, 'updateUsersNoLongerVisible');
         }
         return {models};
     } catch (error) {

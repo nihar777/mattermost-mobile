@@ -3,10 +3,13 @@
 
 /* eslint-disable max-lines */
 
+import {PER_PAGE_DEFAULT} from '@client/rest/constants';
 import {SYSTEM_IDENTIFIERS} from '@constants/database';
 import DatabaseManager from '@database/manager';
 import NetworkManager from '@managers/network_manager';
 import {getActiveServerUrl} from '@queries/app/servers';
+import EphemeralStore from '@store/ephemeral_store';
+import {deleteDownloadedFiles} from '@utils/file';
 
 import {fetchScheduledPosts} from './scheduled_post';
 import {
@@ -14,6 +17,7 @@ import {
     addUserToTeam,
     addUsersToTeam,
     sendEmailInvitesToTeam,
+    sendGuestEmailInvitesToTeam,
     fetchMyTeams,
     fetchMyTeam,
     fetchTeamById,
@@ -29,9 +33,23 @@ import {
     buildTeamIconUrl,
     fetchTeamsThreads,
 } from './team';
+import {syncThreadsIfNeeded} from './thread';
 
 jest.mock('./scheduled_post', () => ({
     fetchScheduledPosts: jest.fn(),
+}));
+
+jest.mock('./thread', () => {
+    const actual = jest.requireActual('./thread');
+    return {
+        ...actual,
+        syncThreadsIfNeeded: jest.fn(actual.syncThreadsIfNeeded),
+    };
+});
+
+jest.mock('@utils/file', () => ({
+    ...jest.requireActual('@utils/file'),
+    deleteDownloadedFiles: jest.fn(),
 }));
 
 import type ServerDataOperator from '@database/operator/server_data_operator';
@@ -83,6 +101,7 @@ const mockClient = {
     addToTeam: jest.fn((id: string, userId: string) => ({id: userId + '-' + id, user_id: userId, team_id: id, roles: ''})),
     addUsersToTeamGracefully: jest.fn((id: string, userIds: string[]) => (userIds.map((userId) => ({member: {id: userId + '-' + id, user_id: userId, team_id: id, roles: ''}, error: undefined, user_id: userId})))),
     sendEmailInvitesToTeamGracefully: jest.fn((id: string, emails: string[]) => (emails.map((email) => ({email, error: undefined})))),
+    sendGuestEmailInvitesToTeamGracefully: jest.fn(() => Promise.resolve<TeamInviteWithError[]>([{email: 'guest1@example.com', error: {message: '', status_code: 0}}])),
     getRolesByNames: jest.fn((roles: string[]) => roles.map((r) => ({id: r, name: r} as Role))),
     getMyTeams: jest.fn(() => ([{id: teamId, name: 'team1'}])),
     getMyTeamMembers: jest.fn(() => ([{id: 'userid1-' + teamId, user_id: 'userid1', team_id: teamId, roles: ''}])),
@@ -223,6 +242,88 @@ describe('teamMember', () => {
     });
 });
 
+describe('sendGuestEmailInvitesToTeam', () => {
+    const emails = ['guest1@example.com', 'guest2@example.com'];
+    const channels = ['channel-id-1', 'channel-id-2'];
+    const message = 'Welcome to the team!';
+
+    const throwFunc = () => {
+        throw Error('error');
+    };
+
+    beforeEach(() => {
+        jest.clearAllMocks();
+    });
+
+    it('should send guest email invites successfully with all parameters', async () => {
+        const mockMembers: TeamInviteWithError[] = [
+            {email: 'guest1@example.com', error: {message: '', status_code: 0}},
+            {email: 'guest2@example.com', error: {message: '', status_code: 0}},
+        ];
+        mockClient.sendGuestEmailInvitesToTeamGracefully.mockResolvedValueOnce(mockMembers);
+
+        const result = await sendGuestEmailInvitesToTeam(serverUrl, teamId, emails, channels, message);
+
+        expect(result).toBeDefined();
+        expect(result.error).toBeUndefined();
+        expect(result.members).toEqual(mockMembers);
+        expect(mockClient.sendGuestEmailInvitesToTeamGracefully).toHaveBeenCalledWith(teamId, emails, channels, message, false);
+        expect(mockClient.sendGuestEmailInvitesToTeamGracefully).toHaveBeenCalledTimes(1);
+    });
+
+    it('should send guest email invites successfully without message parameter', async () => {
+        const mockMembers: TeamInviteWithError[] = [
+            {email: 'guest1@example.com', error: {message: '', status_code: 0}},
+        ];
+        mockClient.sendGuestEmailInvitesToTeamGracefully.mockResolvedValueOnce(mockMembers);
+
+        const result = await sendGuestEmailInvitesToTeam(serverUrl, teamId, ['guest1@example.com'], channels);
+
+        expect(result).toBeDefined();
+        expect(result.error).toBeUndefined();
+        expect(result.members).toEqual(mockMembers);
+        expect(mockClient.sendGuestEmailInvitesToTeamGracefully).toHaveBeenCalledWith(teamId, ['guest1@example.com'], channels, '', false);
+        expect(mockClient.sendGuestEmailInvitesToTeamGracefully).toHaveBeenCalledTimes(1);
+    });
+
+    it('should handle client error', async () => {
+        const clientError = new Error('Client error');
+        mockClient.sendGuestEmailInvitesToTeamGracefully.mockRejectedValueOnce(clientError);
+
+        const result = await sendGuestEmailInvitesToTeam(serverUrl, teamId, emails, channels, message);
+
+        expect(result).toBeDefined();
+        expect(result.error).toBeDefined();
+        expect(result.members).toEqual([]);
+        expect(mockClient.sendGuestEmailInvitesToTeamGracefully).toHaveBeenCalledWith(teamId, emails, channels, message, false);
+    });
+
+    it('should handle network manager error', async () => {
+        jest.spyOn(NetworkManager, 'getClient').mockImplementationOnce(throwFunc);
+
+        const result = await sendGuestEmailInvitesToTeam(serverUrl, teamId, emails, channels, message);
+
+        expect(result).toBeDefined();
+        expect(result.error).toBeDefined();
+        expect(result.members).toEqual([]);
+    });
+
+    it('should send guest email invites with guest magic link', async () => {
+        const mockMembers: TeamInviteWithError[] = [
+            {email: 'guest1@example.com', error: {message: '', status_code: 0}},
+        ];
+        mockClient.sendGuestEmailInvitesToTeamGracefully.mockResolvedValueOnce(mockMembers);
+
+        const result = await sendGuestEmailInvitesToTeam(serverUrl, teamId, emails, channels, message, true);
+
+        expect(result).toBeDefined();
+        expect(result.error).toBeUndefined();
+        expect(result.members).toEqual(mockMembers);
+        expect(mockClient.sendGuestEmailInvitesToTeamGracefully).toHaveBeenCalledWith(teamId, emails, channels, message, true);
+        expect(mockClient.sendGuestEmailInvitesToTeamGracefully).toHaveBeenCalledTimes(1);
+    });
+});
+
 describe('teams', () => {
     it('fetchMyTeams - handle not found database', async () => {
         const result = await fetchMyTeams('foo') as {error: unknown};
@@ -275,14 +376,83 @@ describe('teams', () => {
         expect(result.hasMore).toBeFalsy();
     });
 
-    it('updateCanJoinTeams - handle not found database', async () => {
-        const result = await updateCanJoinTeams('foo') as {error: unknown};
-        expect(result?.error).toBeDefined();
-    });
-
     it('updateCanJoinTeams - base case', async () => {
         const result = await updateCanJoinTeams(serverUrl);
         expect(result).toBeDefined();
+    });
+
+    describe('updateCanJoinTeams server membership (MM-68575)', () => {
+        let setCanJoinSpy: jest.SpiedFunction<typeof EphemeralStore.setCanJoinOtherTeams>;
+
+        const activeTeam = (id: string): Team => ({id, name: id, delete_at: 0} as Team);
+
+        beforeEach(() => {
+            setCanJoinSpy = jest.spyOn(EphemeralStore, 'setCanJoinOtherTeams');
+        });
+
+        afterEach(() => {
+            setCanJoinSpy.mockRestore();
+            mockClient.getMyTeams.mockImplementation(() => [{id: teamId, name: 'team1'}]);
+            mockClient.getTeams.mockImplementation(() => [{id: teamId, name: 'team1'}]);
+        });
+
+        it('should set canJoin false when getMyTeams lists full membership while getTeams returns all server teams', async () => {
+            (mockClient.getMyTeams as jest.Mock).mockResolvedValue([
+                activeTeam('t1'),
+                activeTeam('t2'),
+                activeTeam('t3'),
+            ]);
+            (mockClient.getTeams as jest.Mock).mockResolvedValue([
+                activeTeam('t1'),
+                activeTeam('t2'),
+                activeTeam('t3'),
+            ]);
+
+            await updateCanJoinTeams(serverUrl);
+
+            expect(setCanJoinSpy).toHaveBeenCalledWith(serverUrl, false);
+        });
+
+        it('should set canJoin true when an active server team is not in getMyTeams', async () => {
+            (mockClient.getMyTeams as jest.Mock).mockResolvedValue([activeTeam('t1')]);
+            (mockClient.getTeams as jest.Mock).mockResolvedValue([activeTeam('t1'), activeTeam('t2')]);
+
+            await updateCanJoinTeams(serverUrl);
+
+            expect(setCanJoinSpy).toHaveBeenCalledWith(serverUrl, true);
+        });
+
+        it('should pass groupLabel to getMyTeams and getTeams', async () => {
+            const groupLabel = 'Cold Start Deferred' as RequestGroupLabel;
+            (mockClient.getMyTeams as jest.Mock).mockResolvedValue([activeTeam('t1')]);
+            (mockClient.getTeams as jest.Mock).mockResolvedValue([activeTeam('t1')]);
+
+            await updateCanJoinTeams(serverUrl, groupLabel);
+
+            expect(mockClient.getMyTeams).toHaveBeenCalledWith(groupLabel);
+            expect(mockClient.getTeams).toHaveBeenCalledWith(0, PER_PAGE_DEFAULT, false, groupLabel);
+        });
+
+        it('should preserve the last known canJoin value when getMyTeams fails', async () => {
+            const err = new Error('network unavailable');
+            (mockClient.getMyTeams as jest.Mock).mockRejectedValue(err);
+
+            const result = await updateCanJoinTeams(serverUrl) as {error: unknown};
+
+            expect(result?.error).toBeDefined();
+            expect(setCanJoinSpy).not.toHaveBeenCalled();
+        });
+
+        it('should preserve the last known canJoin value when getTeams fails', async () => {
+            const err = new Error('server timeout');
+            (mockClient.getMyTeams as jest.Mock).mockResolvedValue([activeTeam('t1')]);
+            (mockClient.getTeams as jest.Mock).mockRejectedValue(err);
+
+            const result = await updateCanJoinTeams(serverUrl) as {error: unknown};
+
+            expect(result?.error).toBeDefined();
+            expect(setCanJoinSpy).not.toHaveBeenCalled();
+        });
     });
 
     it('fetchTeamsThreads - handle not found database', async () => {
@@ -302,6 +472,41 @@ describe('teams', () => {
             serverUrl, 0,
             [team], true, true);
         expect(result.models).toBeDefined();
+    });
+
+    describe('fetchTeamsThreads - revoked files', () => {
+        const revokedFiles = [{id: 'revokedfileid', name: 'file.png', extension: 'png', mime_type: 'image/png'}];
+
+        beforeEach(async () => {
+            jest.mocked(deleteDownloadedFiles).mockClear();
+            const models = await operator.handleSystem({systems: [{id: SYSTEM_IDENTIFIERS.CURRENT_USER_ID, value: user.id}], prepareRecordsOnly: true});
+            jest.mocked(syncThreadsIfNeeded).mockResolvedValueOnce({models, revokedFiles});
+        });
+
+        it('should delete the revoked files after the final batch succeeds', async () => {
+            const result = await fetchTeamsThreads(serverUrl, 0, [team], true, false);
+
+            expect(result.error).toBeUndefined();
+            expect(deleteDownloadedFiles).toHaveBeenCalledTimes(1);
+            expect(deleteDownloadedFiles).toHaveBeenCalledWith(serverUrl, revokedFiles);
+        });
+
+        it('should keep the revoked files when the final batch fails', async () => {
+            const batchSpy = jest.spyOn(operator, 'batchRecords').mockRejectedValueOnce(new Error('batch failed'));
+
+            const result = await fetchTeamsThreads(serverUrl, 0, [team], true, false);
+
+            expect(result.error).toBeDefined();
+            expect(deleteDownloadedFiles).not.toHaveBeenCalled();
+            batchSpy.mockRestore();
+        });
+
+        it('should return the revoked files to the caller in fetch only mode', async () => {
+            const result = await fetchTeamsThreads(serverUrl, 0, [team], true, true);
+
+            expect(result.revokedFiles).toEqual(revokedFiles);
+            expect(deleteDownloadedFiles).not.toHaveBeenCalled();
+        });
     });
 
     it('fetchTeamByName - handle not found database', async () => {

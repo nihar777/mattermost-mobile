@@ -94,6 +94,43 @@ describe('WebSocketClient', () => {
         expect(logInfo).toHaveBeenCalledWith('websocket connecting to wss://example.com/api/v4/websocket');
     });
 
+    it('should send the preauth secret header over wss', async () => {
+        DatabaseManager.serverDatabases[serverUrl] = {database: {} as any, operator: {} as any};
+        mockedGetConfigValue.mockResolvedValueOnce('wss://example.com');
+        const secretClient = new WebSocketClient(serverUrl, token, 'test-secret');
+
+        await secretClient.initialize();
+
+        expect(mockedGetOrCreateWebSocketClient).toHaveBeenLastCalledWith('wss://example.com/api/v4/websocket', {headers: {origin: 'wss://example.com', 'X-Mattermost-Preauth-Secret': 'test-secret'}, timeoutInterval: 30000});
+        secretClient.close(true);
+    });
+
+    it('should not send the preauth secret header over ws', async () => {
+        DatabaseManager.serverDatabases[serverUrl] = {database: {} as any, operator: {} as any};
+        mockedGetConfigValue.mockResolvedValueOnce('ws://example.com');
+        const secretClient = new WebSocketClient(serverUrl, token, 'test-secret');
+
+        await secretClient.initialize();
+
+        expect(mockedGetOrCreateWebSocketClient).toHaveBeenLastCalledWith('ws://example.com/api/v4/websocket', {headers: {origin: 'ws://example.com'}, timeoutInterval: 30000});
+        secretClient.close(true);
+    });
+
+    it('should log an error when creating the WebSocket client fails', async () => {
+        DatabaseManager.serverDatabases[serverUrl] = {database: {} as any, operator: {} as any};
+        const error = new Error('"wss://example.com/api/v4/websocket" is not a valid WebSocket URL');
+        mockedGetOrCreateWebSocketClient.mockRejectedValueOnce(error);
+
+        await client.initialize();
+
+        expect(logError).toHaveBeenCalledWith(
+            'WebSocketClient.initialize: failed to create WebSocket client',
+            'server',
+            serverUrl,
+            '"<redacted websocket URL>" is not a valid WebSocket URL',
+        );
+    });
+
     it('should handle WebSocket open event - skip sync', async () => {
         const firstConnectCallback = jest.fn();
         client.setFirstConnectCallback(firstConnectCallback);
@@ -187,9 +224,9 @@ describe('WebSocketClient', () => {
 
         await client.initialize();
 
-        mockConn.onError.mock.calls[0][0]({url: 'wss://example.com/api/v4/websocket'});
+        mockConn.onError.mock.calls[0][0]({url: 'wss://example.com/api/v4/websocket', code: 1006, reason: 'abnormal closure'});
 
-        expect(logError).toHaveBeenCalledWith('websocket error', 'wss://example.com/api/v4/websocket');
+        expect(logError).toHaveBeenCalledWith('websocket error', 'server', 'https://example.com', 'code', 1006, 'reason', 'abnormal closure');
         expect(errorCallback).toHaveBeenCalled();
     });
 
@@ -412,6 +449,45 @@ describe('WebSocketClient', () => {
         await advanceTimers(20000);
 
         expect(mockConn.send).not.toHaveBeenCalled();
+    });
+
+    describe('waitForClose', () => {
+        it('should resolve immediately when conn is undefined', async () => {
+            // No initialize() call, so conn is undefined
+            await expect(client.waitForClose()).resolves.toBeUndefined();
+        });
+
+        it('should wait for onClose even when readyState is already CLOSED', async () => {
+            await client.initialize();
+            mockConn.readyState = WebSocketReadyState.CLOSED;
+
+            const waitPromise = client.waitForClose();
+
+            // readyState is CLOSED but onClose hasn't fired yet — should not resolve immediately
+            mockConn.onClose.mock.calls[0][0]({});
+
+            await expect(waitPromise).resolves.toBeUndefined();
+        });
+
+        it('should resolve when onClose fires', async () => {
+            await client.initialize();
+
+            const waitPromise = client.waitForClose();
+            mockConn.close();
+
+            await expect(waitPromise).resolves.toBeUndefined();
+        });
+
+        it('should resolve after timeout if onClose never fires', async () => {
+            await client.initialize();
+
+            const waitPromise = client.waitForClose();
+
+            // Advance past the 500ms timeout
+            await advanceTimers(600);
+
+            await expect(waitPromise).resolves.toBeUndefined();
+        });
     });
 
     it('should reset ping interval state when reconnecting during pending ping', async () => {

@@ -1,7 +1,7 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import React, {useCallback, useEffect, useMemo, useRef} from 'react';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {ActivityIndicator, StyleSheet, View} from 'react-native';
 
 import {fetchPostThread} from '@actions/remote/post';
@@ -12,6 +12,7 @@ import {Screens} from '@constants';
 import {useServerUrl} from '@context/server';
 import {useTheme} from '@context/theme';
 import {useAppState} from '@hooks/device';
+import useDidMount from '@hooks/did_mount';
 import {useFetchingThreadState} from '@hooks/fetching_thread';
 import {useDebounce} from '@hooks/utils';
 import {isMinimumServerVersion} from '@utils/helpers';
@@ -22,7 +23,6 @@ import type ThreadModel from '@typings/database/models/servers/thread';
 type Props = {
     channelLastViewedAt: number;
     isCRTEnabled: boolean;
-    nativeID: string;
     posts: PostModel[];
     rootPost: PostModel;
     teamId: string;
@@ -38,12 +38,13 @@ const styles = StyleSheet.create({
 
 const ThreadPostList = ({
     channelLastViewedAt, isCRTEnabled,
-    nativeID, posts, rootPost, teamId, thread, version,
+    posts, rootPost, teamId, thread, version,
 }: Props) => {
     const appState = useAppState();
     const serverUrl = useServerUrl();
     const theme = useTheme();
     const isFetchingThread = useFetchingThreadState(rootPost.id);
+    const [showHeader, setShowHeader] = useState(false);
 
     const canLoadMorePosts = useRef(true);
     const onEndReached = useDebounce(useCallback(async () => {
@@ -70,14 +71,11 @@ const ThreadPostList = ({
     }, [posts, rootPost]);
 
     // If CRT is enabled, mark the thread as read on mount.
-    useEffect(() => {
+    useDidMount(() => {
         if (isCRTEnabled && thread?.isFollowing) {
             markThreadAsRead(serverUrl, teamId, rootPost.id);
         }
-
-        // We only want to mark the thread as read on mount
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+    });
 
     // If CRT is enabled, When new post arrives and thread modal is open, mark thread as read.
     const oldPostsCount = useRef<number>(posts.length);
@@ -90,10 +88,19 @@ const ThreadPostList = ({
 
     const lastViewedAt = isCRTEnabled ? (thread?.viewedAt ?? 0) : channelLastViewedAt;
 
-    let header;
-    if (isFetchingThread && threadPosts.length === 1) {
-        header = <ActivityIndicator color={theme.centerChannelColor}/>;
-    }
+    useEffect(() => {
+        const raf = requestAnimationFrame(() => {
+            setShowHeader(isFetchingThread && threadPosts.length === 1);
+        });
+        return () => cancelAnimationFrame(raf);
+    }, [isFetchingThread, threadPosts.length, theme.centerChannelColor]);
+
+    const header = useMemo(() => {
+        if (showHeader) {
+            return <ActivityIndicator color={theme.centerChannelColor}/>;
+        }
+        return undefined;
+    }, [showHeader, theme.centerChannelColor]);
 
     const postList = (
         <PostList
@@ -103,7 +110,6 @@ const ThreadPostList = ({
             isCRTEnabled={isCRTEnabled}
             lastViewedAt={lastViewedAt}
             location={Screens.THREAD}
-            nativeID={nativeID}
             onEndReached={onEndReached}
             posts={threadPosts}
             rootId={rootPost.id}

@@ -1,6 +1,8 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
+import RNUtils from '@mattermost/rnutils';
+
 import {fetchMissingDirectChannelsInfo, fetchMyChannelsForTeam, type MyChannelsRequest} from '@actions/remote/channel';
 import {fetchGroupsForMember} from '@actions/remote/groups';
 import {fetchPostsForUnreadChannels} from '@actions/remote/post';
@@ -83,6 +85,8 @@ export async function restDeferredAppEntryActions(
             ...chData,
         };
 
+        let channelsFetchComplete = Boolean(initialTeamId) && !chData?.error && Boolean(chData?.channels && chData?.memberships);
+
         const processTeams = async () => {
             for (const team of teamQueue) {
                 let data: MyChannelsRequest = {};
@@ -96,13 +100,17 @@ export async function restDeferredAppEntryActions(
                     logError('Error fetching channels for team', groupLabel, error);
                 }
 
+                if (data.error || !data.channels || !data.memberships) {
+                    channelsFetchComplete = false;
+                }
+
                 const currentTeamData: MyTeamsRequest = {
                     teams: [team],
                     memberships: teamData?.memberships?.filter((m) => m.team_id === team.id),
                 };
 
                 /* eslint-disable-next-line no-await-in-loop */
-                await processEntryModels({operator, teamData: currentTeamData, chData: data, isCRTEnabled});
+                await processEntryModels(serverUrl, {operator, teamData: currentTeamData, chData: data, isCRTEnabled});
             }
 
             const uniqueChannelsData: MyChannelsRequest = {
@@ -116,7 +124,7 @@ export async function restDeferredAppEntryActions(
 
         const processFinalInitializationTasks = async (uniqueChannelsData: MyChannelsRequest) => {
             try {
-                fetchRoles(serverUrl, teamData.memberships, chData?.memberships, meData?.user, false, false, groupLabel);
+                fetchRoles(serverUrl, teamData.memberships, chData?.memberships, meData?.user, false, true, groupLabel);
 
                 if (initialTeamId) {
                     const initialTeam = teamMap.get(initialTeamId);
@@ -127,7 +135,7 @@ export async function restDeferredAppEntryActions(
 
                 // previously we were deleting the models via processEntryModels, but we don't want to delete any
                 // teams or channels until we have fetched all the data for the team, which now is later in the code
-                processEntryModelsForDeletion({serverUrl, operator, teamData, chData: uniqueChannelsData});
+                processEntryModelsForDeletion({serverUrl, operator, teamData, chData: uniqueChannelsData, channelsFetchComplete});
 
                 if (uniqueChannelsData?.channels?.length && uniqueChannelsData.memberships?.length && initialTeamId) {
                     if (isCRTEnabled && initialTeamId) {
@@ -160,7 +168,13 @@ export async function restDeferredAppEntryActions(
             teamQueue = [...myOtherSortedTeams];
         }
 
-        processTeams();
+        // Guards against RUNNINGBOARD 0xdead10cc; released once processTeams (fire-and-forget) settles.
+        const activityToken = await RNUtils.beginDatabaseActivity(serverUrl, 'restDeferredAppEntryActions');
+        processTeams().finally(() => {
+            if (activityToken) {
+                RNUtils.endDatabaseActivity(activityToken);
+            }
+        });
     });
 }
 

@@ -75,6 +75,10 @@ describe('SearchScreen', () => {
         jest.clearAllMocks();
     });
 
+    afterEach(() => {
+        jest.restoreAllMocks();
+    });
+
     it('renders search screen correctly', () => {
         const {getByTestId, getByText, getByPlaceholderText} = renderWithEverything(
             <SearchScreen {...baseProps}/>,
@@ -165,6 +169,65 @@ describe('SearchScreen', () => {
         expect(searchInput.props.value).toBe('');
     });
 
+    it('should not show results until search history has been persisted', async () => {
+        jest.mocked(addSearchToTeamSearchHistory).mockReturnValue(new Promise(() => {
+            // Persist hangs so we can assert results stay hidden
+        }));
+
+        const {getByTestId, queryByTestId} = renderWithEverything(
+            <SearchScreen {...baseProps}/>,
+            {database},
+        );
+
+        const searchInput = getByTestId('navigation.header.search_bar.search.input');
+        await act(async () => {
+            fireEvent.changeText(searchInput, 'test search');
+        });
+        await act(async () => {
+            fireEvent(searchInput, 'submitEditing');
+        });
+
+        await waitFor(() => {
+            expect(addSearchToTeamSearchHistory).toHaveBeenCalled();
+            expect(searchPosts).toHaveBeenCalled();
+        });
+
+        expect(queryByTestId('search_results.post_list.flat_list')).toBeNull();
+    });
+
+    it('should not show results when the search is cleared while the request is in flight', async () => {
+        let resolveSearch: (value: {order: string[]; matches: Record<string, string[]>}) => void = () => undefined;
+        jest.mocked(searchPosts).mockReturnValueOnce(new Promise((resolve) => {
+            resolveSearch = resolve;
+        }));
+
+        const {getByTestId, queryByTestId} = renderWithEverything(
+            <SearchScreen {...baseProps}/>,
+            {database},
+        );
+
+        const searchInput = getByTestId('navigation.header.search_bar.search.input');
+        await act(async () => {
+            fireEvent.changeText(searchInput, 'test search');
+        });
+        await act(async () => {
+            fireEvent(searchInput, 'submitEditing');
+        });
+        await waitFor(() => {
+            expect(searchPosts).toHaveBeenCalled();
+        });
+
+        await act(async () => {
+            fireEvent.press(getByTestId('navigation.header.search_bar.search.clear.button'));
+        });
+        await act(async () => {
+            resolveSearch({order: ['post1'], matches: {}});
+        });
+
+        expect(searchInput.props.value).toBe('');
+        expect(queryByTestId('search_results.post_list.flat_list')).toBeNull();
+    });
+
     it('adds search to team history when searching in a specific team', async () => {
         const {getByTestId} = renderWithEverything(
             <SearchScreen {...baseProps}/>,
@@ -223,6 +286,7 @@ describe('SearchScreen', () => {
         await waitFor(() => {
             const searchInput = getByTestId('navigation.header.search_bar.search.input');
             expect(searchInput.props.value).toBe('#hashtag');
+            expect(searchPosts).toHaveBeenCalled();
         });
 
         const searchInput = getByTestId('navigation.header.search_bar.search.input');
@@ -234,6 +298,54 @@ describe('SearchScreen', () => {
 
         await waitFor(() => {
             expect(searchInput.props.value).toBe('');
+        });
+    });
+
+    it('should not trigger a duplicate search via useDidUpdate when refocused with a new searchTerm', async () => {
+        let currentIsFocused = false;
+        let currentSearchTerm = '#old';
+
+        jest.spyOn(require('@react-navigation/native'), 'useIsFocused').mockImplementation(() => currentIsFocused);
+        jest.spyOn(require('@react-navigation/native'), 'useNavigation').mockImplementation(() => ({
+            getState: () => ({
+                index: 0,
+                routes: [{params: {searchTerm: currentSearchTerm}}],
+            }),
+        }));
+
+        const {rerender} = renderWithEverything(<SearchScreen {...baseProps}/>, {database});
+
+        // Initial focus with #old triggers useEffect search
+        await act(async () => {
+            currentIsFocused = true;
+            rerender(<SearchScreen {...baseProps}/>);
+        });
+
+        await waitFor(() => expect(searchPosts).toHaveBeenCalledWith(
+            expect.any(String), 'team1', expect.objectContaining({terms: '#old'}),
+        ));
+
+        // Navigate away
+        await act(async () => {
+            currentIsFocused = false;
+            rerender(<SearchScreen {...baseProps}/>);
+        });
+
+        jest.clearAllMocks();
+
+        // Navigate back with a new hashtag — useDidUpdate and useEffect both fire,
+        // but useDidUpdate guard should skip since searchTerm !== lastSearchedValue
+        await act(async () => {
+            currentSearchTerm = '#new';
+            currentIsFocused = true;
+            rerender(<SearchScreen {...baseProps}/>);
+        });
+
+        await waitFor(() => {
+            expect(searchPosts).toHaveBeenCalledTimes(1);
+            expect(searchPosts).toHaveBeenCalledWith(
+                expect.any(String), 'team1', expect.objectContaining({terms: '#new'}),
+            );
         });
     });
 

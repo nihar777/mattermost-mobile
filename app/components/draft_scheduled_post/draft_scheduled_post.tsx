@@ -1,20 +1,22 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import React, {useCallback} from 'react';
-import {useIntl} from 'react-intl';
-import {Keyboard, TouchableHighlight, View} from 'react-native';
+import React, {useCallback, useMemo} from 'react';
+import {View, type PressableStateCallbackType} from 'react-native';
+import {Pressable} from 'react-native-gesture-handler';
 
 import {switchToThread} from '@actions/local/thread';
 import {switchToChannelById} from '@actions/remote/channel';
+import BoRLabel from '@components/burn_on_read_label';
 import DraftAndScheduledPostHeader from '@components/draft_scheduled_post_header';
 import Header from '@components/post_draft/draft_input/header';
 import {Screens} from '@constants';
-import {DRAFT_TYPE_DRAFT, DRAFT_TYPE_SCHEDULED, type DraftType} from '@constants/draft';
+import {DRAFT_TYPE_SCHEDULED, type DraftType} from '@constants/draft';
 import {useServerUrl} from '@context/server';
 import {useTheme} from '@context/theme';
-import {DRAFT_OPTIONS_BUTTON} from '@screens/draft_scheduled_post_options';
-import {openAsBottomSheet} from '@screens/navigation';
+import {navigateToScreen} from '@screens/navigation';
+import {isBoRPost} from '@utils/bor';
+import {isRecurringScheduledPost} from '@utils/scheduled_post';
 import {changeOpacity, makeStyleSheetFromTheme} from '@utils/theme';
 
 import DraftAndScheduledPostContainer from './draft_scheduled_post_container';
@@ -34,6 +36,7 @@ type Props = {
     isPostPriorityEnabled: boolean;
     draftType: DraftType;
     firstItem?: boolean;
+    borUserTimeLimit?: number;
 }
 
 const getStyleSheet = makeStyleSheetFromTheme((theme: Theme) => {
@@ -53,9 +56,17 @@ const getStyleSheet = makeStyleSheetFromTheme((theme: Theme) => {
         pressInContainer: {
             backgroundColor: changeOpacity(theme.centerChannelColor, 0.16),
         },
-        postPriority: {
-            marginTop: 10,
+        indicatorContainer: {
+            display: 'flex',
+            flexDirection: 'row',
+            alignItems: 'flex-end',
+            gap: 7,
+        },
+        priorityIndicator: {
             marginLeft: -12,
+        },
+        indicatorItem: {
+            marginTop: 10,
         },
         errorLine: {
             backgroundColor: theme.errorTextColor,
@@ -64,6 +75,9 @@ const getStyleSheet = makeStyleSheetFromTheme((theme: Theme) => {
             top: 0,
             left: 0,
             height: '100%',
+        },
+        borIndicator: {
+            paddingVertical: 2,
         },
     };
 });
@@ -77,29 +91,22 @@ const DraftAndScheduledPost: React.FC<Props> = ({
     isPostPriorityEnabled,
     draftType,
     firstItem,
+    borUserTimeLimit,
 }) => {
-    const intl = useIntl();
     const theme = useTheme();
     const style = getStyleSheet(theme);
     const serverUrl = useServerUrl();
     const showPostPriority = Boolean(isPostPriorityEnabled && post.metadata?.priority && post.metadata?.priority?.priority);
 
-    const onLongPress = useCallback(() => {
-        Keyboard.dismiss();
-        let title;
-        if (draftType === DRAFT_TYPE_DRAFT) {
-            title = intl.formatMessage({id: 'draft.options.title', defaultMessage: 'Draft Options'});
-        } else {
-            title = intl.formatMessage({id: 'scheduled_post.options.title', defaultMessage: 'Message actions'});
-        }
-        openAsBottomSheet({
-            closeButtonId: DRAFT_OPTIONS_BUTTON,
-            screen: Screens.DRAFT_SCHEDULED_POST_OPTIONS,
-            theme,
-            title,
-            props: {channel, rootId: post.rootId, draftType, draft: post, draftReceiverUserName: postReceiverUser?.username},
+    const onLongPress = useCallback(async () => {
+        navigateToScreen(Screens.DRAFT_SCHEDULED_POST_OPTIONS, {
+            channelId: channel.id,
+            rootId: post.rootId,
+            draftType,
+            draftId: post.id,
+            draftReceiverUserName: postReceiverUser?.username,
         });
-    }, [intl, draftType, theme, channel, post, postReceiverUser?.username]);
+    }, [draftType, channel, post, postReceiverUser?.username]);
 
     const onPress = useCallback(() => {
         if (post.rootId) {
@@ -109,11 +116,17 @@ const DraftAndScheduledPost: React.FC<Props> = ({
         switchToChannelById(serverUrl, channel.id, channel.teamId, false);
     }, [channel.id, channel.teamId, post.rootId, serverUrl]);
 
+    const borPost = useMemo(() => isBoRPost(post), [post]);
+
+    const pressableStyle = useCallback(({pressed}: PressableStateCallbackType) =>
+        (pressed ? {backgroundColor: changeOpacity(theme.centerChannelColor, 0.1)} : undefined),
+    [theme.centerChannelColor]);
+
     return (
-        <TouchableHighlight
+        <Pressable
             onLongPress={onLongPress}
             onPress={onPress}
-            underlayColor={changeOpacity(theme.centerChannelColor, 0.1)}
+            style={pressableStyle}
             testID='draft_post'
         >
             <View style={style.container}>
@@ -135,18 +148,32 @@ const DraftAndScheduledPost: React.FC<Props> = ({
                         draftType={draftType}
                         postScheduledAt={'scheduledAt' in post ? post.scheduledAt : undefined}
                         scheduledPostErrorCode={'errorCode' in post ? post.errorCode : undefined}
+                        isRecurring={isRecurringScheduledPost(post)}
                     />
-                    {showPostPriority && post.metadata?.priority &&
-                    <View
-                        style={style.postPriority}
-                        testID='draft_post.priority'
-                    >
-                        <Header
-                            noMentionsError={false}
-                            postPriority={post.metadata?.priority}
-                        />
+                    <View style={style.indicatorContainer}>
+                        {showPostPriority && post.metadata?.priority &&
+                            <View
+                                style={[style.indicatorItem, style.priorityIndicator]}
+                                testID='draft_post.priority'
+                            >
+                                <Header
+                                    noMentionsError={false}
+                                    postPriority={post.metadata?.priority}
+                                />
+                            </View>
+                        }
+                        {borPost && borUserTimeLimit !== undefined && Boolean(borUserTimeLimit) &&
+                            <View
+                                style={style.indicatorItem}
+                                testID='draft_post.bor_indicator'
+                            >
+                                <BoRLabel
+                                    id={post.id}
+                                    durationSeconds={borUserTimeLimit}
+                                />
+                            </View>
+                        }
                     </View>
-                    }
                     <DraftAndScheduledPostContainer
                         post={post}
                         location={location}
@@ -155,7 +182,7 @@ const DraftAndScheduledPost: React.FC<Props> = ({
                 </View>
             </View>
 
-        </TouchableHighlight>
+        </Pressable>
     );
 };
 

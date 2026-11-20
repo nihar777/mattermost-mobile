@@ -10,6 +10,7 @@
 import {
     Post,
     Setup,
+    System,
 } from '@support/server_api';
 import {
     serverOneUrl,
@@ -24,18 +25,22 @@ import {
     ServerScreen,
     ThreadScreen,
 } from '@support/ui/screen';
-import {getRandomId, isIos} from '@support/utils';
+import {buildMessageOfLength, getRandomId, isIos, timeouts, wait} from '@support/utils';
 import {expect} from 'detox';
 
 describe('Messaging - Message Draft', () => {
     const serverOneDisplayName = 'Server 1';
-    const channelsCategory = 'channels';
     const offTopicChannelName = 'off-topic';
+    const channelsCategory = 'channels';
+    let maxPostSize: number;
     let testChannel: any;
 
     beforeAll(async () => {
         const {channel, user} = await Setup.apiInit(siteOneUrl);
         testChannel = channel;
+
+        // The server computes this; it rose from 16383 to 262144 on server main.
+        maxPostSize = await System.apiGetMaxPostSize(siteOneUrl);
 
         // # Log in to server
         await ServerScreen.connectToServer(serverOneUrl, serverOneDisplayName);
@@ -102,9 +107,14 @@ describe('Messaging - Message Draft', () => {
             await expect(ChannelScreen.postInput).toHaveText(message);
         }
 
-        // # Send app to home and re-open
-        await device.sendToHome();
-        await device.launchApp({newInstance: false});
+        // # Go back to channel list, then fully close and re-open the app.
+        await ChannelScreen.back();
+        await device.launchApp({newInstance: true});
+        await wait(timeouts.ONE_SEC);
+
+        // # Re-open the channel after relaunch
+        await ChannelListScreen.toBeVisible();
+        await ChannelScreen.open(channelsCategory, testChannel.name);
 
         // * Verify message draft still exists in post draft
         if (isIos()) {
@@ -119,8 +129,8 @@ describe('Messaging - Message Draft', () => {
     });
 
     it('MM-T4781_3 - should show character count warning when message exceeds character limit', async () => {
-        // # Open a channel screen and create a message draft that exceeds character limit (> 16383)
-        let message = '1234567890'.repeat(1638) + '1234';
+        // # Open a channel screen and create a message draft one rune over the server's limit
+        let message = buildMessageOfLength(maxPostSize + 1);
         await ChannelScreen.open(channelsCategory, testChannel.name);
         await ChannelScreen.postInput.tap();
         await ChannelScreen.postInput.clearText();
@@ -128,18 +138,40 @@ describe('Messaging - Message Draft', () => {
 
         // * Verify warning message is displayed and send button is disabled
         await expect(Alert.messageLengthTitle).toBeVisible();
-        await expect(element(by.text('Your current message is too long. Current character count: 16384/16383'))).toBeVisible();
-        await Alert.okButton.tap();
+        await expect(element(by.text(`Your current message is too long. Current character count: ${maxPostSize + 1}/${maxPostSize}`)).atIndex(0)).toBeVisible();
+        await Alert.dismissMessageLengthAlert();
         await expect(ChannelScreen.sendButtonDisabled).toBeVisible();
 
-        // # Replace message draft with length less than the character limit (16383)
-        message = '1234567890'.repeat(1638) + '123';
+        // # Replace message draft with a length exactly at the limit
+        message = buildMessageOfLength(maxPostSize);
         await ChannelScreen.postInput.replaceText(message);
 
         // * Verify warning message is not displayed and send button is enabled
         await expect(Alert.messageLengthTitle).not.toBeVisible();
-        await expect(element(by.text('Your current message is too long. Current character count: 16383/16383'))).not.toBeVisible();
+        await expect(element(by.text(`Your current message is too long. Current character count: ${maxPostSize}/${maxPostSize}`)).atIndex(0)).not.toBeVisible();
         await expect(ChannelScreen.sendButton).toBeVisible();
+
+        // # Clear post draft and go back to channel list screen
+        await ChannelScreen.postInput.clearText();
+        await ChannelScreen.back();
+    });
+
+    it('MM-T107 - should show alert when message exceeds character limit', async () => {
+        const overLimitMessage = buildMessageOfLength(maxPostSize + 1);
+
+        // # Open a channel and type a message over the character limit
+        await ChannelScreen.open(channelsCategory, testChannel.name);
+        await ChannelScreen.postInput.tap();
+        await ChannelScreen.postInput.replaceText(overLimitMessage);
+
+        if (isIos()) {
+            await ChannelScreen.postInput.typeText('a');
+        }
+
+        // * Verify message length alert is shown
+        await expect(Alert.messageLengthTitle).toBeVisible();
+
+        await Alert.dismissMessageLengthAlert();
 
         // # Clear post draft and go back to channel list screen
         await ChannelScreen.postInput.clearText();
@@ -150,8 +182,7 @@ describe('Messaging - Message Draft', () => {
         // # Open a channel screen, post a message, and tap on the post to open reply thread
         const message = `Message ${getRandomId()}`;
         await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelScreen.postMessage(message);
-        const {post: parentPost} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
+        const {post: parentPost} = await ChannelScreen.postMessageAndVerify(message, testChannel.id, siteOneUrl);
         const {postListPostItem: parentPostListPostItem} = ChannelScreen.getPostListPostItem(parentPost.id, message);
         await parentPostListPostItem.tap();
 

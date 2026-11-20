@@ -1,19 +1,46 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
+import {defineMessages, type IntlShape} from 'react-intl';
+
+import {isAppSelectOption, DialogElementTypes, DialogTextSubtypes} from './dialog_utils';
+import {logWarning} from './log';
+
 import type {KeyboardTypeOptions} from 'react-native';
 
-type DialogError = {
-    id: string;
-    defaultMessage: string;
-    values?: any;
-};
-
-export function checkDialogElementForError(elem: DialogElement, value: any): DialogError | undefined | null {
-    const fieldRequiredError = {
+const messages = defineMessages({
+    required: {
         id: 'interactive_dialog.error.required',
         defaultMessage: 'This field is required.',
-    };
+    },
+    tooShort: {
+        id: 'interactive_dialog.error.too_short',
+        defaultMessage: 'Minimum input length is {minLength}.',
+    },
+    badEmail: {
+        id: 'interactive_dialog.error.bad_email',
+        defaultMessage: 'Must be a valid email address.',
+    },
+    badNumber: {
+        id: 'interactive_dialog.error.bad_number',
+        defaultMessage: 'Must be a number.',
+    },
+    badUrl: {
+        id: 'interactive_dialog.error.bad_url',
+        defaultMessage: 'URL must include http:// or https://.',
+    },
+    invalidOption: {
+        id: 'interactive_dialog.error.invalid_option',
+        defaultMessage: 'Must be a valid option',
+    },
+    invalidFormat: {
+        id: 'interactive_dialog.error.invalid_format',
+        defaultMessage: 'Invalid matrix selection format',
+    },
+});
+
+export function checkDialogElementForError(elem: DialogElement, value: any, intl: IntlShape): string | undefined | null {
+    const fieldRequiredError = intl.formatMessage(messages.required);
 
     if (typeof value === 'undefined' && !elem.optional) {
         return fieldRequiredError;
@@ -21,52 +48,154 @@ export function checkDialogElementForError(elem: DialogElement, value: any): Dia
 
     const type = elem.type;
 
-    if (type === 'text' || type === 'textarea') {
+    if (type === DialogElementTypes.TEXT || type === DialogElementTypes.TEXTAREA) {
         if (value === '' && !elem.optional) {
             return fieldRequiredError;
         }
         if (value && value.length < elem.min_length) {
-            return {
-                id: 'interactive_dialog.error.too_short',
-                defaultMessage: 'Minimum input length is {minLength}.',
-                values: {minLength: elem.min_length},
-            };
+            return intl.formatMessage(messages.tooShort, {minLength: elem.min_length});
         }
 
-        if (elem.subtype === 'email') {
+        if (elem.subtype === DialogTextSubtypes.EMAIL) {
             if (value && !value.includes('@')) {
-                return {
-                    id: 'interactive_dialog.error.bad_email',
-                    defaultMessage: 'Must be a valid email address.',
-                };
+                return intl.formatMessage(messages.badEmail);
             }
         }
 
-        if (elem.subtype === 'number') {
+        if (elem.subtype === DialogTextSubtypes.NUMBER) {
             if (value && isNaN(value)) {
-                return {
-                    id: 'interactive_dialog.error.bad_number',
-                    defaultMessage: 'Must be a number.',
-                };
+                return intl.formatMessage(messages.badNumber);
             }
         }
 
-        if (elem.subtype === 'url') {
+        if (elem.subtype === DialogTextSubtypes.URL) {
             if (value && !value.startsWith('http://') && !value.startsWith('https://')) {
-                return {
-                    id: 'interactive_dialog.error.bad_url',
-                    defaultMessage: 'URL must include http:// or https://.',
-                };
+                return intl.formatMessage(messages.badUrl);
             }
         }
-    } else if (type === 'radio') {
-        const options = elem.options;
+    } else if (type === DialogElementTypes.RADIO) {
+        if ((typeof value === 'undefined' || value === '') && !elem.optional) {
+            return fieldRequiredError;
+        }
 
-        if (typeof value !== 'undefined' && Array.isArray(options) && !options.some((e) => e.value === value)) {
-            return {
-                id: 'interactive_dialog.error.invalid_option',
-                defaultMessage: 'Must be a valid option',
-            };
+        const options = elem.options;
+        if (typeof value !== 'undefined' && value !== '' && Array.isArray(options)) {
+            // Extract value from AppSelectOption object if needed
+            const valueToCheck = isAppSelectOption(value) ? value.value : value;
+
+            if (!options.some((e) => e.value === valueToCheck)) {
+                return intl.formatMessage(messages.invalidOption);
+            }
+        }
+    } else if (type === DialogElementTypes.SELECT) {
+        // Handle empty values for both single and multiselect
+        if (!elem.optional) {
+            if (typeof value === 'undefined' || value === '') {
+                return fieldRequiredError;
+            }
+
+            // For multiselect, also check if array is empty
+            if (elem.multiselect && Array.isArray(value) && value.length === 0) {
+                return fieldRequiredError;
+            }
+        }
+
+        const options = elem.options;
+        if (typeof value !== 'undefined' && value !== '' && Array.isArray(options)) {
+            // Handle multiselect arrays
+            if (elem.multiselect && Array.isArray(value)) {
+                // For multiselect, check each value in the array
+                for (const singleValue of value) {
+                    const valueToCheck = isAppSelectOption(singleValue) ? singleValue.value : singleValue;
+                    if (!options.some((e) => e.value === valueToCheck)) {
+                        return intl.formatMessage(messages.invalidOption);
+                    }
+                }
+            } else {
+                // Single select validation
+                const valueToCheck = isAppSelectOption(value) ? value.value : value;
+                if (!options.some((e) => e.value === valueToCheck)) {
+                    return intl.formatMessage(messages.invalidOption);
+                }
+            }
+        }
+    } else if (type === DialogElementTypes.BOOL) {
+        // Required boolean fields must be true
+        if (!elem.optional && (typeof value === 'undefined' || value !== true)) {
+            return fieldRequiredError;
+        }
+    } else if (type === DialogElementTypes.CHECKBOX_GROUP) {
+        if (!Array.isArray(value)) {
+            return elem.optional ? null : fieldRequiredError;
+        }
+        if (!elem.optional && value.length === 0) {
+            return fieldRequiredError;
+        }
+
+        if (Array.isArray(elem.options)) {
+            for (const singleValue of value) {
+                if (!elem.options.some((option) => option.value === singleValue)) {
+                    return intl.formatMessage(messages.invalidOption);
+                }
+            }
+        }
+    } else if (type === DialogElementTypes.CHECKBOX_MATRIX) {
+        // Not rendered without matrix_config, so don't block submit on it.
+        if (!elem.matrix_config) {
+            logWarning('checkDialogElementForError: checkbox_matrix element has no matrix_config', elem.name);
+            return null;
+        }
+
+        if (!Array.isArray(value)) {
+            return elem.optional ? null : fieldRequiredError;
+        }
+        if (!elem.optional && value.length === 0) {
+            return fieldRequiredError;
+        }
+
+        if (Array.isArray(value) && elem.matrix_config) {
+            const validRows = new Set(elem.matrix_config.rows.map((row) => row.value));
+            const validColumns = new Set(elem.matrix_config.columns.map((column) => column.value));
+            const seenRows = new Set<string>();
+
+            for (const entry of value as string[]) {
+                const colonIndex = typeof entry === 'string' ? entry.indexOf(':') : -1;
+                if (colonIndex <= 0) {
+                    return intl.formatMessage(messages.invalidFormat);
+                }
+
+                const rowValue: string = entry.slice(0, colonIndex);
+
+                // Reject empty tokens ("row1:col1,"), as the server does.
+                const columns: string[] = entry.slice(colonIndex + 1).split(',').map((col: string) => col.trim());
+
+                if (columns.includes('') || !validRows.has(rowValue) || seenRows.has(rowValue)) {
+                    return intl.formatMessage(messages.invalidFormat);
+                }
+
+                if (elem.matrix_config.row_selection === 'single' && columns.length > 1) {
+                    return intl.formatMessage(messages.invalidFormat);
+                }
+
+                if (columns.some((col: string) => !validColumns.has(col))) {
+                    return intl.formatMessage(messages.invalidFormat);
+                }
+
+                seenRows.add(rowValue);
+            }
+        }
+    } else if (type === DialogElementTypes.FILE) {
+        // FILE value is a comma-joined list of uploaded file IDs; '' means no file.
+        if (!elem.optional) {
+            const ids = typeof value === 'string' ? value.split(',').map((id) => id.trim()).filter(Boolean) : [];
+            if (!ids.length) {
+                return fieldRequiredError;
+            }
+        }
+    } else if (type === DialogElementTypes.DATE || type === DialogElementTypes.DATETIME) {
+        // Required date/datetime fields must have a value
+        if (!elem.optional && (value == null || value === '')) {
+            return fieldRequiredError;
         }
     }
 

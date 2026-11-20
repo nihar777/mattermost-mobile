@@ -5,6 +5,8 @@ import React, {useMemo} from 'react';
 import {useWindowDimensions} from 'react-native';
 import {useSharedValue} from 'react-native-reanimated';
 
+import {isGif as isGifImage} from '@utils/file';
+import {galleryItemToFileInfo} from '@utils/gallery';
 import * as vec from '@utils/gallery/vectors';
 import {calculateDimensions} from '@utils/images';
 
@@ -56,15 +58,28 @@ function ImageRenderer({
         image,
         targetDimensions,
         targetHeight,
+    }), [
+        interactionsEnabled,
+        isPagerInProgress,
+        scale,
+        scaleOffset,
+        translation,
+        panVelocity,
+        offset,
+        scaleTranslation,
+        canvas,
+        image,
+        targetDimensions,
+        targetHeight,
+    ]);
 
-    // the rest of the values are shared values,
-    // so they don't need to be included in the deps
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    }), [targetDimensions, targetHeight, canvas]);
+    const autoplay = useMemo(() => isGifImage(galleryItemToFileInfo(item)), [item]);
 
     return (
         <TransfrormerProvider sharedValues={sharedValues}>
             <ImageTransformer
+                autoplay={autoplay}
+                cacheKey={item.cacheKey}
                 isPageActive={isPageActive}
                 targetDimensions={targetDimensions}
                 height={targetHeight}

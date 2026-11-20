@@ -14,7 +14,7 @@ import TouchableWithFeedback from '@components/touchable_with_feedback';
 import {Events} from '@constants';
 import {useServerUrl} from '@context/server';
 import {useIsTablet} from '@hooks/device';
-import useDidUpdate from '@hooks/did_update';
+import useDidMount from '@hooks/did_mount';
 import EphemeralStore from '@store/ephemeral_store';
 import {makeStyleSheetFromTheme, hexToHue, changeOpacity} from '@utils/theme';
 import {typography} from '@utils/typography';
@@ -150,7 +150,7 @@ const MoreMessages = ({
                     adjustedTop,
                 ],
                 'clamp',
-            ), {damping: 15}),
+            ), {mass: 1, stiffness: 100, damping: 14}),
         }],
     }), [adjustedTop]);
 
@@ -161,49 +161,6 @@ const MoreMessages = ({
     useEffect(() => {
         localUnreadCount.current = unreadCount;
     }, [unreadCount]);
-
-    const resetCount = async () => {
-        localUnreadCount.current = 0;
-
-        if (resetting.current || (isCRTEnabled && rootId)) {
-            return;
-        }
-
-        resetting.current = true;
-        await resetMessageCount(serverUrl, channelId);
-        resetting.current = false;
-    };
-
-    const onViewableItemsChanged = (viewableItems: ViewToken[]) => {
-        pressed.current = false;
-
-        if (newMessageLineIndex <= 0 || viewableItems.length === 0 || isManualUnread || resetting.current) {
-            return;
-        }
-
-        const lastViewableIndex = viewableItems.filter((v) => v.isViewable)[viewableItems.length - 1]?.index || 0;
-        const nextViewableIndex = lastViewableIndex + 1;
-        if (viewableItems[0].index === 0 && nextViewableIndex > newMessageLineIndex && !initialScroll.current) {
-            // Auto scroll if the first post is viewable and
-            // * the new message line is viewable OR
-            // * the new message line will be the first next viewable item
-            scrollToIndex(newMessageLineIndex, true, false);
-            resetCount();
-            top.value = 0;
-            initialScroll.current = true;
-            return;
-        }
-
-        const readCount = posts.slice(0, lastViewableIndex).filter((v) => v.type === 'post').length;
-        const totalUnread = localUnreadCount.current - readCount;
-        if (lastViewableIndex >= newMessageLineIndex) {
-            resetCount();
-            top.value = 0;
-        } else if (totalUnread > 0) {
-            setRemaining(totalUnread);
-            top.value = 1;
-        }
-    };
 
     const onScrollEndIndex = () => {
         pressed.current = false;
@@ -225,31 +182,71 @@ const MoreMessages = ({
         scrollToIndex(newMessageLineIndex, true);
     }, [newMessageLineIndex, scrollToIndex]);
 
-    useDidUpdate(() => {
-        setLoading(EphemeralStore.isLoadingMessagesForChannel(serverUrl, channelId));
-    }, [serverUrl, channelId]);
-
     useEffect(() => {
         const listener = DeviceEventEmitter.addListener(Events.LOADING_CHANNEL_POSTS, ({serverUrl: eventServerUrl, channelId: eventChannelId, value}) => {
             if (eventServerUrl === serverUrl && eventChannelId === channelId) {
                 setLoading(value);
             }
         });
+        setLoading(EphemeralStore.isLoadingMessagesForChannel(serverUrl, channelId));
 
         return () => listener.remove();
     }, [serverUrl, channelId]);
 
-    useEffect(() => {
+    useDidMount(() => {
         const unregister = registerScrollEndIndexListener(onScrollEndIndex);
 
         return () => unregister();
-    }, []);
+    });
 
     useEffect(() => {
+        async function resetCount() {
+            localUnreadCount.current = 0;
+
+            if (resetting.current || (isCRTEnabled && rootId)) {
+                return;
+            }
+
+            resetting.current = true;
+            await resetMessageCount(serverUrl, channelId);
+            resetting.current = false;
+        }
+
+        function onViewableItemsChanged(viewableItems: ViewToken[]) {
+            pressed.current = false;
+
+            if (newMessageLineIndex <= 0 || viewableItems.length === 0 || isManualUnread || resetting.current) {
+                return;
+            }
+
+            const lastViewableIndex = viewableItems.filter((v) => v.isViewable)[viewableItems.length - 1]?.index || 0;
+            const nextViewableIndex = lastViewableIndex + 1;
+            if (viewableItems[0].index === 0 && nextViewableIndex > newMessageLineIndex && !initialScroll.current) {
+                // Auto scroll if the first post is viewable and
+                // * the new message line is viewable OR
+                // * the new message line will be the first next viewable item
+                scrollToIndex(newMessageLineIndex, true, false);
+                resetCount();
+                top.value = 0;
+                initialScroll.current = true;
+                return;
+            }
+
+            const readCount = posts.slice(0, lastViewableIndex).filter((v) => v.type === 'post').length;
+            const totalUnread = localUnreadCount.current - readCount;
+            if (lastViewableIndex >= newMessageLineIndex) {
+                resetCount();
+                top.value = 0;
+            } else if (totalUnread > 0) {
+                setRemaining(totalUnread);
+                top.value = 1;
+            }
+        }
+
         const unregister = registerViewableItemsListener(onViewableItemsChanged);
 
         return () => unregister();
-    }, [channelId, unreadCount, newMessageLineIndex, posts]);
+    }, [channelId, unreadCount, newMessageLineIndex, posts, registerViewableItemsListener, isCRTEnabled, rootId, serverUrl, isManualUnread, scrollToIndex, top]);
 
     useEffect(() => {
         resetting.current = false;

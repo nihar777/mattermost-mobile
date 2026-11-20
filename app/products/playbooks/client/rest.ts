@@ -14,6 +14,7 @@ export interface ClientPlaybooksMix {
     fetchPlaybookRuns: (params: FetchPlaybookRunsParams, groupLabel?: RequestGroupLabel) => Promise<FetchPlaybookRunsReturn>;
     fetchPlaybookRun: (id: string, groupLabel?: RequestGroupLabel) => Promise<PlaybookRun>;
     fetchPlaybookRunMetadata: (id: string) => Promise<PlaybookRunMetadata>;
+    patchPlaybookRun: (playbookRunId: string, updates: Partial<PlaybookRun>) => Promise<void>;
     setOwner: (playbookRunId: string, ownerId: string) => Promise<void>;
 
     // Run Management
@@ -22,17 +23,28 @@ export interface ClientPlaybooksMix {
     postStatusUpdate: (playbookRunID: string, payload: PostStatusUpdatePayload, ids: PostStatusUpdateIds) => Promise<void>;
 
     // Checklist Management
-    setChecklistItemState: (playbookRunID: string, checklistNum: number, itemNum: number, newState: ChecklistItemState) => Promise<void>;
+    setChecklistItemState: (playbookRunID: string, checklistNum: number, itemNum: number, newState: ChecklistItemState, requirementValues?: Record<string, string>) => Promise<void>;
     skipChecklistItem: (playbookRunID: string, checklistNum: number, itemNum: number) => Promise<void>;
     restoreChecklistItem: (playbookRunID: string, checklistNum: number, itemNum: number) => Promise<void>;
     setAssignee: (playbookRunId: string, checklistNum: number, itemNum: number, assigneeId?: string) => Promise<void>;
     setDueDate: (playbookRunId: string, checklistNum: number, itemNum: number, date?: number) => Promise<void>;
+    addChecklistItem: (playbookRunId: string, checklistNum: number, item: ChecklistItemInput) => Promise<void>;
+    deleteChecklistItem: (playbookRunId: string, checklistNum: number, itemNum: number) => Promise<void>;
+    updateChecklistItem: (playbookRunId: string, checklistNum: number, itemNum: number, item: ChecklistItemInput) => Promise<void>;
 
-    // skipChecklist: (playbookRunID: string, checklistNum: number) => Promise<void>;
+    renameChecklist: (playbookRunId: string, checklistNumber: number, newName: string) => Promise<void>;
 
     // Slash Commands
     runChecklistItemSlashCommand: (playbookRunId: string, checklistNumber: number, itemNumber: number) => Promise<{trigger_id: string}>;
     setChecklistItemCommand: (playbookRunID: string, checklistNum: number, itemNum: number, command: string) => Promise<void>;
+
+    // Property Fields
+    fetchRunPropertyFields: (runId: string, updatedSince?: number) => Promise<PlaybookRunPropertyField[]>;
+    fetchRunPropertyValues: (runId: string, updatedSince?: number) => Promise<PlaybookRunPropertyValue[]>;
+    setRunPropertyValue: (runId: string, fieldId: string, value: string, fieldType?: string) => Promise<PlaybookRunPropertyValue>;
+
+    // Settings
+    fetchPlaybooksSettings: () => Promise<PlaybooksGlobalSettings>;
 }
 
 const ClientPlaybooks = <TBase extends Constructor<ClientBase>>(superclass: TBase) => class extends superclass {
@@ -82,6 +94,20 @@ const ClientPlaybooks = <TBase extends Constructor<ClientBase>>(superclass: TBas
         return this.doFetch(
             `${this.getPlaybookRunRoute(id)}/metadata`,
             {method: 'get'},
+        );
+    };
+
+    patchPlaybookRun = async (playbookRunId: string, updates: Partial<PlaybookRun>) => {
+        await this.doFetch(
+            `${this.getPlaybookRunRoute(playbookRunId)}`,
+            {method: 'patch', body: updates},
+        );
+    };
+
+    renameChecklist = async (playbookRunId: string, checklistNumber: number, newName: string) => {
+        await this.doFetch(
+            `${this.getPlaybookRunRoute(playbookRunId)}/checklists/${checklistNumber}/rename`,
+            {method: 'put', body: {title: newName}},
         );
     };
 
@@ -146,10 +172,22 @@ const ClientPlaybooks = <TBase extends Constructor<ClientBase>>(superclass: TBas
     };
 
     // Checklist Management
-    setChecklistItemState = async (playbookRunID: string, checklistNum: number, itemNum: number, newState: ChecklistItemState) => {
+    setChecklistItemState = async (
+        playbookRunID: string,
+        checklistNum: number,
+        itemNum: number,
+        newState: ChecklistItemState,
+        requirementValues?: Record<string, string>,
+    ) => {
         await this.doFetch(
             `${this.getPlaybookRunRoute(playbookRunID)}/checklists/${checklistNum}/item/${itemNum}/state`,
-            {method: 'put', body: {new_state: newState}},
+            {
+                method: 'put',
+                body: {
+                    new_state: newState,
+                    ...(requirementValues && {requirement_values: requirementValues}),
+                },
+            },
         );
     };
 
@@ -188,6 +226,27 @@ const ClientPlaybooks = <TBase extends Constructor<ClientBase>>(superclass: TBas
         );
     };
 
+    addChecklistItem = async (playbookRunId: string, checklistNum: number, item: ChecklistItemInput) => {
+        await this.doFetch(
+            `${this.getPlaybookRunRoute(playbookRunId)}/checklists/${checklistNum}/add`,
+            {method: 'post', body: item},
+        );
+    };
+
+    updateChecklistItem = async (playbookRunId: string, checklistNum: number, itemNum: number, item: ChecklistItemInput) => {
+        await this.doFetch(
+            `${this.getPlaybookRunRoute(playbookRunId)}/checklists/${checklistNum}/item/${itemNum}`,
+            {method: 'put', body: item},
+        );
+    };
+
+    deleteChecklistItem = async (playbookRunId: string, checklistNum: number, itemNum: number) => {
+        await this.doFetch(
+            `${this.getPlaybookRunRoute(playbookRunId)}/checklists/${checklistNum}/item/${itemNum}`,
+            {method: 'delete'},
+        );
+    };
+
     // Slash Commands
     runChecklistItemSlashCommand = async (playbookRunId: string, checklistNumber: number, itemNumber: number) => {
         const data = await this.doFetch(
@@ -205,6 +264,57 @@ const ClientPlaybooks = <TBase extends Constructor<ClientBase>>(superclass: TBas
         );
 
         return data;
+    };
+
+    // Property Fields
+    fetchRunPropertyFields = async (runId: string, updatedSince?: number) => {
+        const queryParams = updatedSince ? buildQueryString({updated_since: updatedSince}) : '';
+        const data = await this.doFetch(
+            `${this.getPlaybookRunRoute(runId)}/property_fields${queryParams}`,
+            {method: 'get'},
+        );
+        return data || [];
+    };
+
+    fetchRunPropertyValues = async (runId: string, updatedSince?: number) => {
+        const queryParams = updatedSince ? buildQueryString({updated_since: updatedSince}) : '';
+        const data = await this.doFetch(
+            `${this.getPlaybookRunRoute(runId)}/property_values${queryParams}`,
+            {method: 'get'},
+        );
+        return data || [];
+    };
+
+    setRunPropertyValue = async (runId: string, fieldId: string, value: string, fieldType?: string) => {
+        // Convert value to appropriate format based on field type
+        let bodyValue: string | string[] = value;
+
+        if (fieldType === 'multiselect') {
+            // For multiselect fields, always convert to array (even if empty)
+            if (value) {
+                bodyValue = value.split(',').filter((id) => id.length > 0);
+            } else {
+                bodyValue = [];
+            }
+        }
+
+        const data = await this.doFetch(
+            `${this.getPlaybookRunRoute(runId)}/property_fields/${fieldId}/value`,
+            {method: 'put', body: {value: bodyValue}},
+        );
+        return data;
+    };
+
+    // Settings
+    fetchPlaybooksSettings = async () => {
+        const data = await this.doFetch(
+            `${this.getPlaybooksRoute()}/settings`,
+            {method: 'get'},
+        );
+        return data || {
+            enable_experimental_features: false,
+            enable_task_requirements: false,
+        };
     };
 };
 

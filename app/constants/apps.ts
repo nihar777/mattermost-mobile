@@ -35,6 +35,14 @@ export const AppFieldTypes: { [name: string]: AppFieldType } = {
     USER: 'user',
     CHANNEL: 'channel',
     MARKDOWN: 'markdown',
+    RADIO: 'radio',
+    FILE: 'file',
+    DATE: 'date',
+    DATETIME: 'datetime',
+    CHECKBOX_GROUP: 'checkbox_group',
+    CHECKBOX_MATRIX: 'checkbox_matrix',
+    ACTION_BUTTON: 'action_button',
+    COLLAPSIBLE: 'collapsible',
 };
 
 export const SelectableAppFieldTypes = [
@@ -43,6 +51,8 @@ export const SelectableAppFieldTypes = [
     AppFieldTypes.STATIC_SELECT,
     AppFieldTypes.DYNAMIC_SELECT,
 ];
+
+export const DEFAULT_TIME_INTERVAL_MINUTES = 60;
 
 export const COMMAND_SUGGESTION_ERROR = 'error';
 export const COMMAND_SUGGESTION_CHANNEL = 'channel';
@@ -54,6 +64,7 @@ export default {
     AppCallResponseTypes,
     AppExpandLevels,
     AppFieldTypes,
+    DEFAULT_TIME_INTERVAL_MINUTES,
     COMMAND_SUGGESTION_ERROR,
     COMMAND_SUGGESTION_CHANNEL,
     COMMAND_SUGGESTION_USER,

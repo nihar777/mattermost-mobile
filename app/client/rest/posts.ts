@@ -13,6 +13,7 @@ export interface ClientPostsMix {
     getPost: (postId: string, groupLabel?: RequestGroupLabel) => Promise<Post>;
     patchPost: (postPatch: Partial<Post> & {id: string}) => Promise<Post>;
     deletePost: (postId: string) => Promise<any>;
+    burnPostNow: (postId: string) => Promise<any>;
     getPostThread: (postId: string, options: FetchPaginatedThreadOptions, groupLabel?: RequestGroupLabel) => Promise<PostResponse>;
     getPosts: (channelId: string, page?: number, perPage?: number, collapsedThreads?: boolean, collapsedThreadsExtended?: boolean, groupLabel?: RequestGroupLabel) => Promise<PostResponse>;
     getPostsSince: (channelId: string, since: number, collapsedThreads?: boolean, collapsedThreadsExtended?: boolean, groupLabel?: RequestGroupLabel) => Promise<PostResponse>;
@@ -30,10 +31,12 @@ export interface ClientPostsMix {
     searchPostsWithParams: (teamId: string, params: PostSearchParams) => Promise<SearchPostResponse>;
     searchPosts: (teamId: string, terms: string, isOrSearch: boolean) => Promise<SearchPostResponse>;
     doPostAction: (postId: string, actionId: string, selectedOption?: string) => Promise<any>;
-    doPostActionWithCookie: (postId: string, actionId: string, actionCookie: string, selectedOption?: string) => Promise<any>;
+    doPostActionWithCookie: (postId: string, actionId: string, actionCookie: string, selectedOption?: string, query?: Record<string, string>, integrationFormat?: PostActionIntegrationFormat) => Promise<any>;
     acknowledgePost: (postId: string, userId: string) => Promise<PostAcknowledgement>;
     unacknowledgePost: (postId: string, userId: string) => Promise<any>;
     sendTestNotification: () => Promise<{status: 'OK'}>;
+    revealBoRPost: (postId: string) => Promise<Post>;
+    getPostInfo: (postId: string) => Promise<PostInfo>;
 }
 
 const ClientPosts = <TBase extends Constructor<ClientBase>>(superclass: TBase) => class extends superclass {
@@ -68,6 +71,13 @@ const ClientPosts = <TBase extends Constructor<ClientBase>>(superclass: TBase) =
     deletePost = async (postId: string) => {
         return this.doFetch(
             `${this.getPostRoute(postId)}`,
+            {method: 'delete'},
+        );
+    };
+
+    burnPostNow = async (postId: string) => {
+        return this.doFetch(
+            `${this.getPostRoute(postId)}/burn`,
             {method: 'delete'},
         );
     };
@@ -195,13 +205,18 @@ const ClientPosts = <TBase extends Constructor<ClientBase>>(superclass: TBase) =
         return this.doPostActionWithCookie(postId, actionId, '', selectedOption);
     };
 
-    doPostActionWithCookie = async (postId: string, actionId: string, actionCookie: string, selectedOption = '') => {
-        const msg: any = {
+    doPostActionWithCookie = async (postId: string, actionId: string, actionCookie: string, selectedOption = '', query?: Record<string, string>, integrationFormat: PostActionIntegrationFormat = 'attachment') => {
+        const msg: Record<string, unknown> = {
             selected_option: selectedOption,
         };
         if (actionCookie !== '') {
             msg.cookie = actionCookie;
         }
+        if (query && Object.keys(query).length > 0) {
+            msg.query = query;
+        }
+
+        msg.integration_format = integrationFormat;
         return this.doFetch(
             `${this.getPostRoute(postId)}/actions/${encodeURIComponent(actionId)}`,
             {method: 'post', body: msg},
@@ -226,6 +241,20 @@ const ClientPosts = <TBase extends Constructor<ClientBase>>(superclass: TBase) =
         return this.doFetch(
             `${this.urlVersion}/notifications/test`,
             {method: 'post'},
+        );
+    };
+
+    revealBoRPost = async (postId: string) => {
+        return this.doFetch(
+            `${this.getPostRoute(postId)}/reveal`,
+            {method: 'get'},
+        );
+    };
+
+    getPostInfo = async (postId: string) => {
+        return this.doFetch(
+            `${this.getPostRoute(postId)}/info`,
+            {method: 'get'},
         );
     };
 };

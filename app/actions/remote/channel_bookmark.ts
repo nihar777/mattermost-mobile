@@ -5,7 +5,8 @@ import DatabaseManager from '@database/manager';
 import NetworkManager from '@managers/network_manager';
 import websocketManager from '@managers/websocket_manager';
 import {getBookmarksSince, getChannelBookmarkById} from '@queries/servers/channel_bookmark';
-import {getConfigValue, getLicense} from '@queries/servers/system';
+import {getChannelBookmarksEnabled} from '@queries/servers/features';
+import {expireChannelDecisionsOnDenial} from '@utils/channel_policy';
 import {getFullErrorMessage} from '@utils/errors';
 import {logError} from '@utils/log';
 
@@ -16,10 +17,9 @@ export async function fetchChannelBookmarks(serverUrl: string, channelId: string
         const client = NetworkManager.getClient(serverUrl);
         const {database, operator} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
 
-        const bookmarksEnabled = (await getConfigValue(database, 'FeatureFlagChannelBookmarks')) === 'true';
-        const isLicensed = (await getLicense(database))?.IsLicensed === 'true';
+        const bookmarksEnabled = await getChannelBookmarksEnabled(database);
 
-        if (!bookmarksEnabled || !isLicensed) {
+        if (!bookmarksEnabled) {
             return {bookmarks: []};
         }
 
@@ -52,6 +52,7 @@ export async function createChannelBookmark(serverUrl: string, channelId: string
     } catch (error) {
         logError('error on createChannelBookmark', getFullErrorMessage(error));
         forceLogoutIfNecessary(serverUrl, error);
+        expireChannelDecisionsOnDenial(serverUrl, channelId, error);
         return {error};
     }
 }
@@ -74,6 +75,7 @@ export async function editChannelBookmark(serverUrl: string, bookmark: ChannelBo
     } catch (error) {
         logError('error on editChannelBookmark', getFullErrorMessage(error));
         forceLogoutIfNecessary(serverUrl, error);
+        expireChannelDecisionsOnDenial(serverUrl, bookmark.channel_id, error);
         return {error};
     }
 }
@@ -97,6 +99,7 @@ export async function deleteChannelBookmark(serverUrl: string, channelId: string
     } catch (error) {
         logError('error on deleteChannelBookmark', getFullErrorMessage(error));
         forceLogoutIfNecessary(serverUrl, error);
+        expireChannelDecisionsOnDenial(serverUrl, channelId, error);
         return {error};
     }
 }

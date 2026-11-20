@@ -4,6 +4,8 @@
 import GenericClient, {type ClientResponse} from '@mattermost/react-native-network-client';
 import {Linking} from 'react-native';
 
+import * as ClientConstants from '@client/rest/constants';
+
 import {
     cleanUpUrlable,
     cleanUrlForLogging,
@@ -17,6 +19,7 @@ import {
     getYouTubeVideoId,
     isImageLink,
     isParsableUrl,
+    isUrlSafe,
     isValidUrl,
     isYoutubeLink,
     normalizeProtocol,
@@ -90,6 +93,42 @@ describe('isValidUrl', () => {
     });
 });
 
+describe('isUrlSafe', () => {
+    it('should return true for safe URLs', () => {
+        expect(isUrlSafe('https://example.com')).toBe(true);
+        expect(isUrlSafe('http://example.com/path')).toBe(true);
+        expect(isUrlSafe('ftp://example.com')).toBe(true);
+        expect(isUrlSafe('mailto:user@example.com')).toBe(true);
+        expect(isUrlSafe('/channels/town-square')).toBe(true);
+        expect(isUrlSafe('')).toBe(true);
+    });
+
+    it('should return false for javascript URLs', () => {
+        expect(isUrlSafe('javascript:alert(1)')).toBe(false); // eslint-disable-line no-script-url
+        expect(isUrlSafe('JavaScript:alert(1)')).toBe(false); // eslint-disable-line no-script-url
+        expect(isUrlSafe('java%73cript:alert(1)')).toBe(false);
+        expect(isUrlSafe('java script:alert(1)')).toBe(false);
+        expect(isUrlSafe('java%0ascript:alert(1)')).toBe(false);
+        expect(isUrlSafe('%6aavascript:alert(1)')).toBe(false);
+    });
+
+    it('should return false for vbscript URLs', () => {
+        expect(isUrlSafe('vbscript:msgbox(1)')).toBe(false);
+        expect(isUrlSafe('VBScript:msgbox(1)')).toBe(false);
+    });
+
+    it('should return false for data URLs', () => {
+        expect(isUrlSafe('data:text/html,test')).toBe(false);
+        expect(isUrlSafe('data:image/png;base64,abc')).toBe(false);
+        expect(isUrlSafe('DaTa:text/html')).toBe(false);
+    });
+
+    it('should fall back to unescape when decodeURIComponent fails', () => {
+        expect(isUrlSafe('%u006aavascript:alert(1)')).toBe(false);
+        expect(isUrlSafe('java%script:alert(1)')).toBe(false);
+    });
+});
+
 describe('sanitizeUrl', () => {
     test('should return sanitized URL with https protocol', () => {
         const url = 'example.com';
@@ -119,6 +158,10 @@ describe('sanitizeUrl', () => {
         const url = 'http://example.com/';
         const result = sanitizeUrl(url, false);
         expect(result).toBe('https://example.com');
+    });
+
+    test('should keep an explicit https protocol when useHttp is true', () => {
+        expect(sanitizeUrl('https://example.com', true)).toBe('https://example.com');
     });
 });
 
@@ -155,6 +198,32 @@ describe('getServerUrlAfterRedirect', () => {
         const serverUrl = 'https://example.com';
         const result = await getServerUrlAfterRedirect(serverUrl);
         expect(result).toEqual({error});
+    });
+
+    test('should preserve the https scheme of a redirect target instead of forcing http back onto it', async () => {
+        mockedHead.mockResolvedValue({redirectUrls: ['https://final-url.com']} as ClientResponse);
+        const result = await getServerUrlAfterRedirect('http://example.com', true);
+        expect(result).toEqual({url: 'https://final-url.com'});
+    });
+
+    test('should strip the query string and fragment from a redirect target', async () => {
+        mockedHead.mockResolvedValue({redirectUrls: ['https://final-url.com/login?redirect_to=%2F#top']} as ClientResponse);
+        const result = await getServerUrlAfterRedirect('https://example.com');
+        expect(result).toEqual({url: 'https://final-url.com/login'});
+    });
+
+    test('should not send the preauth secret header when the resolved URL is not https', async () => {
+        mockedHead.mockResolvedValue({} as ClientResponse);
+        await getServerUrlAfterRedirect('http://example.com', true, 'test-secret');
+        expect(mockedHead).toHaveBeenCalledWith('http://example.com', {headers: {}});
+    });
+
+    test('should send the preauth secret header when the resolved URL is https', async () => {
+        mockedHead.mockResolvedValue({} as ClientResponse);
+        await getServerUrlAfterRedirect('https://example.com', false, 'test-secret');
+        expect(mockedHead).toHaveBeenCalledWith('https://example.com', {
+            headers: {[ClientConstants.HEADER_X_MATTERMOST_PREAUTH_SECRET]: 'test-secret'},
+        });
     });
 });
 

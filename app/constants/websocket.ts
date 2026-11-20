@@ -61,6 +61,7 @@ const WebsocketEvents = {
     DELETE_TEAM: 'delete_team',
     RESTORE_TEAM: 'restore_team',
     APPS_FRAMEWORK_REFRESH_BINDINGS: 'custom_com.mattermost.apps_refresh_bindings',
+    POST_TRANSLATION_UPDATED: 'post_translation_updated',
 
     CALLS_CHANNEL_ENABLED: `custom_${Calls.PluginId}_channel_enable_voice`,
     CALLS_CHANNEL_DISABLED: `custom_${Calls.PluginId}_channel_disable_voice`,
@@ -102,9 +103,31 @@ const WebsocketEvents = {
     SCHEDULED_POST_UPDATED: 'scheduled_post_updated',
     SCHEDULED_POST_DELETED: 'scheduled_post_deleted',
     CUSTOM_PROFILE_ATTRIBUTES_VALUES_UPDATED: 'custom_profile_attributes_values_updated',
+    PROPERTY_FIELD_CREATED: 'property_field_created',
+    PROPERTY_FIELD_UPDATED: 'property_field_updated',
+    PROPERTY_FIELD_DELETED: 'property_field_deleted',
+    PROPERTY_VALUES_UPDATED: 'property_values_updated',
     CUSTOM_PROFILE_ATTRIBUTES_FIELD_UPDATED: 'custom_profile_attributes_field_updated',
     CUSTOM_PROFILE_ATTRIBUTES_FIELD_CREATED: 'custom_profile_attributes_field_created',
     CUSTOM_PROFILE_ATTRIBUTES_FIELD_DELETED: 'custom_profile_attributes_field_deleted',
+
+    // Agents
+    AGENTS_POST_UPDATE: 'custom_mattermost-ai_postupdate',
+    AGENTS_TOOL_CALL_STATUS: 'custom_mattermost-ai_tool_call_status_updated',
+    AGENTS_CONVERSATION_UPDATED: 'custom_mattermost-ai_conversation_updated',
+
+    // Burn on Read
+    BOR_POST_REVEALED: 'post_revealed',
+    BOR_POST_BURNED: 'post_burned',
+    BURN_ON_READ_ALL_REVEALED: 'burn_on_read_all_revealed',
+
+    // File access control
+    FILE_DOWNLOAD_REJECTED: 'file_download_rejected',
+    SHOW_TOAST: 'show_toast',
+
+    // Attribute-based access control policies
+    CHANNEL_ACCESS_CONTROL_UPDATED: 'channel_access_control_updated',
+    PERMISSION_POLICY_UPDATED: 'permission_policy_updated',
 };
 
 export default WebsocketEvents;

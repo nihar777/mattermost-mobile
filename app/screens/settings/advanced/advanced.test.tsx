@@ -1,13 +1,12 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import {fireEvent, screen, waitFor} from '@testing-library/react-native';
+import {act, fireEvent, screen, waitFor} from '@testing-library/react-native';
 import React from 'react';
 import {Alert} from 'react-native';
 
-import {storeLowConnectivityMonitor} from '@actions/app/global';
 import {Screens} from '@constants';
-import {goToScreen} from '@screens/navigation';
+import {navigateToSettingsScreen} from '@screens/navigation';
 import {renderWithIntlAndTheme} from '@test/intl-test-helper';
 import {deleteFileCache, getAllFilesInCachesDirectory} from '@utils/file';
 
@@ -28,10 +27,9 @@ jest.mock('@hooks/utils', () => ({
     usePreventDoubleTap: jest.fn((callback) => callback),
 }));
 
-const mockStoreLowConnectivityMonitor = storeLowConnectivityMonitor as jest.Mock;
 const mockGetAllFilesInCachesDirectory = getAllFilesInCachesDirectory as jest.Mock;
 const mockDeleteFileCache = deleteFileCache as jest.Mock;
-const mockGoToScreen = goToScreen as jest.Mock;
+const mockNavigateToSettingsScreen = navigateToSettingsScreen as jest.Mock;
 
 describe('AdvancedSettings', () => {
     const defaultProps = {
@@ -45,7 +43,6 @@ describe('AdvancedSettings', () => {
             uri: 'file:///cache/file1.jpg',
             size: 1024 * 1024,
             modificationTime: Date.now() / 1000,
-            isDirectory: false,
             exists: true,
             md5: 'abc123',
         },
@@ -53,7 +50,6 @@ describe('AdvancedSettings', () => {
             uri: 'file:///cache/file2.png',
             size: 2048 * 1024,
             modificationTime: Date.now() / 1000,
-            isDirectory: false,
             exists: true,
             md5: 'def456',
         },
@@ -61,7 +57,7 @@ describe('AdvancedSettings', () => {
 
     beforeEach(() => {
         jest.clearAllMocks();
-        mockGetAllFilesInCachesDirectory.mockResolvedValue({
+        mockGetAllFilesInCachesDirectory.mockReturnValue({
             totalSize: 3072 * 1024,
             files: mockFiles,
         });
@@ -82,14 +78,6 @@ describe('AdvancedSettings', () => {
 
             await waitFor(() => {
                 expect(screen.getByTestId('advanced_settings.delete_data.option')).toBeTruthy();
-            });
-        });
-
-        it('should render low connectivity monitor toggle', async () => {
-            renderWithIntlAndTheme(<AdvancedSettings {...defaultProps}/>);
-
-            await waitFor(() => {
-                expect(screen.getByTestId('advanced_settings.low_connectivity_monitor.option')).toBeTruthy();
             });
         });
 
@@ -129,7 +117,7 @@ describe('AdvancedSettings', () => {
         });
 
         it('should handle empty cache gracefully', async () => {
-            mockGetAllFilesInCachesDirectory.mockResolvedValue({
+            mockGetAllFilesInCachesDirectory.mockReturnValue({
                 totalSize: 0,
                 files: [],
             });
@@ -188,7 +176,9 @@ describe('AdvancedSettings', () => {
             const alertCalls = (Alert.alert as jest.Mock).mock.calls;
             const deleteCallback = alertCalls[0][2][1].onPress;
 
-            await deleteCallback();
+            await act(async () => {
+                await deleteCallback();
+            });
 
             await waitFor(() => {
                 expect(mockDeleteFileCache).toHaveBeenCalledWith('https://test.mattermost.com');
@@ -197,7 +187,7 @@ describe('AdvancedSettings', () => {
         });
 
         it('should not show alert when no files exist', async () => {
-            mockGetAllFilesInCachesDirectory.mockResolvedValue({
+            mockGetAllFilesInCachesDirectory.mockReturnValue({
                 totalSize: 0,
                 files: [],
             });
@@ -217,7 +207,7 @@ describe('AdvancedSettings', () => {
         });
 
         it('should handle delete error gracefully', async () => {
-            mockDeleteFileCache.mockResolvedValue(undefined);
+            mockDeleteFileCache.mockReturnValue(undefined);
 
             renderWithIntlAndTheme(<AdvancedSettings {...defaultProps}/>);
 
@@ -248,9 +238,8 @@ describe('AdvancedSettings', () => {
             fireEvent.press(componentLibraryOption);
 
             await waitFor(() => {
-                expect(mockGoToScreen).toHaveBeenCalledWith(
+                expect(mockNavigateToSettingsScreen).toHaveBeenCalledWith(
                     Screens.COMPONENT_LIBRARY,
-                    'Component library',
                 );
             });
         });
@@ -266,100 +255,7 @@ describe('AdvancedSettings', () => {
                 expect(screen.queryByTestId('advanced_settings.component_library.option')).toBeNull();
             });
 
-            expect(mockGoToScreen).not.toHaveBeenCalled();
-        });
-    });
-
-    describe('low connectivity monitor toggle', () => {
-        it('should render toggle in off state when disabled', async () => {
-            renderWithIntlAndTheme(
-                <AdvancedSettings
-                    {...defaultProps}
-                    lowConnectivityMonitorEnabled={false}
-                />);
-
-            await waitFor(() => {
-                expect(screen.getByTestId('advanced_settings.low_connectivity_monitor.option.toggled.false.button')).toBeTruthy();
-            });
-        });
-
-        it('should render toggle in on state when enabled', async () => {
-            renderWithIntlAndTheme(
-                <AdvancedSettings
-                    {...defaultProps}
-                    lowConnectivityMonitorEnabled={true}
-                />);
-
-            await waitFor(() => {
-                expect(screen.getByTestId('advanced_settings.low_connectivity_monitor.option.toggled.true.button')).toBeTruthy();
-            });
-        });
-
-        it('should call storeLowConnectivityMonitor when toggled on', async () => {
-            mockStoreLowConnectivityMonitor.mockResolvedValue({});
-
-            renderWithIntlAndTheme(
-                <AdvancedSettings
-                    {...defaultProps}
-                    lowConnectivityMonitorEnabled={false}
-                />);
-
-            await waitFor(() => {
-                expect(screen.getByTestId('advanced_settings.low_connectivity_monitor.option.toggled.false.button')).toBeTruthy();
-            });
-
-            const toggle = screen.getByTestId('advanced_settings.low_connectivity_monitor.option.toggled.false.button');
-
-            fireEvent(toggle, 'valueChange', true);
-
-            await waitFor(() => {
-                expect(mockStoreLowConnectivityMonitor).toHaveBeenCalledWith(true);
-            });
-        });
-
-        it('should call storeLowConnectivityMonitor when toggled off', async () => {
-            mockStoreLowConnectivityMonitor.mockResolvedValue({});
-
-            renderWithIntlAndTheme(
-                <AdvancedSettings
-                    {...defaultProps}
-                    lowConnectivityMonitorEnabled={true}
-                />);
-
-            await waitFor(() => {
-                expect(screen.getByTestId('advanced_settings.low_connectivity_monitor.option.toggled.true.button')).toBeTruthy();
-            });
-
-            const toggle = screen.getByTestId('advanced_settings.low_connectivity_monitor.option.toggled.true.button');
-
-            fireEvent(toggle, 'valueChange', false);
-
-            await waitFor(() => {
-                expect(mockStoreLowConnectivityMonitor).toHaveBeenCalledWith(false);
-            });
-        });
-
-        it('should update local state when toggle is changed', async () => {
-            mockStoreLowConnectivityMonitor.mockResolvedValue({});
-
-            renderWithIntlAndTheme(
-                <AdvancedSettings
-                    {...defaultProps}
-                    lowConnectivityMonitorEnabled={false}
-                />,
-            );
-
-            await waitFor(() => {
-                expect(screen.getByTestId('advanced_settings.low_connectivity_monitor.option.toggled.false.button')).toBeTruthy();
-            });
-
-            const toggle = screen.getByTestId('advanced_settings.low_connectivity_monitor.option.toggled.false.button');
-
-            fireEvent(toggle, 'valueChange', true);
-
-            await waitFor(() => {
-                expect(screen.getByTestId('advanced_settings.low_connectivity_monitor.option.toggled.true.button')).toBeTruthy();
-            });
+            expect(mockNavigateToSettingsScreen).not.toHaveBeenCalled();
         });
     });
 
@@ -373,7 +269,7 @@ describe('AdvancedSettings', () => {
         });
 
         it('should handle fetch error gracefully', async () => {
-            mockGetAllFilesInCachesDirectory.mockRejectedValue(new Error('Fetch failed'));
+            mockGetAllFilesInCachesDirectory.mockReturnValue({totalSize: 0, files: []});
 
             renderWithIntlAndTheme(<AdvancedSettings {...defaultProps}/>);
 
@@ -397,7 +293,9 @@ describe('AdvancedSettings', () => {
             const alertCalls = (Alert.alert as jest.Mock).mock.calls;
             const deleteCallback = alertCalls[0][2][1].onPress;
 
-            await deleteCallback();
+            await act(async () => {
+                await deleteCallback();
+            });
 
             await waitFor(() => {
                 expect(mockGetAllFilesInCachesDirectory).toHaveBeenCalledTimes(2);
@@ -407,7 +305,7 @@ describe('AdvancedSettings', () => {
 
     describe('edge cases', () => {
         it('should handle undefined totalSize gracefully', async () => {
-            mockGetAllFilesInCachesDirectory.mockResolvedValue({
+            mockGetAllFilesInCachesDirectory.mockReturnValue({
                 totalSize: undefined,
                 files: [],
             });
@@ -420,7 +318,7 @@ describe('AdvancedSettings', () => {
         });
 
         it('should handle null files gracefully', async () => {
-            mockGetAllFilesInCachesDirectory.mockResolvedValue({
+            mockGetAllFilesInCachesDirectory.mockReturnValue({
                 totalSize: 0,
                 files: null,
             });
@@ -433,7 +331,7 @@ describe('AdvancedSettings', () => {
         });
 
         it('should handle very large file sizes', async () => {
-            mockGetAllFilesInCachesDirectory.mockResolvedValue({
+            mockGetAllFilesInCachesDirectory.mockReturnValue({
                 totalSize: 5 * 1024 * 1024 * 1024,
                 files: [],
             });
@@ -442,22 +340,6 @@ describe('AdvancedSettings', () => {
 
             await waitFor(() => {
                 expect(screen.getByTestId('advanced_settings.delete_data.option')).toBeTruthy();
-            });
-        });
-
-        it('should render experimental features section header', async () => {
-            renderWithIntlAndTheme(<AdvancedSettings {...defaultProps}/>);
-
-            await waitFor(() => {
-                expect(screen.getByText('Experimental Features')).toBeTruthy();
-            });
-        });
-
-        it('should display low connectivity monitor description', async () => {
-            renderWithIntlAndTheme(<AdvancedSettings {...defaultProps}/>);
-
-            await waitFor(() => {
-                expect(screen.getByText('Display banners when network connectivity or performance issues are detected')).toBeTruthy();
             });
         });
     });

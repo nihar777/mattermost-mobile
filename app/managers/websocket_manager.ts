@@ -3,7 +3,7 @@
 
 import NetInfo, {NetInfoStateType, type NetInfoState, type NetInfoSubscription} from '@react-native-community/netinfo';
 import {AppState, type AppStateStatus, type NativeEventSubscription} from 'react-native';
-import BackgroundTimer from 'react-native-background-timer';
+import {BackgroundTimer} from 'react-native-nitro-bg-timer-plus';
 import {BehaviorSubject} from 'rxjs';
 import {distinctUntilChanged} from 'rxjs/operators';
 
@@ -11,14 +11,17 @@ import {setCurrentUserStatus} from '@actions/local/user';
 import {fetchStatusByIds} from '@actions/remote/user';
 import {handleFirstConnect, handleReconnect} from '@actions/websocket';
 import {handleWebSocketEvent} from '@actions/websocket/event';
+import {hasActiveNativeCall} from '@calls/native_call_mappings';
 import WebSocketClient from '@client/websocket';
 import {General} from '@constants';
 import DatabaseManager from '@database/manager';
+import SessionAttributesManager from '@managers/session_attributes_manager';
 import {getCurrentUserId} from '@queries/servers/system';
 import {queryAllUsers} from '@queries/servers/user';
+import RenderPermissionsStore from '@store/render_permissions_store';
 import {toMilliseconds} from '@utils/datetime';
 import {isMainActivity} from '@utils/helpers';
-import {logError} from '@utils/log';
+import {logDebug, logError} from '@utils/log';
 
 const WAIT_TO_CLOSE = toMilliseconds({seconds: 15});
 const WAIT_UNTIL_NEXT = toMilliseconds({seconds: 5});
@@ -31,9 +34,10 @@ class WebsocketManagerSingleton {
     private isBackgroundTimerRunning = false;
     private netConnected = false;
     private netType: NetInfoStateType = NetInfoStateType.none;
+    private networkIdentity = '';
     private previousActiveState: boolean;
     private statusUpdatesIntervalIDs: Record<string, NodeJS.Timeout> = {};
-    private backgroundIntervalId: number | undefined;
+    private backgroundTimerId: ReturnType<typeof BackgroundTimer.setTimeout> | undefined;
     private firstConnectionSynced: Record<string, boolean> = {};
 
     private appStateSubscription: NativeEventSubscription | undefined;
@@ -44,19 +48,20 @@ class WebsocketManagerSingleton {
     }
 
     public init = async (serverCredentials: ServerCredential[]) => {
+        logDebug('WebSocketManager: Initializing');
         const netInfo = await NetInfo.fetch();
         this.netConnected = Boolean(netInfo.isConnected);
         this.netType = netInfo.type;
-        serverCredentials.forEach(
-            ({serverUrl, token, preauthSecret}) => {
+        await Promise.all(serverCredentials.map(
+            async ({serverUrl, token, preauthSecret}) => {
                 try {
                     DatabaseManager.getServerDatabaseAndOperator(serverUrl);
-                    this.createClient(serverUrl, token, preauthSecret);
+                    await this.createClient(serverUrl, token, preauthSecret);
                 } catch (error) {
                     logError('WebsocketManager init error', error);
                 }
             },
-        );
+        ));
 
         this.appStateSubscription?.remove();
         this.netStateSubscription?.();
@@ -65,12 +70,23 @@ class WebsocketManagerSingleton {
         this.netStateSubscription = NetInfo.addEventListener(this.onNetStateChange);
     };
 
-    public invalidateClient = (serverUrl: string) => {
-        this.clients[serverUrl]?.close(true);
-        this.clients[serverUrl]?.invalidate();
+    public invalidateClient = async (serverUrl: string) => {
+        const client = this.clients[serverUrl];
+
+        // Evict from registry and clear reconnect timer before awaiting teardown,
+        // so no concurrent code path (e.g. openAll/initializeClient) can reach
+        // this client or use stale manager state during the wait.
         clearTimeout(this.connectionTimerIDs[serverUrl]);
+        delete this.connectionTimerIDs[serverUrl];
         delete this.clients[serverUrl];
         delete this.firstConnectionSynced[serverUrl];
+        this.stopPeriodicStatusUpdates(serverUrl);
+
+        if (client) {
+            client.close(true);
+            await client.waitForClose();
+            client.invalidate();
+        }
 
         // We don't remove the connected subject so any potential client invalidation
         // and subsequent creation of the client can still be observed by the component.
@@ -80,20 +96,25 @@ class WebsocketManagerSingleton {
         this.getConnectedSubject(serverUrl).next('not_connected');
     };
 
-    public createClient = (serverUrl: string, bearerToken: string, preauthSecret?: string) => {
+    public createClient = async (serverUrl: string, bearerToken: string, preauthSecret?: string) => {
         if (this.clients[serverUrl]) {
-            this.invalidateClient(serverUrl);
+            await this.invalidateClient(serverUrl);
         }
 
         const client = new WebSocketClient(serverUrl, bearerToken, preauthSecret);
 
-        client.setFirstConnectCallback(() => this.onFirstConnect(serverUrl));
-        client.setEventCallback((evt: WebSocketMessage) => handleWebSocketEvent(serverUrl, evt));
+        // Guard: callbacks capture the client instance so stale callbacks from
+        // an old client that was replaced (but whose late onClose still fires)
+        // can be detected and dropped by comparing against this.clients[serverUrl].
+        const isCurrentClient = () => this.clients[serverUrl] === client;
+
+        client.setFirstConnectCallback(() => isCurrentClient() && this.onFirstConnect(serverUrl));
+        client.setEventCallback((evt: WebSocketMessage) => isCurrentClient() && handleWebSocketEvent(serverUrl, evt));
 
         //client.setMissedEventsCallback(() => {}) Nothing to do on missedEvents callback
-        client.setReconnectCallback(() => this.onReconnect(serverUrl));
-        client.setReliableReconnectCallback(() => this.onReliableReconnect(serverUrl));
-        client.setCloseCallback((connectFailCount: number) => this.onWebsocketClose(serverUrl, connectFailCount));
+        client.setReconnectCallback(() => isCurrentClient() && this.onReconnect(serverUrl));
+        client.setReliableReconnectCallback(() => isCurrentClient() && this.onReliableReconnect(serverUrl));
+        client.setCloseCallback((connectFailCount: number) => isCurrentClient() && this.onWebsocketClose(serverUrl, connectFailCount));
 
         this.clients[serverUrl] = client;
 
@@ -104,7 +125,6 @@ class WebsocketManagerSingleton {
         for (const url of Object.keys(this.clients)) {
             const client = this.clients[url];
             client.close(true);
-            client.invalidate();
             this.getConnectedSubject(url).next('not_connected');
         }
     };
@@ -149,10 +169,13 @@ class WebsocketManagerSingleton {
     };
 
     public initializeClient = async (serverUrl: string, groupLabel: BaseRequestGroupLabel = 'WebSocket Reconnect') => {
-        const client: WebSocketClient = this.clients[serverUrl];
+        const client = this.clients[serverUrl];
         clearTimeout(this.connectionTimerIDs[serverUrl]);
         delete this.connectionTimerIDs[serverUrl];
-        if (!client?.isConnected()) {
+        if (!client) {
+            return;
+        }
+        if (!client.isConnected()) {
             const hasSynced = this.firstConnectionSynced[serverUrl];
             client.initialize({}, !hasSynced);
             if (!hasSynced) {
@@ -238,6 +261,34 @@ class WebsocketManagerSingleton {
     private onNetStateChange = (netState: NetInfoState) => {
         const newState = Boolean(netState.isConnected);
         this.handleStateChange(newState, netState.type, this.previousActiveState);
+
+        // After handleStateChange so a network type switch has already closed the sockets: the
+        // revalidation then waits for the reconnect instead of going out mid-switch.
+        this.expireNetworkBoundDecisions(netState);
+    };
+
+    /**
+     * Network session attributes (SSID, interface type) feed ABAC decisions and change with no server
+     * event, so render-time decisions taken on the previous network are revalidated. Checked here and
+     * not in handleStateChange, which ignores a switch between two networks of the same type.
+     * iOS reports no SSID (NetInfo's shouldFetchWiFiSSID is off), so a Wi-Fi to Wi-Fi switch there is
+     * only seen through the disconnect between them: any reconnection counts as a new network.
+     */
+    private expireNetworkBoundDecisions = (netState: NetInfoState) => {
+        if (!netState.isConnected) {
+            this.networkIdentity = '';
+            return;
+        }
+        const ssid = netState.type === NetInfoStateType.wifi ? netState.details?.ssid : undefined;
+        const identity = `${netState.type}|${ssid ?? ''}`;
+        if (identity !== this.networkIdentity) {
+            this.networkIdentity = identity;
+
+            // Only servers that collect session attributes evaluate the device's network.
+            for (const serverUrl of SessionAttributesManager.getEnabledServers()) {
+                RenderPermissionsStore.expireServer(serverUrl);
+            }
+        }
     };
 
     private handleStateChange = (currentIsConnected: boolean, currentNetType: NetInfoStateType, currentIsActive: boolean) => {
@@ -249,12 +300,14 @@ class WebsocketManagerSingleton {
 
         const wentBackground = this.previousActiveState && !currentIsActive;
         const switchedNetworks = currentIsConnected && currentNetType !== this.netType && this.netType !== 'none';
+        const previousNetType = this.netType;
 
         this.previousActiveState = currentIsActive;
         this.netConnected = currentIsConnected;
         this.netType = currentNetType;
 
         if (!currentIsConnected) {
+            logDebug('WebSocketManager: closing all connections, network disconnected', 'netType', currentNetType);
             this.closeAll();
             return;
         }
@@ -263,12 +316,13 @@ class WebsocketManagerSingleton {
             // Close all connections when we switch from (for example) vpn to wifi
             // to ensure we are using the right network and doesn't get stuck on
             // retries.
+            logDebug('WebSocketManager: closing all connections, network switched', 'from', previousNetType, 'to', currentNetType);
             this.closeAll();
         }
 
         if (currentIsActive) {
             if (this.isBackgroundTimerRunning) {
-                BackgroundTimer.clearInterval(this.backgroundIntervalId!);
+                BackgroundTimer.clearTimeout(this.backgroundTimerId!);
             }
             this.isBackgroundTimerRunning = false;
             if (this.netConnected) {
@@ -278,14 +332,33 @@ class WebsocketManagerSingleton {
             return;
         }
 
-        if (wentBackground && !this.isBackgroundTimerRunning) {
-            this.isBackgroundTimerRunning = true;
-            this.backgroundIntervalId = BackgroundTimer.setInterval(() => {
-                this.closeAll();
-                BackgroundTimer.clearInterval(this.backgroundIntervalId!);
-                this.isBackgroundTimerRunning = false;
-            }, WAIT_TO_CLOSE);
+        if (wentBackground) {
+            this.startBackgroundCloseTimer();
         }
+    };
+
+    public scheduleBackgroundCloseIfNeeded = () => {
+        if (this.previousActiveState) {
+            return;
+        }
+        this.startBackgroundCloseTimer();
+    };
+
+    private startBackgroundCloseTimer = () => {
+        if (this.isBackgroundTimerRunning) {
+            return;
+        }
+        this.isBackgroundTimerRunning = true;
+        this.backgroundTimerId = BackgroundTimer.setTimeout(() => {
+            this.isBackgroundTimerRunning = false;
+
+            // Skip closing while a native call is active; closeAll would drop
+            // the WS that's carrying call lifecycle events.
+            if (hasActiveNativeCall()) {
+                return;
+            }
+            this.closeAll();
+        }, WAIT_TO_CLOSE);
     };
 
     public getClient = (serverUrl: string): WebSocketClient | undefined => {

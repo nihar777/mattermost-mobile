@@ -3,13 +3,11 @@
 
 import React, {useCallback} from 'react';
 import {FormattedMessage} from 'react-intl';
-import {DeviceEventEmitter, Text, View} from 'react-native';
+import {Text, View} from 'react-native';
 
 import {switchToGlobalDrafts} from '@actions/local/draft';
 import CompassIcon from '@components/compass_icon';
-import {Events} from '@constants';
 import {DRAFT_SCREEN_TAB_SCHEDULED_POSTS} from '@constants/draft';
-import {DRAFT} from '@constants/screens';
 import {useServerUrl} from '@context/server';
 import {useTheme} from '@context/theme';
 import {changeOpacity, makeStyleSheetFromTheme} from '@utils/theme';
@@ -51,11 +49,8 @@ function ScheduledPostIndicator({
     const theme = useTheme();
     const styles = getStyleSheet(theme);
 
-    const handleSeeAllScheduledPosts = useCallback(async () => {
-        const {error} = await switchToGlobalDrafts(serverUrl, undefined, DRAFT_SCREEN_TAB_SCHEDULED_POSTS);
-        if (!error) {
-            DeviceEventEmitter.emit(Events.ACTIVE_SCREEN, DRAFT);
-        }
+    const handleSeeAllScheduledPosts = useCallback(() => {
+        switchToGlobalDrafts(serverUrl, undefined, DRAFT_SCREEN_TAB_SCHEDULED_POSTS);
     }, [serverUrl]);
 
     const scheduledPostText = isThread ? (
@@ -79,32 +74,28 @@ function ScheduledPostIndicator({
     );
 
     return (
-        <View
-            className='ScheduledPostIndicator'
-        >
-            <View style={styles.container}>
-                <CompassIcon
-                    color={changeOpacity(theme.centerChannelColor, 0.6)}
-                    name='clock-send-outline'
-                    size={18}
-                />
+        <View style={styles.container}>
+            <CompassIcon
+                color={changeOpacity(theme.centerChannelColor, 0.6)}
+                name='clock-send-outline'
+                size={18}
+            />
+            <Text
+                style={styles.text}
+                testID='scheduled_post_header.scheduled_post_indicator'
+            >
+                {scheduledPostText}
+                {' '}
                 <Text
-                    style={styles.text}
-                    testID='scheduled_post_header.scheduled_post_indicator'
+                    style={styles.link}
+                    onPress={handleSeeAllScheduledPosts}
                 >
-                    {scheduledPostText}
-                    {' '}
-                    <Text
-                        style={styles.link}
-                        onPress={handleSeeAllScheduledPosts}
-                    >
-                        <FormattedMessage
-                            id='scheduled_post.channel_indicator.link_to_scheduled_posts.text'
-                            defaultMessage='See all.'
-                        />
-                    </Text>
+                    <FormattedMessage
+                        id='scheduled_post.channel_indicator.link_to_scheduled_posts.text'
+                        defaultMessage='See all.'
+                    />
                 </Text>
-            </View>
+            </Text>
         </View>
     );
 }

@@ -3,10 +3,11 @@
 
 import {type ImageSource} from 'expo-image';
 import React, {forwardRef, useImperativeHandle, useMemo} from 'react';
-import {type ImageSize, type ImageStyle, type ViewStyle} from 'react-native';
+import {type ImageSize, type ImageStyle, type StyleProp} from 'react-native';
 import {
     cancelAnimation,
     useAnimatedReaction, useSharedValue, withTiming,
+    type AnimatedStyle,
     type SharedValue,
 } from 'react-native-reanimated';
 
@@ -22,7 +23,7 @@ export interface RenderItemInfo {
     source: ImageSource;
     width: number;
     height: number;
-    itemStyles: ViewStyle | ImageStyle;
+    itemStyles: StyleProp<AnimatedStyle<StyleProp<ImageStyle>>>;
 }
 
 interface LightboxSwipeoutProps {
@@ -31,8 +32,8 @@ interface LightboxSwipeoutProps {
     onAnimationFinished: () => void;
     onSwipeActive: (translateY: number) => void;
     onSwipeFailure: () => void;
-    renderBackdropComponent?: (info: BackdropProps) => JSX.Element;
-    renderItem: (info: RenderItemInfo) => JSX.Element | null;
+    renderBackdropComponent?: (info: BackdropProps) => React.JSX.Element;
+    renderItem: (info: RenderItemInfo) => React.ReactNode;
     sharedValues: GalleryManagerSharedValues;
     source: ImageSource | string;
     target: GalleryItemType;
@@ -122,10 +123,11 @@ const LightboxSwipeout = forwardRef<LightboxSwipeoutRef, LightboxSwipeoutProps>(
         onSwipeActive,
         onSwipeFailure,
 
-    // The remaining dependencies does not need to be added as they
-    // are already included in the sharedValues object
+    // Shared values are stable refs that don't need to be in deps. shouldHandleEvent and
+    // isVisibleImage are worklet functions that must NOT be wrapped in useCallback to avoid
+    // native use-after-free crashes during Hermes GC.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }), [target, targetDimensions, shouldHandleEvent, isVisibleImage, onAnimationFinished, onSwipeActive, onSwipeFailure]);
+    }), [target, targetDimensions, onAnimationFinished, onSwipeActive, onSwipeFailure]);
 
     return (
         <LightboxProvider sharedValues={lightboxSharedValues}>

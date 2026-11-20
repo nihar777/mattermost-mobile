@@ -4,8 +4,10 @@
 // NOTE : To implement migration, please follow this document
 // https://nozbe.github.io/WatermelonDB/Advanced/Migrations.html
 
+import {BOARDS_TABLES} from '@boards/constants/database';
 import {addColumns, createTable, schemaMigrations, unsafeExecuteSql} from '@nozbe/watermelondb/Schema/migrations';
 
+import {AGENTS_TABLES} from '@agents/constants/database';
 import {MM_TABLES} from '@constants/database';
 import {PLAYBOOK_TABLES} from '@playbooks/constants/database';
 
@@ -19,12 +21,222 @@ const {
     FILE,
     MY_CHANNEL,
     POST,
+    PROPERTY_FIELD,
+    PROPERTY_VALUE,
     SCHEDULED_POST,
 } = MM_TABLES.SERVER;
 
 const {PLAYBOOK_RUN, PLAYBOOK_CHECKLIST, PLAYBOOK_CHECKLIST_ITEM, PLAYBOOK_RUN_ATTRIBUTE, PLAYBOOK_RUN_ATTRIBUTE_VALUE} = PLAYBOOK_TABLES;
+const {AI_BOT, AI_THREAD} = AGENTS_TABLES;
+const {BOARD_VIEW} = BOARDS_TABLES;
 
 export default schemaMigrations({migrations: [
+    {
+        toVersion: 25,
+        steps: [
+            addColumns({
+                table: PLAYBOOK_RUN,
+                columns: [
+                    {name: 'timeline_events', type: 'string', isOptional: true}, // JSON string
+                ],
+            }),
+        ],
+    },
+    {
+        toVersion: 24,
+        steps: [
+            addColumns({
+                table: SCHEDULED_POST,
+                columns: [
+                    {name: 'repeat_type', type: 'string'},
+                    {name: 'repeat_timezone', type: 'string'},
+                ],
+            }),
+        ],
+    },
+    {
+        toVersion: 23,
+        steps: [
+
+            // Existing rows default to 0, below DEFAULT_REDACTION_EPOCH_STATE (used while no epoch
+            // System row exists), so posts cached before this migration start unverified.
+            addColumns({
+                table: POST,
+                columns: [
+                    {name: 'redaction_verified_epoch', type: 'number'},
+                ],
+            }),
+            addColumns({
+                table: MY_CHANNEL,
+                columns: [
+                    {name: 'redaction_required_epoch', type: 'number'},
+                ],
+            }),
+        ],
+    },
+    {
+        toVersion: 22,
+        steps: [
+            addColumns({
+                table: PLAYBOOK_CHECKLIST_ITEM,
+                columns: [
+                    {name: 'requirements', type: 'string', isOptional: true},
+                ],
+            }),
+        ],
+    },
+    {
+        toVersion: 21,
+        steps: [
+            addColumns({
+                table: MY_CHANNEL,
+                columns: [
+                    {name: 'urgent_mention_count', type: 'number'},
+                ],
+            }),
+        ],
+    },
+    {
+        toVersion: 20,
+        steps: [
+            createTable({
+                name: BOARD_VIEW,
+                columns: [
+                    {name: 'channel_id', type: 'string', isIndexed: true},
+                    {name: 'type', type: 'string'},
+                    {name: 'creator_id', type: 'string'},
+                    {name: 'title', type: 'string'},
+                    {name: 'description', type: 'string', isOptional: true},
+                    {name: 'sort_order', type: 'number'},
+                    {name: 'props', type: 'string', isOptional: true},
+                    {name: 'create_at', type: 'number'},
+                    {name: 'update_at', type: 'number', isIndexed: true},
+                    {name: 'delete_at', type: 'number'},
+                ],
+            }),
+            createTable({
+                name: PROPERTY_FIELD,
+                columns: [
+                    {name: 'group_id', type: 'string'},
+                    {name: 'name', type: 'string'},
+                    {name: 'type', type: 'string'},
+                    {name: 'attrs', type: 'string', isOptional: true},
+                    {name: 'object_type', type: 'string'},
+                    {name: 'target_id', type: 'string', isIndexed: true},
+                    {name: 'target_type', type: 'string'},
+                    {name: 'protected', type: 'boolean'},
+                    {name: 'permission_field', type: 'string', isOptional: true},
+                    {name: 'permission_values', type: 'string', isOptional: true},
+                    {name: 'permission_options', type: 'string', isOptional: true},
+                    {name: 'create_at', type: 'number'},
+                    {name: 'update_at', type: 'number', isIndexed: true},
+                    {name: 'delete_at', type: 'number'},
+                    {name: 'created_by', type: 'string'},
+                    {name: 'updated_by', type: 'string'},
+                ],
+            }),
+            createTable({
+                name: PROPERTY_VALUE,
+                columns: [
+                    {name: 'field_id', type: 'string', isIndexed: true},
+                    {name: 'target_id', type: 'string', isIndexed: true},
+                    {name: 'target_type', type: 'string'},
+                    {name: 'group_id', type: 'string'},
+                    {name: 'value', type: 'string'},
+                    {name: 'create_at', type: 'number'},
+                    {name: 'update_at', type: 'number'},
+                    {name: 'delete_at', type: 'number'},
+                    {name: 'created_by', type: 'string'},
+                    {name: 'updated_by', type: 'string'},
+                ],
+            }),
+        ],
+    },
+    {
+        toVersion: 19,
+        steps: [
+            createTable({
+                name: AI_BOT,
+                columns: [
+                    {name: 'display_name', type: 'string'},
+                    {name: 'username', type: 'string'},
+                    {name: 'last_icon_update', type: 'number'},
+                    {name: 'dm_channel_id', type: 'string', isIndexed: true},
+                    {name: 'channel_access_level', type: 'number'},
+                    {name: 'channel_ids', type: 'string'},
+                    {name: 'user_access_level', type: 'number'},
+                    {name: 'user_ids', type: 'string'},
+                    {name: 'team_ids', type: 'string'},
+                ],
+            }),
+            createTable({
+                name: AI_THREAD,
+                columns: [
+                    {name: 'message', type: 'string'},
+                    {name: 'title', type: 'string'},
+                    {name: 'channel_id', type: 'string', isIndexed: true},
+                    {name: 'reply_count', type: 'number'},
+                    {name: 'update_at', type: 'number', isIndexed: true},
+                ],
+            }),
+        ],
+    },
+    {
+        toVersion: 18,
+        steps: [
+            addColumns({
+                table: MY_CHANNEL,
+                columns: [
+                    {name: 'autotranslation_disabled', type: 'boolean'},
+                ],
+            }),
+            addColumns({
+                table: CHANNEL,
+                columns: [
+                    {name: 'autotranslation', type: 'boolean'},
+                ],
+            }),
+        ],
+    },
+    {
+        toVersion: 17,
+        steps: [
+            addColumns({
+                table: PLAYBOOK_RUN_ATTRIBUTE_VALUE,
+                columns: [
+                    {name: 'update_at', type: 'number'},
+                ],
+            }),
+        ],
+    },
+    {
+        toVersion: 16,
+        steps: [
+            addColumns({
+                table: SCHEDULED_POST,
+                columns: [
+                    {name: 'type', type: 'string', isOptional: true},
+                ],
+            }),
+            addColumns({
+                table: DRAFT,
+                columns: [
+                    {name: 'type', type: 'string', isOptional: true},
+                ],
+            }),
+        ],
+    },
+    {
+        toVersion: 15,
+        steps: [
+            addColumns({
+                table: PLAYBOOK_RUN,
+                columns: [
+                    {name: 'type', type: 'string'},
+                ],
+            }),
+        ],
+    },
     {
         toVersion: 14,
         steps: [

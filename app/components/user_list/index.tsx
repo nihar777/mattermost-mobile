@@ -13,7 +13,7 @@ import {General} from '@constants';
 import {useServerUrl} from '@context/server';
 import {useTheme} from '@context/theme';
 import {useKeyboardHeight} from '@hooks/device';
-import {openUserProfileModal} from '@screens/navigation';
+import {openUserProfile} from '@utils/navigation';
 import {
     changeOpacity,
     makeStyleSheetFromTheme,
@@ -142,6 +142,7 @@ const getStyleFromTheme = makeStyleSheetFromTheme((theme) => {
         },
         container: {
             flexGrow: 1,
+            gap: 8,
         },
         loadingContainer: {
             flex: 1,
@@ -172,7 +173,6 @@ const getStyleFromTheme = makeStyleSheetFromTheme((theme) => {
 type Props = {
     profiles: UserProfile[];
     channelMembers?: ChannelMembership[];
-    currentUserId: string;
     handleSelectProfile: (user: UserProfile | UserModel) => void;
     fetchMore?: () => void;
     loading: boolean;
@@ -183,7 +183,6 @@ type Props = {
     testID?: string;
     term?: string;
     tutorialWatched: boolean;
-    includeUserMargin?: boolean;
     location: AvailableScreens;
     customSection?: (profiles: UserProfile[]) => Array<SectionListData<UserProfile>>;
 }
@@ -192,7 +191,6 @@ export default function UserList({
     profiles,
     channelMembers,
     selectedIds,
-    currentUserId,
     handleSelectProfile,
     fetchMore,
     loading,
@@ -202,7 +200,6 @@ export default function UserList({
     term,
     testID,
     tutorialWatched,
-    includeUserMargin,
     location,
     customSection,
 }: Props) {
@@ -231,7 +228,7 @@ export default function UserList({
         return createProfilesSections(intl, profiles, channelMembers);
     }, [channelMembers, customSection, intl, loading, profiles, term]);
 
-    const openUserProfile = useCallback(async (profile: UserProfile | UserModel) => {
+    const openProfile = useCallback(async (profile: UserProfile | UserModel) => {
         let user: UserModel;
         if ('create_at' in profile) {
             const res = await storeProfile(serverUrl, profile);
@@ -243,12 +240,11 @@ export default function UserList({
             user = profile;
         }
 
-        openUserProfileModal(intl, theme, {
+        openUserProfile({
             userId: user.id,
             location,
         });
-    }, [intl, location, serverUrl, theme]);
-
+    }, [location, serverUrl]);
     const renderItem = useCallback(({item, index, section}: RenderItemType) => {
         // The list will re-render when the selection changes because it's passed into the list as extraData
         const selected = selectedIds.has(item.id);
@@ -262,21 +258,19 @@ export default function UserList({
                 highlight={section?.first && index === 0}
                 id={item.id}
                 isChannelAdmin={isChAdmin}
-                isMyUser={currentUserId === item.id}
                 manageMode={manageMode}
                 onPress={handleSelectProfile}
-                onLongPress={openUserProfile}
+                onLongPress={openProfile}
                 selectable={manageMode || canAdd}
                 disabled={!canAdd}
                 selected={selected}
                 showManageMode={showManageMode}
-                testID='create_direct_message.user_list.user_item'
+                testID={`${testID}.user_item`}
                 tutorialWatched={tutorialWatched}
                 user={item}
-                includeMargin={includeUserMargin}
             />
         );
-    }, [selectedIds, currentUserId, manageMode, handleSelectProfile, openUserProfile, showManageMode, tutorialWatched, includeUserMargin]);
+    }, [selectedIds, manageMode, handleSelectProfile, openProfile, showManageMode, testID, tutorialWatched]);
 
     const renderLoading = useCallback(() => {
         if (!loading) {
@@ -290,7 +284,7 @@ export default function UserList({
                 size='large'
             />
         );
-    }, [loading, theme]);
+    }, [loading, style.loadingContainer, theme.buttonBg]);
 
     const renderNoResults = useCallback(() => {
         if (!showNoResults || !term) {
@@ -302,7 +296,7 @@ export default function UserList({
                 <NoResultsWithTerm term={term}/>
             </View>
         );
-    }, [showNoResults && style, term, noResutsStyle]);
+    }, [showNoResults, term, noResutsStyle]);
 
     const renderSectionHeader = useCallback(({section}: {section: SectionListData<UserProfile>}) => {
         return (

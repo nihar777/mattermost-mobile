@@ -9,7 +9,8 @@ import DatabaseManager from '@database/manager';
 import NetworkManager from '@managers/network_manager';
 import {getDeviceToken} from '@queries/app/global';
 import {getExpandedLinks, getPushVerificationStatus} from '@queries/servers/system';
-import {getFullErrorMessage} from '@utils/errors';
+import {getFullErrorMessage, preauthSecretInvalidMessage} from '@utils/errors';
+import {isPreauthRejection} from '@utils/headers';
 import {logDebug} from '@utils/log';
 
 import {forceLogoutIfNecessary} from './session';
@@ -35,12 +36,17 @@ async function getDeviceIdForPing(serverUrl: string, checkDeviceId: boolean) {
 }
 
 // Default timeout interval for ping is 5 seconds
-export const doPing = async (serverUrl: string, verifyPushProxy: boolean, timeoutInterval = 5000, preauthSecret?: string) => {
-    let client: Client;
-    try {
-        client = await NetworkManager.createClient(serverUrl, undefined, preauthSecret);
-    } catch (error) {
-        return {error};
+export const doPing = async (serverUrl: string, verifyPushProxy: boolean, timeoutInterval = 5000, preauthSecret?: string, client?: Client) => {
+    let pingClient: Client;
+
+    if (client) {
+        pingClient = client;
+    } else {
+        try {
+            pingClient = await NetworkManager.createClient(serverUrl, undefined, preauthSecret);
+        } catch (error) {
+            return {error};
+        }
     }
 
     const certificateError = defineMessage({
@@ -57,7 +63,7 @@ export const doPing = async (serverUrl: string, verifyPushProxy: boolean, timeou
 
     let response: ClientResponse;
     try {
-        response = await client.ping(deviceId, timeoutInterval);
+        response = await pingClient.ping(deviceId, timeoutInterval);
 
         if (response.code === 401) {
             // Don't invalidate the client since we want to eventually
@@ -67,22 +73,24 @@ export const doPing = async (serverUrl: string, verifyPushProxy: boolean, timeou
         }
 
         if (!response.ok) {
-            NetworkManager.invalidateClient(serverUrl);
-            if (response.code === 403 && response.headers?.['x-reject-reason'] === 'pre-auth') {
-                return {error: {intl: pingError}, isPreauthError: true};
+            if (!client) {
+                NetworkManager.invalidateClient(serverUrl);
+            }
+            if (isPreauthRejection(response.code, response.headers)) {
+                return {error: {intl: preauthSecretInvalidMessage}, isPreauthError: true};
             }
             return {error: {intl: pingError}};
         }
     } catch (error) {
         // Check if this is a 403 with pre-auth header
         const errorObj = error as ClientError;
-        if (errorObj.status_code === 403) {
-            if (errorObj.headers?.['x-reject-reason'] === 'pre-auth') {
-                return {error: {intl: pingError}, isPreauthError: true};
-            }
+        if (isPreauthRejection(errorObj.status_code, errorObj.headers)) {
+            return {error: {intl: preauthSecretInvalidMessage}, isPreauthError: true};
         }
 
-        NetworkManager.invalidateClient(serverUrl);
+        if (!client) {
+            NetworkManager.invalidateClient(serverUrl);
+        }
         return {error: {intl: pingError}};
     }
 

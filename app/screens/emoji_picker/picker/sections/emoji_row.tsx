@@ -9,6 +9,8 @@ import {EMOJI_ROW_MARGIN, EMOJI_SIZE} from '@constants/emoji';
 
 import ImageEmoji from './emoji_image';
 
+import type {EmojiAlias} from '@typings/screens/emoji_selector';
+
 export interface EmojiSectionRow {
     type: 'row';
     emojis: EmojiAlias[];
@@ -71,6 +73,7 @@ export default function EmojiRow({emojis, file, imageUrl, onEmojiPress}: EmojiRo
                         name={emoji.name}
                         onEmojiPress={onEmojiPress}
                         category={emoji.category}
+                        preventDoubleTap={false}
                     />
                 );
             })}

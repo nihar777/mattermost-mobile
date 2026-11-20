@@ -8,9 +8,9 @@
 // *******************************************************************
 
 import {
-    Post,
     Setup,
 } from '@support/server_api';
+import {assertServerBaseline} from '@support/server_baseline';
 import {
     serverOneUrl,
     siteOneUrl,
@@ -26,8 +26,8 @@ import {
     ThreadOptionsScreen,
     ThreadScreen,
 } from '@support/ui/screen';
-import {getRandomId, timeouts, wait} from '@support/utils';
-import {expect} from 'detox';
+import {getRandomId, isAndroid, timeouts, wait, waitForElementToBeVisible} from '@support/utils';
+import {waitFor} from 'detox';
 
 describe('Threads - Follow and Unfollow Thread', () => {
     const serverOneDisplayName = 'Server 1';
@@ -37,6 +37,12 @@ describe('Threads - Follow and Unfollow Thread', () => {
     beforeAll(async () => {
         const {channel, user} = await Setup.apiInit(siteOneUrl);
         testChannel = channel;
+
+        // # Assert server baseline (CRT always_on, ThreadAutoFollow) for thread UI.
+        await assertServerBaseline(siteOneUrl, [
+            'ServiceSettings.CollapsedThreads',
+            'ServiceSettings.ThreadAutoFollow',
+        ]);
 
         // # Log in to server
         await ServerScreen.connectToServer(serverOneUrl, serverOneDisplayName);
@@ -49,6 +55,9 @@ describe('Threads - Follow and Unfollow Thread', () => {
     });
 
     afterAll(async () => {
+        // # Navigate back from GlobalThreadsScreen if MM-T4806_4 left us there
+        await GlobalThreadsScreen.back();
+
         // # Log out
         await HomeScreen.logout();
     });
@@ -57,25 +66,31 @@ describe('Threads - Follow and Unfollow Thread', () => {
         // # Create a thread
         const parentMessage = `Message ${getRandomId()}`;
         await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelScreen.postMessage(parentMessage);
-        const {post: parentPost} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
+        const {post: parentPost} = await ChannelScreen.postMessageAndVerify(parentMessage, testChannel.id, siteOneUrl);
+        const {postListPostItem} = ChannelScreen.getPostListPostItem(parentPost.id, parentMessage);
+        await waitFor(postListPostItem).toBeVisible().withTimeout(timeouts.FOUR_SEC);
+
         await ChannelScreen.openReplyThreadFor(parentPost.id, parentMessage);
         await ThreadScreen.postMessage(`${parentMessage} reply`);
 
         // * Verify thread is followed by user by default via thread navigation
-        await expect(ThreadScreen.followingButton).toBeVisible();
+        // Use polling to wait for the button to appear, avoiding bridge-idle sync stalls
+        // on Android and iOS after post animations and DB writes.
+        await waitForElementToBeVisible(ThreadScreen.followingButton, timeouts.TEN_SEC);
 
         // # Unfollow thread via thread navigation
         await ThreadScreen.followingButton.tap();
+        await wait(timeouts.TWO_SEC);
 
         // * Verify thread is not followed by user via thread navigation
-        await expect(ThreadScreen.followButton).toBeVisible();
+        await waitForElementToBeVisible(ThreadScreen.followButton, timeouts.TEN_SEC);
 
         // # Follow thread via thread navigation
         await ThreadScreen.followButton.tap();
+        await wait(timeouts.TWO_SEC);
 
         // * Verify thread is followed by user via thread navigation
-        await expect(ThreadScreen.followingButton).toBeVisible();
+        await waitForElementToBeVisible(ThreadScreen.followingButton, timeouts.TEN_SEC);
 
         // # Go back to channel list screen
         await ThreadScreen.back();
@@ -86,27 +101,35 @@ describe('Threads - Follow and Unfollow Thread', () => {
         // # Create a thread and go back to channel screen
         const parentMessage = `Message ${getRandomId()}`;
         await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelScreen.postMessage(parentMessage);
-        const {post: parentPost} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
+        const {post: parentPost} = await ChannelScreen.postMessageAndVerify(parentMessage, testChannel.id, siteOneUrl);
+        const {postListPostItem: parentPostItem} = ChannelScreen.getPostListPostItem(parentPost.id, parentMessage);
+        await waitFor(parentPostItem).toBeVisible().withTimeout(timeouts.TEN_SEC);
+
         await ChannelScreen.openReplyThreadFor(parentPost.id, parentMessage);
         await ThreadScreen.postMessage(`${parentMessage} reply`);
         await ThreadScreen.back();
 
         // * Verify thread is followed by user by default via post footer
+        // Use polling to wait for the post to be visible with its footer buttons
         const {postListPostItemFooterFollowButton, postListPostItemFooterFollowingButton} = ChannelScreen.getPostListPostItem(parentPost.id, parentMessage);
-        await expect(postListPostItemFooterFollowingButton).toBeVisible();
+        if (isAndroid()) {
+            await wait(timeouts.TWO_SEC);
+        }
+        await waitForElementToBeVisible(postListPostItemFooterFollowingButton, timeouts.TEN_SEC);
 
         // # Unfollow thread via post footer
         await postListPostItemFooterFollowingButton.tap();
+        await wait(timeouts.TWO_SEC);
 
         // * Verify thread is not followed by user via post footer
-        await expect(postListPostItemFooterFollowButton).toBeVisible();
+        await waitForElementToBeVisible(postListPostItemFooterFollowButton, timeouts.TEN_SEC);
 
         // # Follow thread via post footer
         await postListPostItemFooterFollowButton.tap();
+        await wait(timeouts.TWO_SEC);
 
         // * Verify thread is followed by user via post footer
-        await expect(postListPostItemFooterFollowingButton).toBeVisible();
+        await waitForElementToBeVisible(postListPostItemFooterFollowingButton, timeouts.TEN_SEC);
 
         // # Go back to channel list screen
         await ChannelScreen.back();
@@ -116,52 +139,68 @@ describe('Threads - Follow and Unfollow Thread', () => {
         // # Create a thread, go back to channel screen, and open post options for thread
         const parentMessage = `Message ${getRandomId()}`;
         await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelScreen.postMessage(parentMessage);
-        const {post: parentPost} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
+        const {post: parentPost} = await ChannelScreen.postMessageAndVerify(parentMessage, testChannel.id, siteOneUrl);
+
+        // Pre-position the post at ≥75% visibility before longPress (same pattern as MM-T4806_1).
+        const {postListPostItem: parentPostItem} = ChannelScreen.getPostListPostItem(parentPost.id, parentMessage);
+        await waitFor(parentPostItem).toBeVisible().withTimeout(timeouts.TEN_SEC);
+
         await ChannelScreen.openReplyThreadFor(parentPost.id, parentMessage);
         await ThreadScreen.postMessage(`${parentMessage} reply`);
         await ThreadScreen.back();
         await ChannelScreen.openPostOptionsFor(parentPost.id, parentMessage);
 
         // * Verify thread is followed by user by default via post options
-        await expect(PostOptionsScreen.followingThreadOption).toBeVisible();
+        await waitFor(PostOptionsScreen.followingThreadOption).toBeVisible().withTimeout(timeouts.TEN_SEC);
 
         // # Unfollow thread via post options
         await PostOptionsScreen.followingThreadOption.tap();
+        await wait(timeouts.TWO_SEC);
+
+        // * Verify post options are dismissed (wait for dimming overlay to clear on iOS 26)
+        await waitFor(PostOptionsScreen.postOptionsScreen).not.toBeVisible().withTimeout(timeouts.FOUR_SEC);
 
         // * Verify thread is not followed by user via post footer
         const {postListPostItemFooterFollowButton, postListPostItemFooterFollowingButton} = ChannelScreen.getPostListPostItem(parentPost.id, parentMessage);
-        await waitFor(postListPostItemFooterFollowButton).toBeVisible().withTimeout(timeouts.TWO_SEC);
+        await waitForElementToBeVisible(postListPostItemFooterFollowButton, timeouts.TEN_SEC);
 
         // # Open post options for thread
         await ChannelScreen.openPostOptionsFor(parentPost.id, parentMessage);
 
         // * Verify thread is not followed by user via post options
-        await expect(PostOptionsScreen.followThreadOption).toBeVisible();
+        await waitFor(PostOptionsScreen.followThreadOption).toBeVisible().withTimeout(timeouts.TEN_SEC);
 
         // # Tap on follow thread option
         await PostOptionsScreen.followThreadOption.tap();
+        await wait(timeouts.TWO_SEC);
+
+        // * Verify post options are dismissed (wait for dimming overlay to clear on iOS 26)
+        await waitFor(PostOptionsScreen.postOptionsScreen).not.toBeVisible().withTimeout(timeouts.FOUR_SEC);
 
         // * Verify thread is followed by user via post footer
-        await waitFor(postListPostItemFooterFollowingButton).toBeVisible().withTimeout(timeouts.TWO_SEC);
+        await waitForElementToBeVisible(postListPostItemFooterFollowingButton, timeouts.TEN_SEC);
 
         // # Open post options for thread
         await ChannelScreen.openPostOptionsFor(parentPost.id, parentMessage);
 
         // * Verify thread is followed by user via post options
-        await waitFor(PostOptionsScreen.followingThreadOption).toBeVisible().withTimeout(timeouts.TWO_SEC);
+        await waitFor(PostOptionsScreen.followingThreadOption).toBeVisible().withTimeout(timeouts.TEN_SEC);
 
         // # Go back to channel list screen
         await PostOptionsScreen.close();
         await ChannelScreen.back();
-    });
+    }, 360000);
 
     it('MM-T4806_4 - should be able to unfollow a thread via thread options', async () => {
         // # Create a thread, go back to channel list screen, then go to global threads screen, and tap on all your threads button
         const parentMessage = `Message ${getRandomId()}`;
         await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelScreen.postMessage(parentMessage);
-        const {post: parentPost} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
+        const {post: parentPost} = await ChannelScreen.postMessageAndVerify(parentMessage, testChannel.id, siteOneUrl);
+
+        // Pre-position the post at ≥75% visibility before longPress (same pattern as MM-T4806_1).
+        const {postListPostItem: parentPostItem} = ChannelScreen.getPostListPostItem(parentPost.id, parentMessage);
+        await waitFor(parentPostItem).toBeVisible().withTimeout(timeouts.TEN_SEC);
+
         await ChannelScreen.openReplyThreadFor(parentPost.id, parentMessage);
         const replyMessage = `${parentMessage} reply`;
         await ThreadScreen.postMessage(replyMessage);
@@ -171,24 +210,19 @@ describe('Threads - Follow and Unfollow Thread', () => {
         await GlobalThreadsScreen.headerAllThreadsButton.tap();
 
         // * Verify thread is displayed
-        await expect(GlobalThreadsScreen.getThreadItem(parentPost.id)).toBeVisible();
+        await waitFor(GlobalThreadsScreen.getThreadItem(parentPost.id)).toBeVisible().withTimeout(timeouts.TEN_SEC);
 
         // # Open thread options for thread
         await GlobalThreadsScreen.openThreadOptionsFor(parentPost.id);
 
         // * Verify thread is followed by user via thread options
-        await waitFor(ThreadOptionsScreen.followingThreadOption).toBeVisible().withTimeout(timeouts.TWO_SEC);
+        await waitForElementToBeVisible(ThreadOptionsScreen.followingThreadOption, timeouts.TEN_SEC);
 
         // # Tap on unfollow thread option
         await ThreadOptionsScreen.followingThreadOption.tap();
+        await wait(timeouts.TWO_SEC);
 
         // * Verify thread is not displayed anymore in all your threads section
-        await wait(timeouts.ONE_SEC);
-        await expect(GlobalThreadsScreen.getThreadItem(parentPost.id)).not.toBeVisible();
-
-        await wait(timeouts.FOUR_SEC);
-
-        // # Go back to channel list screen
-        await GlobalThreadsScreen.back();
+        await waitFor(GlobalThreadsScreen.getThreadItem(parentPost.id)).not.toBeVisible().withTimeout(timeouts.TEN_SEC);
     });
 });

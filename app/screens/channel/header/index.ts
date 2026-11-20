@@ -3,29 +3,46 @@
 
 import {withDatabase, withObservables} from '@nozbe/watermelondb/react';
 import React from 'react';
-import {of as of$} from 'rxjs';
-import {combineLatestWith, distinctUntilChanged, switchMap} from 'rxjs/operators';
+import {combineLatest, of as of$} from 'rxjs';
+import {combineLatestWith, distinctUntilChanged, map, switchMap} from 'rxjs/operators';
 
+import {getDialablePhones, NO_PHONES} from '@calls/utils';
 import {General} from '@constants';
+import {DISPLAY_LABEL_HEADER} from '@constants/channel_attributes';
 import {queryPlaybookRunsPerChannel} from '@playbooks/database/queries/run';
 import {observeIsPlaybooksEnabled} from '@playbooks/database/queries/version';
-import {observeChannel, observeChannelInfo} from '@queries/servers/channel';
+import {observeChannel, observeChannelInfo, observeIsChannelAutotranslated} from '@queries/servers/channel';
 import {observeCanAddBookmarks, queryBookmarks} from '@queries/servers/channel_bookmark';
+import {observeCustomProfileAttributesByUserId, observeCustomProfileFields} from '@queries/servers/custom_profile';
+import {observeChannelBookmarksEnabled, observeCustomProfileAttributesEnabled} from '@queries/servers/features';
+import {observeChannelAttributesEnabled, observeResolvedChannelAttributes} from '@queries/servers/properties';
 import {observeConfigBooleanValue, observeCurrentTeamId, observeCurrentUserId} from '@queries/servers/system';
-import {observeUser} from '@queries/servers/user';
+import {observeIsUserLanguageSupportedByAutotranslation, observeUser} from '@queries/servers/user';
+import {selectAttributesForAction, type ResolvedChannelAttribute} from '@utils/channel_attributes';
 import {
+    convertProfileAttributesToCustomAttributes,
     getUserCustomStatus,
     getUserIdFromChannelName,
+    isBot,
     isCustomStatusExpired as checkCustomStatusIsExpired,
+    isDeactivated,
+    sortCustomProfileAttributes,
 } from '@utils/user';
 
 import ChannelHeader from './header';
 
+import type {DialablePhone} from '@calls/types/calls';
 import type {WithDatabaseArgs} from '@typings/database/database';
 
 type OwnProps = {
     channelId: string;
 };
+
+const samePhones = (prev: DialablePhone[], next: DialablePhone[]) => {
+    return prev.length === next.length && prev.every((phone, i) => phone.number === next[i].number && phone.label === next[i].label);
+};
+
+const NO_ATTRIBUTES: ResolvedChannelAttribute[] = [];
 
 const enhanced = withObservables(['channelId'], ({channelId, database}: OwnProps & WithDatabaseArgs) => {
     const currentUserId = observeCurrentUserId(database);
@@ -53,6 +70,31 @@ const enhanced = withObservables(['channelId'], ({channelId, database}: OwnProps
         switchMap(([userId, dm]) => of$(userId === dm?.id)),
     );
 
+    const canCallDMUser = currentUserId.pipe(
+        combineLatestWith(dmUser),
+        switchMap(([userId, dm]) => of$(Boolean(dm && dm.id !== userId && !isBot(dm) && !isDeactivated(dm)))),
+        distinctUntilChanged(),
+    );
+
+    const dmPhoneUserId = combineLatest([canCallDMUser, dmUser, observeCustomProfileAttributesEnabled(database)]).pipe(
+        map(([canCall, dm, enabled]) => (canCall && enabled ? dm?.id : undefined)),
+        distinctUntilChanged(),
+    );
+
+    const dmUserPhones = dmPhoneUserId.pipe(
+        switchMap((id) => {
+            if (!id) {
+                return of$(NO_PHONES);
+            }
+
+            return combineLatest([observeCustomProfileFields(database), observeCustomProfileAttributesByUserId(database, id)]).pipe(
+                // eslint-disable-next-line max-nested-callbacks
+                map(([fields, attributes]) => getDialablePhones(convertProfileAttributesToCustomAttributes(attributes, fields, sortCustomProfileAttributes, true))),
+            );
+        }),
+        distinctUntilChanged(samePhones),
+    );
+
     const customStatus = dmUser.pipe(
         switchMap((dm) => of$(getUserCustomStatus(dm))),
     );
@@ -63,6 +105,14 @@ const enhanced = withObservables(['channelId'], ({channelId, database}: OwnProps
 
     const isCustomStatusEnabled = observeConfigBooleanValue(database, 'EnableCustomUserStatuses');
     const isPlaybooksEnabled = observeIsPlaybooksEnabled(database);
+    const isChannelAutotranslatedBase = observeIsChannelAutotranslated(database, channelId);
+    const isUserLanguageSupported = observeIsUserLanguageSupportedByAutotranslation(database);
+
+    const isChannelAutotranslated = isChannelAutotranslatedBase.pipe(
+        combineLatestWith(isUserLanguageSupported),
+        switchMap(([isAutotranslated, isLanguageSupported]) => of$(isAutotranslated && isLanguageSupported)),
+        distinctUntilChanged(),
+    );
 
     // const searchTerm = channel.pipe(
     //     combineLatestWith(dmUser),
@@ -86,7 +136,7 @@ const enhanced = withObservables(['channelId'], ({channelId, database}: OwnProps
         distinctUntilChanged(),
     );
 
-    const isBookmarksEnabled = observeConfigBooleanValue(database, 'FeatureFlagChannelBookmarks');
+    const isBookmarksEnabled = observeChannelBookmarksEnabled(database);
     const canAddBookmarks = observeCanAddBookmarks(database, channelId);
 
     const activeRuns = isPlaybooksEnabled.pipe(
@@ -108,13 +158,27 @@ const enhanced = withObservables(['channelId'], ({channelId, database}: OwnProps
         }),
     );
 
+    // The header owns this rather than the chip component so it can tell an empty
+    // set from a populated one: chips displace the member count, so an empty row
+    // must not be mounted at all.
+    const channelAttributes = observeChannelAttributesEnabled(database).pipe(
+        switchMap((enabled) => (enabled ? observeResolvedChannelAttributes(database, channelId) : of$(NO_ATTRIBUTES))),
+        map((resolved) => selectAttributesForAction(resolved, DISPLAY_LABEL_HEADER)),
+    );
+
     return {
         canAddBookmarks,
+        channelAttributes,
+        canCallDMUser,
+        dmPhoneUserId,
+        dmUserPhones,
         channelType,
+        currentUserId,
         customStatus,
         displayName,
         hasBookmarks,
         isBookmarksEnabled,
+        isChannelAutotranslated,
         isCustomStatusEnabled,
         isCustomStatusExpired,
         isOwnDirectMessage,

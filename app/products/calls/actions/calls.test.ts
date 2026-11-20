@@ -3,16 +3,18 @@
 
 import assert from 'assert';
 
-import {act, renderHook} from '@testing-library/react-hooks'; // Use instead of react-native version due to different behavior. Consider migrating
+import CallsNative from '@mattermost/calls-native';
+import {act, renderHook} from '@testing-library/react-native';
+import {router} from 'expo-router';
 import {createIntl} from 'react-intl';
 import {Alert} from 'react-native';
-import InCallManager from 'react-native-incall-manager';
 
 import * as CallsActions from '@calls/actions';
-import {getConnectionForTesting} from '@calls/actions/calls';
+import {getConnectionForTesting, joinCallAndOpenCallScreen, leaveCallConfirmation, switchToCallThread} from '@calls/actions/calls';
 import * as Permissions from '@calls/actions/permissions';
-import {needsRecordingWillBePostedAlert, needsRecordingErrorAlert} from '@calls/alerts';
+import {expectPhoneCallOutcome, needsRecordingWillBePostedAlert, needsRecordingErrorAlert} from '@calls/alerts';
 import {userLeftChannelErr, userRemovedFromChannelErr} from '@calls/errors';
+import {mirrorMuteToNativeCall} from '@calls/native_call';
 import * as State from '@calls/state';
 import {
     myselfLeftCall,
@@ -26,23 +28,33 @@ import {
     useChannelsWithCalls,
     useCurrentCall,
     userJoinedCall,
+    getCallsConfig,
+    getCallsState,
     getCurrentCall,
 } from '@calls/state';
 import * as StateActions from '@calls/state/actions';
 import {
     type Call,
     type CallsState,
+    CallsTransport,
     type ChannelsWithCalls,
     type CurrentCall,
     AudioDevice,
+    DefaultCall,
     DefaultCallsConfig,
     DefaultCallsState,
+    DefaultCurrentCall,
 } from '@calls/types/calls';
-import {errorAlert} from '@calls/utils';
+import {errorAlert, getCallsTransport} from '@calls/utils';
+import {General, Screens} from '@constants';
 import DatabaseManager from '@database/manager';
 import NetworkManager from '@managers/network_manager';
+import {getChannelById} from '@queries/servers/channel';
+import {dismissAllRoutesAndPopToScreen} from '@screens/navigation';
+import EphemeralStore from '@store/ephemeral_store';
+import TestHelper from '@test/test_helper';
 
-import type {CallJobState} from '@mattermost/calls/lib/types';
+import type {CallJobState, CallsVersionInfo} from '@mattermost/calls/lib/types';
 
 const mockClient = {
     getCalls: jest.fn(() => [
@@ -69,7 +81,7 @@ const mockClient = {
     endCall: jest.fn(),
     getCallsConfig: jest.fn(),
     getCallForChannel: jest.fn(),
-    getVersion: jest.fn(() => ({})),
+    getVersion: jest.fn((): CallsVersionInfo => ({version: '1.0.0'})),
     getPluginsManifests: jest.fn(() => (
         [
             {id: 'playbooks'},
@@ -82,15 +94,33 @@ const mockClient = {
     dismissCall: jest.fn(),
 };
 
-jest.mock('@calls/connection/connection', () => ({
-    newConnection: jest.fn((serverURL, channelId, onClose) => Promise.resolve({
-        disconnect: jest.fn((err?: Error) => onClose(err)),
-        mute: jest.fn(),
-        unmute: jest.fn(),
-        waitForPeerConnection: jest.fn(() => Promise.resolve('session-id')),
-        initializeVoiceTrack: jest.fn(),
-        sendReaction: jest.fn(),
-    })),
+jest.mock('@calls/connection', () => ({
+    newCallConnection: jest.fn(async (serverURL, target, onClose, onChannelResolved) => {
+        if (target.type === 'channel') {
+            await onChannelResolved(target.channelID);
+        }
+        return {
+            disconnect: jest.fn((err?: Error) => onClose(err)),
+            mute: jest.fn(),
+            unmute: jest.fn(),
+            waitForPeerConnection: jest.fn(() => Promise.resolve('session-id')),
+            initializeVoiceTrack: jest.fn(),
+            sendReaction: jest.fn(),
+            setUserSelectedAudioRoute: jest.fn(),
+        };
+    }),
+}));
+
+jest.mock('@actions/remote/channel', () => ({
+    ...jest.requireActual('@actions/remote/channel'),
+    fetchMyChannel: jest.fn(() => Promise.resolve({})),
+}));
+
+jest.mock('@calls/native_call', () => ({
+    endNativeCall: jest.fn(),
+    registerOutgoingNativeCall: jest.fn(),
+    reportNativeCallConnected: jest.fn(),
+    mirrorMuteToNativeCall: jest.fn(),
 }));
 
 jest.mock('@actions/remote/thread', () => ({
@@ -106,23 +136,16 @@ jest.mock('@queries/servers/thread', () => ({
 jest.mock('@calls/alerts', () => {
     const alerts = jest.requireActual('../alerts');
     return {
+        expectPhoneCallOutcome: jest.fn(),
         needsRecordingErrorAlert: jest.fn(),
         needsRecordingWillBePostedAlert: jest.fn(),
         showErrorAlertOnClose: alerts.showErrorAlertOnClose,
         leaveAndJoinWithAlert: alerts.leaveAndJoinWithAlert,
+        endCallConfirmationAlert: alerts.endCallConfirmationAlert,
     };
 });
 
 jest.mock('@calls/utils');
-
-jest.mock('react-native-navigation', () => ({
-    Navigation: {
-        pop: jest.fn(() => Promise.resolve({
-            catch: jest.fn(),
-        })),
-        setDefaultOptions: jest.fn(),
-    },
-}));
 
 jest.mock('@actions/remote/session', () => ({
     forceLogoutIfNecessary: jest.fn(),
@@ -130,20 +153,15 @@ jest.mock('@actions/remote/session', () => ({
 
 jest.mock('@queries/servers/user', () => ({
     getCurrentUser: jest.fn(),
-    getUserById: jest.fn(),
+}));
+
+jest.mock('@screens/navigation', () => ({
+    ...jest.requireActual('@screens/navigation'),
+    dismissAllRoutesAndPopToScreen: jest.fn(),
 }));
 
 jest.mock('@queries/servers/channel', () => ({
     getChannelById: jest.fn(),
-}));
-
-jest.mock('@queries/servers/system', () => ({
-    getLicense: jest.fn(),
-    getConfig: jest.fn(),
-}));
-
-jest.mock('@queries/servers/preference', () => ({
-    queryDisplayNamePreferences: jest.fn(),
 }));
 
 const addFakeCall = (serverUrl: string, channelId: string) => {
@@ -202,14 +220,9 @@ const addFakeCall = (serverUrl: string, channelId: string) => {
 };
 
 describe('Actions.Calls', () => {
-    const {newConnection} = require('@calls/connection/connection');
+    const {newCallConnection} = require('@calls/connection');
     const {updateThreadFollowing} = require('@actions/remote/thread');
 
-    InCallManager.setSpeakerphoneOn = jest.fn();
-    InCallManager.setForceSpeakerphoneOn = jest.fn();
-    InCallManager.chooseAudioRoute = jest.fn();
-
-    // eslint-disable-next-line
     // @ts-ignore
     NetworkManager.getClient = () => mockClient;
     jest.spyOn(Permissions, 'hasMicrophonePermission').mockReturnValue(Promise.resolve(true));
@@ -229,7 +242,8 @@ describe('Actions.Calls', () => {
     });
 
     beforeEach(() => {
-        newConnection.mockClear();
+        jest.mocked(expectPhoneCallOutcome).mockClear();
+        newCallConnection.mockClear();
         updateThreadFollowing.mockClear();
         mockClient.getCalls.mockClear();
         mockClient.getPluginsManifests.mockClear();
@@ -240,6 +254,10 @@ describe('Actions.Calls', () => {
             ]
         ));
         mockClient.enableChannelCalls.mockClear();
+
+        // Reset rather than clear: tests that set a persistent channel here must not leak it
+        // into the tests that follow.
+        jest.mocked(getChannelById).mockReset();
 
         // reset to default state for each test
         act(() => {
@@ -263,21 +281,22 @@ describe('Actions.Calls', () => {
 
         let response: { data?: string };
         await act(async () => {
-            response = await CallsActions.joinCall('server1', 'channel-id', 'myUserId', true, createIntl({
+            response = await CallsActions.joinCall('server1', {type: 'channel', channelID: 'channel-id'}, 'myUserId', true, createIntl({
                 locale: 'en',
                 messages: {},
             }));
 
             expect(setCurrentCallConnectedMock).toHaveBeenCalledWith('channel-id', 'session-id');
 
-            // manually call newCurrentConnection because newConnection is mocked
-            newCurrentCall('server1', 'channel-id', 'myUserId');
+            // manually call newCurrentConnection because newCallConnection is mocked
+            newCurrentCall('server1', 'channel-id', 'myUserId', CallsTransport.Rtcd);
         });
 
         assert.equal(response!.data, 'channel-id');
+        expect(expectPhoneCallOutcome).not.toHaveBeenCalled();
         assert.equal((result.current[1] as CurrentCall).channelId, 'channel-id');
-        expect(newConnection).toHaveBeenCalled();
-        expect(newConnection.mock.calls[0][1]).toBe('channel-id');
+        expect(newCallConnection).toHaveBeenCalled();
+        expect(newCallConnection.mock.calls[0][1]).toEqual({type: 'channel', channelID: 'channel-id'});
         expect(updateThreadFollowing).toHaveBeenCalled();
 
         await act(async () => {
@@ -285,13 +304,16 @@ describe('Actions.Calls', () => {
         });
 
         // Test error case
-        newConnection.mockRejectedValueOnce(forceLogoutError);
+        const {endNativeCall} = require('@calls/native_call');
+        endNativeCall.mockClear();
+        newCallConnection.mockRejectedValueOnce(forceLogoutError);
         await act(async () => {
-            await expect(CallsActions.joinCall('server1', 'channel-id', 'myUserId', true, createIntl({
+            await expect(CallsActions.joinCall('server1', {type: 'channel', channelID: 'channel-id'}, 'myUserId', true, createIntl({
                 locale: 'en',
                 messages: {},
             }))).resolves.toStrictEqual({error: forceLogoutError});
             expect(forceLogout).toHaveBeenCalledWith('server1', forceLogoutError);
+            expect(endNativeCall).toHaveBeenCalledWith('server1', 'channel-id', 'failed');
         });
 
         // Test failure to connect case
@@ -299,15 +321,90 @@ describe('Actions.Calls', () => {
             disconnect: jest.fn(),
             waitForPeerConnection: jest.fn().mockRejectedValueOnce(new Error('failed to connect')),
         };
-        newConnection.mockResolvedValueOnce(connection);
+        newCallConnection.mockResolvedValueOnce(connection);
 
         await act(async () => {
-            const res = await CallsActions.joinCall('server1', 'channel-id', 'myUserId', true, createIntl({
+            const res = await CallsActions.joinCall('server1', {type: 'channel', channelID: 'channel-id'}, 'myUserId', true, createIntl({
                 locale: 'en',
                 messages: {},
             }));
             expect(res).toStrictEqual({error: 'unable to connect to the voice call: Error: failed to connect'});
             expect(connection.disconnect).toHaveBeenCalled();
+            expect(expectPhoneCallOutcome).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('joinCall with a phone target', () => {
+        const intl = createIntl({locale: 'en', messages: {}});
+        const phone = {number: '+15551234567'};
+
+        it('should create the current call on the resolved channel and name the CallKit entry after the number', async () => {
+            const {registerOutgoingNativeCall} = require('@calls/native_call');
+            jest.mocked(getChannelById).mockResolvedValue({id: 'bot-dm'} as never);
+            newCallConnection.mockImplementationOnce(async (_url: string, _target: unknown, _onClose: unknown, onChannelResolved: (id: string) => Promise<void>) => {
+                await onChannelResolved('bot-dm');
+                State.setCallForChannel('server1', 'bot-dm', {...DefaultCall, id: 'phone-call-id', channelId: 'bot-dm'});
+                return {disconnect: jest.fn(), waitForPeerConnection: jest.fn(() => Promise.resolve('session-id'))};
+            });
+
+            let res: Awaited<ReturnType<typeof CallsActions.joinCall>>;
+            await act(async () => {
+                res = await CallsActions.joinCall('server1', {type: 'phone', phone}, 'myUserId', true, intl, undefined, undefined, {startedByMe: true});
+            });
+
+            expect(expectPhoneCallOutcome).toHaveBeenCalledWith('server1', 'phone-call-id', intl);
+
+            expect(res!).toEqual({data: 'bot-dm'});
+            expect(getCurrentCall()?.channelId).toBe('bot-dm');
+            expect(registerOutgoingNativeCall).toHaveBeenCalledWith('server1', 'bot-dm', undefined, '+15551234567');
+        });
+
+        it('should return the error without ending a native call when the connection rejects before the channel resolves', async () => {
+            const {endNativeCall} = require('@calls/native_call');
+            endNativeCall.mockClear();
+            const error = new Error('invalid_number');
+            newCallConnection.mockRejectedValueOnce(error);
+
+            let res: Awaited<ReturnType<typeof CallsActions.joinCall>>;
+            await act(async () => {
+                res = await CallsActions.joinCall('server1', {type: 'phone', phone}, 'myUserId', true, intl);
+            });
+
+            expect(res!).toEqual({error});
+            expect(endNativeCall).not.toHaveBeenCalled();
+            expect(getCurrentCall()).toBeNull();
+        });
+
+        it('should clear the current call when the connection rejects after the channel resolves', async () => {
+            const error = new Error('connect failed');
+            jest.mocked(getChannelById).mockResolvedValue({id: 'bot-dm'} as never);
+            newCallConnection.mockImplementationOnce(async (_url: string, _target: unknown, _onClose: unknown, onChannelResolved: (id: string) => Promise<void>) => {
+                await onChannelResolved('bot-dm');
+                throw error;
+            });
+
+            let res: Awaited<ReturnType<typeof CallsActions.joinCall>>;
+            await act(async () => {
+                res = await CallsActions.joinCall('server1', {type: 'phone', phone}, 'myUserId', true, intl);
+            });
+
+            expect(res!).toEqual({error});
+            expect(getCurrentCall()).toBeNull();
+        });
+
+        it('should keep a different current call when the connection rejects after the channel resolves', async () => {
+            jest.mocked(getChannelById).mockResolvedValue({id: 'bot-dm'} as never);
+            newCallConnection.mockImplementationOnce(async (_url: string, _target: unknown, _onClose: unknown, onChannelResolved: (id: string) => Promise<void>) => {
+                await onChannelResolved('bot-dm');
+                newCurrentCall('server1', 'other-channel', 'myUserId', CallsTransport.LiveKit);
+                throw new Error('connect failed');
+            });
+
+            await act(async () => {
+                await CallsActions.joinCall('server1', {type: 'phone', phone}, 'myUserId', true, intl);
+            });
+
+            expect(getCurrentCall()?.channelId).toBe('other-channel');
         });
     });
 
@@ -321,13 +418,13 @@ describe('Actions.Calls', () => {
 
         let response: { data?: string };
         await act(async () => {
-            response = await CallsActions.joinCall('server1', 'channel-id', 'myUserId', true, createIntl({
+            response = await CallsActions.joinCall('server1', {type: 'channel', channelID: 'channel-id'}, 'myUserId', true, createIntl({
                 locale: 'en',
                 messages: {},
             }));
 
-            // manually call newCurrentConnection because newConnection is mocked
-            newCurrentCall('server1', 'channel-id', 'myUserId');
+            // manually call newCurrentConnection because newCallConnection is mocked
+            newCurrentCall('server1', 'channel-id', 'myUserId', CallsTransport.Rtcd);
             userJoinedCall('server1', 'channel-id', 'myUserId', 'mySessionId');
         });
         assert.equal(response!.data, 'channel-id');
@@ -348,6 +445,171 @@ describe('Actions.Calls', () => {
         assert.equal((result.current[1] as CurrentCall | null), null);
     });
 
+    it('should create the current call and its connection on the transport of the reloaded config', async () => {
+        jest.mocked(getCallsTransport).mockImplementation(jest.requireActual('@calls/utils').getCallsTransport);
+        addFakeCall('server1', 'channel-id');
+        act(() => {
+            setCallsConfig('server1', {...DefaultCallsConfig, version: {version: '1.12.5'}, last_retrieved_at: Date.now()});
+        });
+        mockClient.getVersion.mockReturnValueOnce({version: '2.0.0'});
+
+        await act(async () => {
+            await CallsActions.joinCall('server1', {type: 'channel', channelID: 'channel-id'}, 'myUserId', true, createIntl({locale: 'en', messages: {}}));
+        });
+
+        expect(newCallConnection.mock.calls[0][7]).toBe(CallsTransport.LiveKit);
+        expect(getCurrentCall()?.transport).toBe(CallsTransport.LiveKit);
+        jest.mocked(getCallsTransport).mockReset();
+
+        await act(async () => {
+            CallsActions.leaveCall();
+        });
+    });
+
+    it('should fail the join before creating the current call when the config reload fails', async () => {
+        const {registerOutgoingNativeCall} = require('@calls/native_call');
+        registerOutgoingNativeCall.mockClear();
+        addFakeCall('server1', 'channel-id');
+        const configError = new Error('config failed');
+        mockClient.getCallsConfig.mockRejectedValueOnce(configError);
+
+        let res: Awaited<ReturnType<typeof CallsActions.joinCall>>;
+        await act(async () => {
+            res = await CallsActions.joinCall('server1', {type: 'channel', channelID: 'channel-id'}, 'myUserId', true, createIntl({locale: 'en', messages: {}}));
+        });
+
+        expect(res!).toStrictEqual({error: configError});
+        expect(getCurrentCall()).toBeNull();
+        expect(registerOutgoingNativeCall).not.toHaveBeenCalled();
+        expect(newCallConnection).not.toHaveBeenCalled();
+    });
+
+    it('should fail the join before creating the current call when the plugin version is unknown', async () => {
+        addFakeCall('server1', 'channel-id');
+        mockClient.getVersion.mockReturnValueOnce({});
+
+        let res: Awaited<ReturnType<typeof CallsActions.joinCall>>;
+        await act(async () => {
+            res = await CallsActions.joinCall('server1', {type: 'channel', channelID: 'channel-id'}, 'myUserId', true, createIntl({locale: 'en', messages: {}}));
+        });
+
+        expect(res!).toStrictEqual({error: 'unable to determine calls plugin version'});
+        expect(getCurrentCall()).toBeNull();
+        expect(newCallConnection).not.toHaveBeenCalled();
+    });
+
+    it('should leave immediately for non-hosts without showing an alert', async () => {
+        // setup
+        addFakeCall('server1', 'channel-id');
+        await act(async () => {
+            await CallsActions.joinCall('server1', {type: 'channel', channelID: 'channel-id'}, 'myUserId', true, createIntl({
+                locale: 'en',
+                messages: {},
+            }));
+            newCurrentCall('server1', 'channel-id', 'myUserId', CallsTransport.Rtcd);
+            userJoinedCall('server1', 'channel-id', 'myUserId', 'mySessionId');
+        });
+
+        const disconnectMock = getConnectionForTesting()!.disconnect;
+        const mockAlert = jest.spyOn(Alert, 'alert');
+        const leaveCb = jest.fn();
+
+        await act(async () => {
+            await leaveCallConfirmation(
+                createIntl({locale: 'en', messages: {}}),
+                true,
+                false,
+                false,
+                'server1',
+                'channel-id',
+                leaveCb,
+            );
+        });
+
+        expect(mockAlert).not.toHaveBeenCalled();
+        expect(disconnectMock).toHaveBeenCalled();
+        expect(leaveCb).toHaveBeenCalled();
+    });
+
+    const joinCallInChannel = async (channelType: ChannelType) => {
+        jest.mocked(getChannelById).mockResolvedValue(TestHelper.fakeChannelModel({
+            id: 'channel-id',
+            type: channelType,
+        }));
+
+        addFakeCall('server1', 'channel-id');
+        await act(async () => {
+            await CallsActions.joinCall('server1', {type: 'channel', channelID: 'channel-id'}, 'myUserId', true, createIntl({
+                locale: 'en',
+                messages: {},
+            }));
+            newCurrentCall('server1', 'channel-id', 'myUserId', CallsTransport.Rtcd);
+            userJoinedCall('server1', 'channel-id', 'myUserId', 'mySessionId');
+        });
+    };
+
+    it('should leave immediately in a DM even for the host', async () => {
+        await joinCallInChannel(General.DM_CHANNEL);
+
+        const disconnectMock = getConnectionForTesting()?.disconnect;
+        expect(disconnectMock).toBeDefined();
+        const mockAlert = jest.spyOn(Alert, 'alert');
+        const leaveCb = jest.fn();
+
+        await act(async () => {
+            await leaveCallConfirmation(
+                createIntl({locale: 'en', messages: {}}),
+                true,
+                false,
+                true,
+                'server1',
+                'channel-id',
+                leaveCb,
+            );
+        });
+
+        expect(mockAlert).not.toHaveBeenCalled();
+        expect(disconnectMock).toHaveBeenCalled();
+        expect(leaveCb).toHaveBeenCalled();
+        mockAlert.mockRestore();
+    });
+
+    it('should still ask the host in a channel call', async () => {
+        await joinCallInChannel(General.OPEN_CHANNEL);
+
+        const disconnectMock = getConnectionForTesting()?.disconnect;
+        expect(disconnectMock).toBeDefined();
+        const leaveCb = jest.fn();
+
+        // Press "Cancel", which is the first button on both platforms.
+        const mockAlert = jest.spyOn(Alert, 'alert').mockImplementation((title, message, buttons) => {
+            buttons?.[0].onPress?.();
+        });
+
+        await act(async () => {
+            await leaveCallConfirmation(
+                createIntl({locale: 'en', messages: {}}),
+                true,
+                false,
+                true,
+                'server1',
+                'channel-id',
+                leaveCb,
+            );
+        });
+
+        expect(mockAlert).toHaveBeenCalled();
+        expect(disconnectMock).not.toHaveBeenCalled();
+        expect(leaveCb).not.toHaveBeenCalled();
+        mockAlert.mockRestore();
+
+        // Cancelling kept the call, so tear it down for the tests that follow.
+        await act(async () => {
+            CallsActions.leaveCall();
+            myselfLeftCall();
+        });
+    });
+
     it('muteMyself', async () => {
         // setup
         const {result} = renderHook(() => {
@@ -358,13 +620,13 @@ describe('Actions.Calls', () => {
 
         let response: { data?: string };
         await act(async () => {
-            response = await CallsActions.joinCall('server1', 'channel-id', 'myUserId', true, createIntl({
+            response = await CallsActions.joinCall('server1', {type: 'channel', channelID: 'channel-id'}, 'myUserId', true, createIntl({
                 locale: 'en',
                 messages: {},
             }));
 
-            // manually call newCurrentConnection because newConnection is mocked
-            newCurrentCall('server1', 'channel-id', 'myUserId');
+            // manually call newCurrentConnection because newCallConnection is mocked
+            newCurrentCall('server1', 'channel-id', 'myUserId', CallsTransport.Rtcd);
             userJoinedCall('server1', 'channel-id', 'myUserId', 'mySessionId');
         });
         assert.equal(response!.data, 'channel-id');
@@ -391,13 +653,13 @@ describe('Actions.Calls', () => {
 
         let response: { data?: string };
         await act(async () => {
-            response = await CallsActions.joinCall('server1', 'channel-id', 'mysUserId', true, createIntl({
+            response = await CallsActions.joinCall('server1', {type: 'channel', channelID: 'channel-id'}, 'mysUserId', true, createIntl({
                 locale: 'en',
                 messages: {},
             }));
 
-            // manually call newCurrentConnection because newConnection is mocked
-            newCurrentCall('server1', 'channel-id', 'myUserId');
+            // manually call newCurrentConnection because newCallConnection is mocked
+            newCurrentCall('server1', 'channel-id', 'myUserId', CallsTransport.Rtcd);
             userJoinedCall('server1', 'channel-id', 'myUserId', 'mySessionId');
         });
         assert.equal(response!.data, 'channel-id');
@@ -414,6 +676,30 @@ describe('Actions.Calls', () => {
         });
     });
 
+    it.each([
+        [true, 'mute', 'unmute'],
+        [false, 'unmute', 'mute'],
+    ] as const)('applyNativeCallMute(%s) calls connection.%s without mirroring back to the native call', async (muted, called, notCalled) => {
+        renderHook(() => useCurrentCall());
+        addFakeCall('server1', 'channel-id');
+        await act(async () => {
+            await CallsActions.joinCall('server1', {type: 'channel', channelID: 'channel-id'}, 'myUserId', true, createIntl({locale: 'en', messages: {}}));
+            newCurrentCall('server1', 'channel-id', 'myUserId', CallsTransport.Rtcd);
+        });
+
+        await act(async () => {
+            CallsActions.applyNativeCallMute(muted);
+        });
+
+        expect(getConnectionForTesting()![called]).toHaveBeenCalled();
+        expect(getConnectionForTesting()![notCalled]).not.toHaveBeenCalled();
+        expect(mirrorMuteToNativeCall).not.toHaveBeenCalled();
+
+        await act(async () => {
+            CallsActions.leaveCall();
+        });
+    });
+
     it('loadCalls', async () => {
         // setup
         const {result} = renderHook(() => {
@@ -421,15 +707,16 @@ describe('Actions.Calls', () => {
         });
 
         // Test successful case
+        let successResult: Awaited<ReturnType<typeof CallsActions.loadCalls>>;
         await act(async () => {
-            const successResult = await CallsActions.loadCalls('server1', 'userId1');
-            expect(successResult.data).toBeDefined();
-            expect(mockClient.getCalls).toHaveBeenCalled();
-            assert.equal((result.current[0] as CallsState).calls['channel-1'].channelId, 'channel-1');
-            assert.equal((result.current[0] as CallsState).enabled['channel-1'], true);
-            assert.equal((result.current[1] as ChannelsWithCalls)['channel-1'], true);
-            assert.equal((result.current[2] as CurrentCall | null), null);
+            successResult = await CallsActions.loadCalls('server1', 'userId1');
         });
+        expect(successResult!.data).toBeDefined();
+        expect(mockClient.getCalls).toHaveBeenCalled();
+        assert.equal((result.current[0] as CallsState).calls['channel-1'].channelId, 'channel-1');
+        assert.equal((result.current[0] as CallsState).enabled['channel-1'], true);
+        assert.equal((result.current[1] as ChannelsWithCalls)['channel-1'], true);
+        assert.equal((result.current[2] as CurrentCall | null), null);
 
         // Test error case
         mockClient.getCalls = jest.fn().mockRejectedValueOnce(forceLogoutError);
@@ -451,7 +738,6 @@ describe('Actions.Calls', () => {
         // setup
         const oldGetCalls = mockClient.getCalls;
 
-        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
         // @ts-ignore
         mockClient.getCalls = jest.fn(() => null);
 
@@ -475,19 +761,20 @@ describe('Actions.Calls', () => {
         const {result} = renderHook(() => useCallsConfig('server1'));
 
         // Test successful case
+        let successResult: Awaited<ReturnType<typeof CallsActions.loadConfig>>;
         await act(async () => {
             mockClient.getCallsConfig.mockReturnValueOnce({DefaultEnabled: true, AllowEnableCalls: true});
-            const successResult = await CallsActions.loadConfig('server1', false, 'Server Switch');
-            expect(successResult.data).toBeDefined();
-            expect(mockClient.getCallsConfig).toHaveBeenCalledWith('Server Switch');
-            assert.equal(result.current.DefaultEnabled, true);
-            assert.equal(result.current.AllowEnableCalls, true);
+            successResult = await CallsActions.loadConfig('server1', false, 'Server Switch');
         });
+        expect(successResult!.data).toBeDefined();
+        expect(mockClient.getCallsConfig).toHaveBeenCalledWith('Server Switch');
+        assert.equal(result.current.DefaultEnabled, true);
+        assert.equal(result.current.AllowEnableCalls, true);
 
         // Test successful retrival from cache
         await act(async () => {
             expect(mockClient.getCallsConfig).toHaveBeenCalledTimes(1);
-            const successResult = await CallsActions.loadConfig('server1', false, 'Server Switch');
+            successResult = await CallsActions.loadConfig('server1', false, 'Server Switch');
             expect(successResult.data).toBeDefined();
             expect(mockClient.getCallsConfig).toHaveBeenCalledTimes(1);
         });
@@ -500,18 +787,32 @@ describe('Actions.Calls', () => {
         expect(forceLogout).toHaveBeenCalledWith('server1', forceLogoutError);
     });
 
+    it('loadConfig keeps the cached version when the version fetch returns none', async () => {
+        act(() => {
+            setCallsConfig('server1', {...DefaultCallsConfig, version: {version: '2.0.0'}});
+        });
+        mockClient.getVersion.mockReturnValueOnce({});
+
+        await act(async () => {
+            await CallsActions.loadConfig('server1', true);
+        });
+
+        expect(getCallsConfig('server1').version).toStrictEqual({version: '2.0.0'});
+    });
+
     it('enableChannelCalls', async () => {
         const {result} = renderHook(() => useCallsState('server1'));
 
         // Test successful case
         assert.equal(result.current.enabled['channel-1'], undefined);
         mockClient.enableChannelCalls.mockReturnValueOnce({enabled: true});
+        let enableResult: Awaited<ReturnType<typeof CallsActions.enableChannelCalls>>;
         await act(async () => {
-            const successResult = await CallsActions.enableChannelCalls('server1', 'channel-1', true);
-            expect(successResult).toEqual({});
-            expect(mockClient.enableChannelCalls).toHaveBeenCalledWith('channel-1', true);
-            assert.equal(result.current.enabled['channel-1'], true);
+            enableResult = await CallsActions.enableChannelCalls('server1', 'channel-1', true);
         });
+        expect(enableResult!).toEqual({});
+        expect(mockClient.enableChannelCalls).toHaveBeenCalledWith('channel-1', true);
+        assert.equal(result.current.enabled['channel-1'], true);
 
         // Test error case
         mockClient.enableChannelCalls.mockRejectedValueOnce(forceLogoutError);
@@ -732,6 +1033,38 @@ describe('Actions.Calls', () => {
             expect(result).toEqual({handled: true});
         });
 
+        it('should open the call screen when starting a DM call, before it has connected', async () => {
+            const getCurrentUser = require('@queries/servers/user').getCurrentUser;
+            getCurrentUser.mockResolvedValue({id: 'myUserId', roles: 'system_user'});
+            jest.mocked(getChannelById).mockResolvedValue(TestHelper.fakeChannelModel({type: General.DM_CHANNEL}));
+            act(() => {
+                setCallsState('server1', {...DefaultCallsState, myUserId: 'myUserId'});
+                setCallsConfig('server1', {...DefaultCallsConfig, DefaultEnabled: true});
+            });
+
+            const result = await CallsActions.handleCallsSlashCommand('/call start', 'server1', 'channel1', General.DM_CHANNEL, '', 'myUserId', intl);
+
+            expect(result).toEqual({handled: true});
+            expect(router.push).toHaveBeenCalledWith(expect.objectContaining({pathname: '/(authenticated)/call'}));
+            expect(getCurrentCall()?.startedByMe).toBe(true);
+        });
+
+        it('should tear the call down again when a DM call cannot be started', async () => {
+            // Calls isn't enabled for this user, so doJoinCall bails after the call screen is open.
+            const getCurrentUser = require('@queries/servers/user').getCurrentUser;
+            getCurrentUser.mockResolvedValue({id: 'myUserId', roles: 'system_user'});
+            jest.mocked(getChannelById).mockResolvedValue(TestHelper.fakeChannelModel({type: General.DM_CHANNEL}));
+            act(() => {
+                setCallsState('server1', {...DefaultCallsState, myUserId: 'myUserId'});
+                setCallsConfig('server1', {...DefaultCallsConfig, DefaultEnabled: false});
+            });
+
+            await CallsActions.handleCallsSlashCommand('/call start', 'server1', 'channel1', General.DM_CHANNEL, '', 'myUserId', intl);
+
+            expect(router.push).toHaveBeenCalledWith(expect.objectContaining({pathname: '/(authenticated)/call'}));
+            expect(getCurrentCall()).toBeNull();
+        });
+
         it('should handle start command with group calls disabled', async () => {
             act(() => {
                 setCallsConfig('server1', {...DefaultCallsConfig, DefaultEnabled: false, AllowEnableCalls: false});
@@ -759,7 +1092,7 @@ describe('Actions.Calls', () => {
 
         it('should handle leave command when in call', async () => {
             act(() => {
-                newCurrentCall('server1', 'channel1', 'user1');
+                newCurrentCall('server1', 'channel1', 'user1', CallsTransport.Rtcd);
             });
 
             const result = await CallsActions.handleCallsSlashCommand('/call leave', 'server1', 'channel1', 'O', '', 'user1', intl);
@@ -775,7 +1108,7 @@ describe('Actions.Calls', () => {
         describe('recording commands', () => {
             beforeEach(() => {
                 act(() => {
-                    newCurrentCall('server1', 'channel1', 'user1');
+                    newCurrentCall('server1', 'channel1', 'user1', CallsTransport.Rtcd);
                 });
             });
 
@@ -823,8 +1156,7 @@ describe('Actions.Calls', () => {
                         roles: 'system_admin',
                     });
 
-                    const getChannelById = require('@queries/servers/channel').getChannelById;
-                    getChannelById.mockResolvedValueOnce({
+                    (getChannelById as jest.Mock).mockResolvedValueOnce({
                         id: 'channel1',
                         type: 'O',
                         displayName: 'Test Channel',
@@ -972,6 +1304,7 @@ describe('Actions.Calls', () => {
         });
 
         // Test successful case
+        let loadCallResult: Awaited<ReturnType<typeof CallsActions.loadCallForChannel>>;
         await act(async () => {
             mockClient.getCallForChannel.mockReturnValueOnce({
                 call: {
@@ -986,12 +1319,12 @@ describe('Actions.Calls', () => {
                     ],
                 },
                 enabled: true});
-            const successResult = await CallsActions.loadCallForChannel('server1', 'channel-1');
-            expect(successResult.data).toBeDefined();
-            expect(mockClient.getCallForChannel).toHaveBeenCalled();
-            assert.equal((result.current[0].calls as Dictionary<Call>)['channel-1'].channelId, 'channel-1');
-            assert.equal((result.current[0].enabled as Dictionary<boolean>)['channel-1'], true);
+            loadCallResult = await CallsActions.loadCallForChannel('server1', 'channel-1');
         });
+        expect(loadCallResult!.data).toBeDefined();
+        expect(mockClient.getCallForChannel).toHaveBeenCalled();
+        assert.equal((result.current[0].calls as Dictionary<Call>)['channel-1'].channelId, 'channel-1');
+        assert.equal((result.current[0].enabled as Dictionary<boolean>)['channel-1'], true);
 
         // Test error case
         mockClient.getCallForChannel.mockRejectedValueOnce(forceLogoutError);
@@ -1000,6 +1333,53 @@ describe('Actions.Calls', () => {
             const errorResult = await CallsActions.loadCallForChannel('server1', 'channel-1');
             expect(errorResult.error).toBe(forceLogoutError);
             expect(forceLogout).toHaveBeenCalledWith('server1', forceLogoutError);
+        });
+    });
+
+    describe('on a LiveKit current call', () => {
+        const roomSessions = {
+            'room-session': {sessionId: 'room-session', userId: 'user-2', muted: false, raisedHand: 0},
+        };
+
+        beforeEach(() => {
+            act(() => {
+                setCurrentCall({...DefaultCurrentCall, serverUrl: 'server1', channelId: 'channel-1', myUserId: 'userId1', sessions: roomSessions, transport: CallsTransport.LiveKit});
+            });
+        });
+
+        afterEach(() => {
+            act(() => {
+                setCurrentCall(null);
+            });
+        });
+
+        it('should keep the room sessions when loading the channel call', async () => {
+            mockClient.getCallForChannel.mockReturnValueOnce({
+                call: {id: 'call-1', sessions: [{session_id: 'stale-session', user_id: 'user-1', unmuted: false, raised_hand: 0}], start_at: 123, thread_id: 'thread-1'},
+                enabled: true,
+            });
+
+            await act(async () => {
+                await CallsActions.loadCallForChannel('server1', 'channel-1');
+            });
+
+            expect(getCallsState('server1').calls['channel-1'].sessions).toEqual(roomSessions);
+            expect(getCurrentCall()?.sessions).toEqual(roomSessions);
+        });
+
+        it('should keep the room sessions when loading all calls', async () => {
+            (mockClient.getCalls as jest.Mock).mockReturnValueOnce([{
+                call: {id: 'call-1', sessions: [{session_id: 'stale-session', user_id: 'user-1', unmuted: false, raised_hand: 0}], start_at: 123, thread_id: 'thread-1'},
+                channel_id: 'channel-1',
+                enabled: true,
+            }]);
+
+            await act(async () => {
+                await CallsActions.loadCalls('server1', 'userId1');
+            });
+
+            expect(getCallsState('server1').calls['channel-1'].sessions).toEqual(roomSessions);
+            expect(getCurrentCall()?.sessions).toEqual(roomSessions);
         });
     });
 
@@ -1090,18 +1470,12 @@ describe('Actions.Calls', () => {
             messages: {},
         });
 
-        const getChannelById = require('@queries/servers/channel').getChannelById;
-        const getUserById = require('@queries/servers/user').getUserById;
-        const getLicense = require('@queries/servers/system').getLicense;
-        const getConfig = require('@queries/servers/system').getConfig;
-        const queryDisplayNamePreferences = require('@queries/servers/preference').queryDisplayNamePreferences;
-
         // Test when server cannot be found.
         const result1 = await CallsActions.getEndCallMessage('server2', 'channel-1', 'user1', intl);
         expect(result1).toContain('Are you sure you want to end the call?');
 
         // Test regular channel
-        getChannelById.mockResolvedValueOnce({
+        (getChannelById as jest.Mock).mockResolvedValueOnce({
             id: 'channel-1',
             type: 'O',
             displayName: 'Test Channel',
@@ -1178,30 +1552,14 @@ describe('Actions.Calls', () => {
         });
 
         // Test DM channel
-        getChannelById.mockResolvedValueOnce({
+        (getChannelById as jest.Mock).mockResolvedValueOnce({
             id: 'channel-2',
             type: 'D',
-            name: 'user1__user2',
             displayName: 'User Two',
         });
 
-        getUserById.mockResolvedValueOnce({
-            id: 'user2',
-            username: 'user2',
-            firstName: 'User',
-            lastName: 'Two',
-        });
-
-        getLicense.mockResolvedValueOnce({});
-        getConfig.mockResolvedValueOnce({
-            TeammateNameDisplay: 'username',
-        });
-        queryDisplayNamePreferences.mockReturnValueOnce({
-            fetch: () => Promise.resolve([]),
-        });
-
         const result3 = await CallsActions.getEndCallMessage('server1', 'channel-2', 'user1', intl);
-        expect(result3).toBe('Are you sure you want to end the call with user2?');
+        expect(result3).toBe('Are you sure you want to end the call with User Two?');
     });
 
     it('endCall', async () => {
@@ -1217,9 +1575,38 @@ describe('Actions.Calls', () => {
         expect(forceLogout).toHaveBeenCalledWith('server1', forceLogoutError);
     });
 
-    it('setPreferredAudioRoute', async () => {
-        await CallsActions.setPreferredAudioRoute(AudioDevice.Speakerphone);
-        expect(InCallManager.chooseAudioRoute).toHaveBeenCalledWith('SPEAKER_PHONE');
+    it('should not pin the route when setPreferredAudioRoute is called without fromUser', async () => {
+        addFakeCall('server1', 'channel-id');
+        await act(async () => {
+            await CallsActions.joinCall('server1', {type: 'channel', channelID: 'channel-id'}, 'myUserId', true, createIntl({locale: 'en', messages: {}}));
+            newCurrentCall('server1', 'channel-id', 'myUserId', CallsTransport.Rtcd);
+        });
+
+        await CallsActions.setPreferredAudioRoute(AudioDevice.Bluetooth);
+
+        expect(CallsNative.setAudioRoute).toHaveBeenCalledWith('BLUETOOTH');
+        expect(getConnectionForTesting()?.setUserSelectedAudioRoute).not.toHaveBeenCalled();
+
+        await act(async () => {
+            CallsActions.leaveCall();
+        });
+    });
+
+    it('should pin the route when setPreferredAudioRoute is called with fromUser', async () => {
+        addFakeCall('server1', 'channel-id');
+        await act(async () => {
+            await CallsActions.joinCall('server1', {type: 'channel', channelID: 'channel-id'}, 'myUserId', true, createIntl({locale: 'en', messages: {}}));
+            newCurrentCall('server1', 'channel-id', 'myUserId', CallsTransport.Rtcd);
+        });
+
+        await CallsActions.setPreferredAudioRoute(AudioDevice.Bluetooth, true);
+
+        expect(CallsNative.setAudioRoute).toHaveBeenCalledWith('BLUETOOTH');
+        expect(getConnectionForTesting()?.setUserSelectedAudioRoute).toHaveBeenCalledWith(AudioDevice.Bluetooth);
+
+        await act(async () => {
+            CallsActions.leaveCall();
+        });
     });
 
     it('initializeVoiceTrack', async () => {
@@ -1227,11 +1614,11 @@ describe('Actions.Calls', () => {
         addFakeCall('server1', 'channel-id');
 
         await act(async () => {
-            await CallsActions.joinCall('server1', 'channel-id', 'myUserId', true, createIntl({
+            await CallsActions.joinCall('server1', {type: 'channel', channelID: 'channel-id'}, 'myUserId', true, createIntl({
                 locale: 'en',
                 messages: {},
             }));
-            newCurrentCall('server1', 'channel-id', 'myUserId');
+            newCurrentCall('server1', 'channel-id', 'myUserId', CallsTransport.Rtcd);
         });
 
         CallsActions.initializeVoiceTrack();
@@ -1243,11 +1630,11 @@ describe('Actions.Calls', () => {
         addFakeCall('server1', 'channel-id');
 
         await act(async () => {
-            await CallsActions.joinCall('server1', 'channel-id', 'myUserId', true, createIntl({
+            await CallsActions.joinCall('server1', {type: 'channel', channelID: 'channel-id'}, 'myUserId', true, createIntl({
                 locale: 'en',
                 messages: {},
             }));
-            newCurrentCall('server1', 'channel-id', 'myUserId');
+            newCurrentCall('server1', 'channel-id', 'myUserId', CallsTransport.Rtcd);
         });
 
         const emoji = {name: 'smile', unified: '1f604'};
@@ -1271,16 +1658,16 @@ describe('Actions.Calls', () => {
         intl.formatMessage = jest.fn();
 
         await act(async () => {
-            response = await CallsActions.joinCall('server1', 'channel-id', 'myUserId', true, intl);
+            response = await CallsActions.joinCall('server1', {type: 'channel', channelID: 'channel-id'}, 'myUserId', true, intl);
 
-            // manually call newCurrentConnection because newConnection is mocked
-            newCurrentCall('server1', 'channel-id', 'myUserId');
+            // manually call newCurrentConnection because newCallConnection is mocked
+            newCurrentCall('server1', 'channel-id', 'myUserId', CallsTransport.Rtcd);
         });
 
         assert.equal(response!.data, 'channel-id');
         assert.equal((result.current[1] as CurrentCall).channelId, 'channel-id');
-        expect(newConnection).toHaveBeenCalled();
-        expect(newConnection.mock.calls[0][1]).toBe('channel-id');
+        expect(newCallConnection).toHaveBeenCalled();
+        expect(newCallConnection.mock.calls[0][1]).toEqual({type: 'channel', channelID: 'channel-id'});
         expect(updateThreadFollowing).toHaveBeenCalled();
 
         await act(async () => {
@@ -1314,16 +1701,16 @@ describe('Actions.Calls', () => {
         intl.formatMessage = jest.fn();
 
         await act(async () => {
-            response = await CallsActions.joinCall('server1', 'channel-id', 'myUserId', true, intl);
+            response = await CallsActions.joinCall('server1', {type: 'channel', channelID: 'channel-id'}, 'myUserId', true, intl);
 
-            // manually call newCurrentConnection because newConnection is mocked
-            newCurrentCall('server1', 'channel-id', 'myUserId');
+            // manually call newCurrentConnection because newCallConnection is mocked
+            newCurrentCall('server1', 'channel-id', 'myUserId', CallsTransport.Rtcd);
         });
 
         assert.equal(response!.data, 'channel-id');
         assert.equal((result.current[1] as CurrentCall).channelId, 'channel-id');
-        expect(newConnection).toHaveBeenCalled();
-        expect(newConnection.mock.calls[0][1]).toBe('channel-id');
+        expect(newCallConnection).toHaveBeenCalled();
+        expect(newCallConnection.mock.calls[0][1]).toEqual({type: 'channel', channelID: 'channel-id'});
         expect(updateThreadFollowing).toHaveBeenCalled();
 
         await act(async () => {
@@ -1357,16 +1744,16 @@ describe('Actions.Calls', () => {
         intl.formatMessage = jest.fn();
 
         await act(async () => {
-            response = await CallsActions.joinCall('server1', 'channel-id', 'myUserId', true, intl);
+            response = await CallsActions.joinCall('server1', {type: 'channel', channelID: 'channel-id'}, 'myUserId', true, intl);
 
-            // manually call newCurrentConnection because newConnection is mocked
-            newCurrentCall('server1', 'channel-id', 'myUserId');
+            // manually call newCurrentConnection because newCallConnection is mocked
+            newCurrentCall('server1', 'channel-id', 'myUserId', CallsTransport.Rtcd);
         });
 
         assert.equal(response!.data, 'channel-id');
         assert.equal((result.current[1] as CurrentCall).channelId, 'channel-id');
-        expect(newConnection).toHaveBeenCalled();
-        expect(newConnection.mock.calls[0][1]).toBe('channel-id');
+        expect(newCallConnection).toHaveBeenCalled();
+        expect(newCallConnection.mock.calls[0][1]).toEqual({type: 'channel', channelID: 'channel-id'});
         expect(updateThreadFollowing).toHaveBeenCalled();
 
         await act(async () => {
@@ -1374,5 +1761,91 @@ describe('Actions.Calls', () => {
         });
 
         expect(errorAlert).toHaveBeenCalled();
+    });
+
+    describe('joinCallAndOpenCallScreen', () => {
+        const intl = createIntl({locale: 'en', messages: {}});
+        const theirCall: Call = {
+            id: 'call-id',
+            sessions: {
+                theirSession: {sessionId: 'theirSession', userId: 'caller-id', muted: false, raisedHand: 0},
+            },
+            channelId: 'channel-id',
+            startTime: 100,
+            screenOn: '',
+            threadId: 'thread-id',
+            ownerId: 'caller-id',
+            hostId: 'caller-id',
+            dismissed: {},
+        };
+
+        beforeEach(async () => {
+            jest.mocked(getChannelById).mockResolvedValue(TestHelper.fakeChannelModel({type: General.DM_CHANNEL}));
+            require('@queries/servers/user').getCurrentUser.mockResolvedValue({id: 'myUserId', roles: 'system_user'});
+
+            // Let whatever the tests above left in flight settle first, then seed a channel with a
+            // call somebody else started: the join path treats a call the store doesn't know about
+            // as a new one, which is a different flow entirely.
+            await act(async () => {});
+            act(() => {
+                setCurrentCall(null);
+                setCallsState('server1', {...DefaultCallsState, myUserId: 'myUserId', calls: {'channel-id': theirCall}});
+                setChannelsWithCalls('server1', {'channel-id': true});
+            });
+        });
+
+        it('should open the call screen once we are in the call', async () => {
+            const joined = await joinCallAndOpenCallScreen(intl, 'server1', 'channel-id');
+
+            assert.equal(joined, true);
+            expect(router.push).toHaveBeenCalledWith(expect.objectContaining({pathname: '/(authenticated)/call'}));
+
+            // The cards that render a 'Joining...' state have to be let go of again.
+            assert.equal(State.getGlobalCallsState().joiningChannelId, null);
+        });
+
+        it('should leave the call screen closed when the join never happened', async () => {
+            // No current user means doJoinCall bails before connecting.
+            require('@queries/servers/user').getCurrentUser.mockResolvedValue(undefined);
+
+            const joined = await joinCallAndOpenCallScreen(intl, 'server1', 'channel-id');
+
+            assert.equal(joined, false);
+            expect(router.push).not.toHaveBeenCalled();
+            assert.equal(State.getGlobalCallsState().joiningChannelId, null);
+        });
+    });
+});
+
+describe('switchToCallThread', () => {
+    const serverUrl = 'switch-to-call-thread.test.com';
+    const rootId = 'thread-1';
+
+    beforeEach(async () => {
+        jest.clearAllMocks();
+        await DatabaseManager.init([serverUrl]);
+
+        // Exercise the same-server branch, which is the path the call screen takes.
+        jest.spyOn(DatabaseManager, 'getActiveServerUrl').mockResolvedValue(serverUrl);
+    });
+
+    afterEach(async () => {
+        jest.restoreAllMocks();
+        EphemeralStore.setCurrentThreadId('');
+        await DatabaseManager.destroyServerDatabase(serverUrl);
+    });
+
+    it('should mark the call thread as the one being viewed before navigating', async () => {
+        // Websocket viewed_at handling, push notification suppression and cache cleanup all
+        // read this. Without it they keep acting on the previously opened thread - MM-70539.
+        EphemeralStore.setCurrentThreadId('previously-open-thread');
+
+        await switchToCallThread(serverUrl, rootId, 'Call Thread');
+
+        expect(dismissAllRoutesAndPopToScreen).toHaveBeenCalledWith(
+            Screens.THREAD,
+            expect.objectContaining({rootId}),
+        );
+        expect(EphemeralStore.getCurrentThreadId()).toBe(rootId);
     });
 });

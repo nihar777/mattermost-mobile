@@ -1,93 +1,61 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import {Navigation} from 'react-native-navigation';
-
 import {doPing} from '@actions/remote/general';
-import {fetchConfigAndLicense} from '@actions/remote/systems';
-import {Screens} from '@constants';
+import {fetchConfigAndLicense, type ConfigAndLicenseRequest} from '@actions/remote/systems';
 import DatabaseManager from '@database/manager';
+import {getPreauthSecret} from '@init/credentials';
 import SecurityManager from '@managers/security_manager';
 import WebsocketManager from '@managers/websocket_manager';
-import {getServer, getServerByIdentifier, queryAllActiveServers} from '@queries/app/servers';
-import {getSecurityConfig} from '@queries/servers/system';
+import {getServer, getServerByIdentifier} from '@queries/app/servers';
 import {logError} from '@utils/log';
 import {canReceiveNotifications} from '@utils/push_proxy';
-import {alertServerAlreadyConnected, alertServerError, loginToServer} from '@utils/server';
+import {alertServerAlreadyConnected, alertServerError} from '@utils/server';
 
 import type {IntlShape} from 'react-intl';
 
-export async function initializeSecurityManager() {
-    const servers = await queryAllActiveServers()?.fetch();
-    if (!servers?.length) {
-        return;
-    }
-
-    const promises: Array<Promise<[string, SecurityClientConfig | null]>> = [];
-    const results: Record<string, SecurityClientConfig> = {};
-
-    for (const server of servers) {
-        try {
-            const {database} = DatabaseManager.getServerDatabaseAndOperator(server.url);
-            const promise = getSecurityConfig(database).then((config) => [server.url, config] as [string, SecurityClientConfig | null]);
-            promises.push(promise);
-        } catch (error) {
-            logError('initializeSecurityManager', error);
-            continue;
-        }
-    }
-
-    const resolvedConfigs = await Promise.allSettled(promises);
-
-    for (const result of resolvedConfigs) {
-        if (result.status === 'fulfilled') {
-            const [url, config] = result.value;
-            if (config && Object.keys(config).length > 0) { // Ensure the object is not empty
-                results[url] = config;
-            }
-        }
-    }
-
-    const serverUrl = await DatabaseManager.getActiveServerUrl();
-    SecurityManager.init(results, serverUrl);
-}
-
-export async function switchToServer(serverUrl: string, theme: Theme, intl: IntlShape, callback?: () => void) {
+export async function switchToServer(serverUrl: string, callback?: () => void) {
     const server = await getServer(serverUrl);
     if (!server) {
         logError(`Switch to Server with url ${serverUrl} not found`);
+        callback?.();
         return;
     }
     if (server.lastActiveAt) {
         const isJailbroken = await SecurityManager.isDeviceJailbroken(server.url);
         if (isJailbroken) {
+            callback?.();
             return;
         }
 
         const authenticated = await SecurityManager.authenticateWithBiometricsIfNeeded(server.url);
         if (authenticated) {
-            Navigation.updateProps(Screens.HOME, {extra: undefined});
-            DatabaseManager.setActiveServerDatabase(server.url);
-            SecurityManager.setActiveServer(server.url);
+            DatabaseManager.setActiveServerDatabase(server.url, {
+                skipJailbreakCheck: true,
+                skipBiometricCheck: true,
+                skipMAMEnrollmentCheck: false,
+                forceSwitch: false,
+            });
             WebsocketManager.initializeClient(server.url, 'Server Switch');
         }
-        return;
     }
-
-    switchToServerAndLogin(serverUrl, theme, intl, callback);
+    callback?.();
 }
 
-export async function switchToServerAndLogin(serverUrl: string, theme: Theme, intl: IntlShape, callback?: () => void) {
+export async function switchToServerAndLogin(serverUrl: string, intl: IntlShape, callback: (data?: ConfigAndLicenseRequest) => void) {
     const server = await getServer(serverUrl);
     if (!server) {
         logError(`Switch to Server with url ${serverUrl} not found`);
         return;
     }
 
-    const result = await doPing(server.url, true);
+    // Retrieve pre-auth secret from keychain if it exists
+    const preauthSecret = await getPreauthSecret(server.url);
+
+    const result = await doPing(server.url, true, 5000, preauthSecret);
     if (result.error) {
         alertServerError(intl, result.error);
-        callback?.();
+        callback();
         return;
     }
 
@@ -120,6 +88,11 @@ export async function switchToServerAndLogin(serverUrl: string, theme: Theme, in
 
     if (authenticated) {
         canReceiveNotifications(server.url, result.canReceiveNotifications as string, intl);
-        loginToServer(theme, server.url, server.displayName, data.config!, data.license!);
+
+        // Login/SSO resolve the pre-auth secret from the keychain by serverUrl.
+        callback(data);
+        return;
     }
+
+    callback();
 }

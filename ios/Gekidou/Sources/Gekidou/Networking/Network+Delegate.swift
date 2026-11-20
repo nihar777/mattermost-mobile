@@ -1,5 +1,4 @@
 import Foundation
-import os.log
 
 extension Network: URLSessionDelegate, URLSessionTaskDelegate {
     typealias ChallengeEvaluation = (disposition: URLSession.AuthChallengeDisposition, credential: URLCredential?, error: NetworkError?)
@@ -21,11 +20,7 @@ extension Network: URLSessionDelegate, URLSessionTaskDelegate {
         }
         
         if let error = evaluation.error {
-            os_log("Gekidou: %{public}@",
-                   log: .default,
-                   type: .error,
-                   error.localizedDescription
-            )
+            GekidouLogger.shared.log(.error, "Gekidou Network: %{public}@", error.localizedDescription)
         }
         
         completionHandler(evaluation.disposition, evaluation.credential)
@@ -66,23 +61,13 @@ extension Network: URLSessionDelegate, URLSessionTaskDelegate {
             
             return (.useCredential, URLCredential(trust: trust), nil)
         } catch {
-            os_log("Gekidou: %{public}@",
-                   log: .default,
-                   type: .error,
-                   error.localizedDescription
-            )
+            GekidouLogger.shared.log(.error, "Gekidou Network: %{public}@", error.localizedDescription)
             return (.cancelAuthenticationChallenge, nil, error as? NetworkError)
         }
     }
     
     private func getServerTrustCertificates(_ trust: SecTrust) -> [SecCertificate] {
-        if #available(iOS 15, macOS 12, tvOS 15, watchOS 8, visionOS 1, *) {
-            return (SecTrustCopyCertificateChain(trust) as? [SecCertificate]) ?? []
-        } else {
-            return (0..<SecTrustGetCertificateCount(trust)).compactMap { index in
-                SecTrustGetCertificateAtIndex(trust, index)
-            }
-        }
+        return (SecTrustCopyCertificateChain(trust) as? [SecCertificate]) ?? []
     }
     
     private func performDefaultValidation(_ trust: SecTrust) throws {

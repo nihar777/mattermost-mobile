@@ -4,12 +4,12 @@
 /* eslint-disable max-lines */
 import {DeviceEventEmitter} from 'react-native';
 
-import {addChannelToDefaultCategory, handleConvertedGMCategories, storeCategories} from '@actions/local/category';
-import {markChannelAsViewed, removeCurrentUserFromChannel, setChannelDeleteAt, storeAllMyChannels, storeMyChannelsForTeam, switchToChannel} from '@actions/local/channel';
+import {addChannelToDefaultCategory, removeChannelFromManagedCategoryIfNeeded, handleConvertedGMCategories, storeCategories} from '@actions/local/category';
+import {markChannelAsViewed, removeCurrentUserFromChannel, setChannelDeleteAt, storeAllMyChannels, storeMyChannelsForTeam, switchToChannel, deletePostsForChannel} from '@actions/local/channel';
 import {switchToGlobalDrafts} from '@actions/local/draft';
 import {switchToGlobalThreads} from '@actions/local/thread';
 import {loadCallForChannel} from '@calls/actions/calls';
-import {DeepLink, Events, General, Preferences, Screens} from '@constants';
+import {DeepLink, Events, General, Preferences, Screens, ServerErrors} from '@constants';
 import DatabaseManager from '@database/manager';
 import {privateChannelJoinPrompt} from '@helpers/api/channel';
 import {getTeammateNameDisplaySetting} from '@helpers/api/preference';
@@ -18,21 +18,24 @@ import NetworkManager from '@managers/network_manager';
 import {getActiveServer} from '@queries/app/servers';
 import {prepareMyChannelsForTeam, getChannelById, getChannelByName, getMyChannel, getChannelInfo, queryMyChannelSettingsByIds, getMembersCountByChannelsId, deleteChannelMembership, queryChannelsById} from '@queries/servers/channel';
 import {queryDisplayNamePreferences} from '@queries/servers/preference';
-import {getCommonSystemValues, getConfig, getCurrentChannelId, getCurrentTeamId, getCurrentUserId, getLicense, setCurrentChannelId, setCurrentTeamAndChannelId} from '@queries/servers/system';
+import {canViewArchivedChannels, getCommonSystemValues, getConfig, getCurrentChannelId, getCurrentTeamId, getCurrentUserId, getLicense, setCurrentChannelId, setCurrentTeamAndChannelId} from '@queries/servers/system';
 import {getNthLastChannelFromTeam, getMyTeamById, getTeamByName, queryMyTeams, removeChannelFromTeamHistory, getTeamById} from '@queries/servers/team';
 import {getIsCRTEnabled} from '@queries/servers/thread';
 import {getCurrentUser} from '@queries/servers/user';
-import {dismissAllModalsAndPopToRoot} from '@screens/navigation';
+import {navigateToRoot} from '@screens/navigation';
 import EphemeralStore from '@store/ephemeral_store';
 import {setTeamLoading} from '@store/team_load_store';
 import {generateChannelNameFromDisplayName, getDirectChannelName, isDMorGM} from '@utils/channel';
-import {getFullErrorMessage} from '@utils/errors';
+import {expireChannelDecisionsOnDenial} from '@utils/channel_policy';
+import {getFullErrorMessage, getServerError, isErrorWithStatusCode} from '@utils/errors';
 import {isTablet} from '@utils/helpers';
 import {logDebug, logError, logInfo} from '@utils/log';
 import {showMuteChannelSnackbar} from '@utils/snack_bar';
 import {displayGroupMessageName, displayUsername} from '@utils/user';
 
+import {addChannelToManagedCategoryIfNeeded, fetchCategories} from './category';
 import {fetchChannelBookmarks} from './channel_bookmark';
+import {fetchChannelAttributeValues} from './classification';
 import {fetchGroupsForChannelIfConstrained} from './groups';
 import {fetchPostsForChannel} from './post';
 import {openChannelIfNeeded, savePreference} from './preference';
@@ -44,6 +47,8 @@ import {fetchProfilesInChannel, fetchProfilesInGroupChannels, fetchProfilesPerCh
 import type {Model} from '@nozbe/watermelondb';
 import type ChannelModel from '@typings/database/models/servers/channel';
 import type {IntlShape} from 'react-intl';
+
+const HTTP_NOT_FOUND = 404;
 
 export type MyChannelsRequest = {
     teamId?: string;
@@ -58,6 +63,8 @@ export type ChannelMembersRequest = {
     error?: unknown;
 }
 
+const channelAccessDenialsInFlight = new Set<string>();
+
 export async function removeMemberFromChannel(serverUrl: string, channelId: string, userId: string) {
     try {
         const {operator} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
@@ -70,6 +77,7 @@ export async function removeMemberFromChannel(serverUrl: string, channelId: stri
     } catch (error) {
         logDebug('error on removeMemberFromChannel', getFullErrorMessage(error));
         forceLogoutIfNecessary(serverUrl, error);
+        expireChannelDecisionsOnDenial(serverUrl, channelId, error);
         return {error};
     }
 }
@@ -115,6 +123,7 @@ export async function updateChannelMemberSchemeRoles(serverUrl: string, channelI
     } catch (error) {
         logDebug('error on updateChannelMemberSchemeRoles', getFullErrorMessage(error));
         forceLogoutIfNecessary(serverUrl, error);
+        expireChannelDecisionsOnDenial(serverUrl, channelId, error);
         return {error};
     }
 }
@@ -184,6 +193,7 @@ export async function addMembersToChannel(serverUrl: string, channelId: string, 
     } catch (error) {
         logDebug('error on addMembersToChannel', getFullErrorMessage(error));
         forceLogoutIfNecessary(serverUrl, error);
+        expireChannelDecisionsOnDenial(serverUrl, channelId, error);
         return {error};
     }
 }
@@ -207,7 +217,7 @@ export async function fetchChannelByName(serverUrl: string, teamId: string, chan
     }
 }
 
-export async function createChannel(serverUrl: string, displayName: string, purpose: string, header: string, type: ChannelType) {
+export async function createChannel(serverUrl: string, displayName: string, purpose: string, header: string, type: ChannelType, propertyValues?: PropertyValuePatchItem[]) {
     try {
         EphemeralStore.creatingChannel = true;
         const client = NetworkManager.getClient(serverUrl);
@@ -225,7 +235,7 @@ export async function createChannel(serverUrl: string, displayName: string, purp
             type,
         } as Channel;
 
-        const channelData = await client.createChannel(channel);
+        const channelData = await client.createChannel(channel, propertyValues);
 
         const member = await client.getChannelMember(channelData.id, currentUserId);
 
@@ -272,23 +282,27 @@ export async function patchChannel(serverUrl: string, channelId: string, channel
         }
 
         const channel = await getChannelById(database, channelData.id);
-        if (channel && (channel.displayName !== channelData.display_name || channel.type !== channelData.type)) {
+        if (channel && (channel.displayName !== channelData.display_name || channel.type !== channelData.type || channel.autotranslation !== channelData.autotranslation)) {
             channel.prepareUpdate((v) => {
                 // DM and GM display names cannot be patched and are formatted client-side; do not overwrite
                 if (channelData.type !== General.DM_CHANNEL && channelData.type !== General.GM_CHANNEL) {
                     v.displayName = channelData.display_name;
                 }
                 v.type = channelData.type;
+                if (channelData.autotranslation !== undefined) {
+                    v.autotranslation = channelData.autotranslation;
+                }
             });
             models.push(channel);
         }
         if (models?.length) {
-            await operator.batchRecords(models.flat(), 'patchChannel');
+            await operator.batchRecords(models, 'patchChannel');
         }
         return {channel: channelData};
     } catch (error) {
         logDebug('error on patchChannel', getFullErrorMessage(error));
         forceLogoutIfNecessary(serverUrl, error);
+        expireChannelDecisionsOnDenial(serverUrl, channelId, error);
         return {error};
     }
 }
@@ -307,7 +321,13 @@ export async function leaveChannel(serverUrl: string, channelId: string) {
             return {error: 'current user not found'};
         }
 
+        const channelBeforeLeave = await getChannelById(database, channelId);
+
         await client.removeFromChannel(user.id, channelId);
+
+        if (channelBeforeLeave?.teamId) {
+            await removeChannelFromManagedCategoryIfNeeded(serverUrl, channelBeforeLeave.teamId, channelId);
+        }
 
         if (user.isGuest) {
             const {models: updateVisibleModels} = await updateUsersNoLongerVisible(serverUrl, true);
@@ -438,7 +458,6 @@ export async function fetchAllMyChannelsForAllTeams(serverUrl: string, since: nu
             fetchAllMemberships(),
         ];
         const [channels, memberships] = await Promise.all(promises);
-        const categoriesPromises = [];
 
         const teamIdsSet = channels.reduce<Set<string>>((set, c) => {
             if (c.team_id) {
@@ -447,15 +466,9 @@ export async function fetchAllMyChannelsForAllTeams(serverUrl: string, since: nu
             return set;
         }, new Set());
 
-        for (const teamId of teamIdsSet) {
-            categoriesPromises.push(client.getCategories('me', teamId, groupLabel));
-        }
-
-        const categories: CategoryWithChannels[] = [];
-        const results = await Promise.all(categoriesPromises);
-        for (const result of results) {
-            categories.push(...result.categories);
-        }
+        const teamIds = Array.from(teamIdsSet);
+        const categoriesResults = await Promise.all(teamIds.map((tid) => fetchCategories(serverUrl, tid, false, true, groupLabel)));
+        const categories: CategoryWithChannels[] = categoriesResults.flatMap((r) => r.categories ?? []);
 
         if (!fetchOnly) {
             const {models: chModels} = await storeAllMyChannels(serverUrl, channels, memberships, isCRTEnabled, true);
@@ -489,10 +502,10 @@ export async function fetchMyChannelsForTeam(
         }
         const client = NetworkManager.getClient(serverUrl);
         const {operator} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
-        const [allChannels, channelMemberships, categoriesWithOrder] = await Promise.all([
+        const [allChannels, channelMemberships, categoriesResult] = await Promise.all([
             client.getMyChannels(teamId, includeDeleted, since, groupLabel),
             client.getMyChannelMembers(teamId, groupLabel),
-            client.getCategories('me', teamId, groupLabel),
+            fetchCategories(serverUrl, teamId, false, true, groupLabel),
         ]);
 
         let channels = allChannels;
@@ -502,7 +515,7 @@ export async function fetchMyChannelsForTeam(
         }
 
         const channelIds = new Set<string>(channels.map((c) => c.id));
-        const {categories} = categoriesWithOrder;
+        const categories = categoriesResult.categories ?? [];
         memberships = memberships.reduce((result: ChannelMembership[], m: ChannelMembership) => {
             if (channelIds.has(m.channel_id)) {
                 result.push(m);
@@ -704,6 +717,7 @@ export async function joinChannel(serverUrl: string, teamId: string, channelId?:
                     }
                 }
             }
+            await addChannelToManagedCategoryIfNeeded(serverUrl, channel);
         }
     } catch (error) {
         logDebug('error on joinChannel', getFullErrorMessage(error));
@@ -748,6 +762,9 @@ export async function markChannelAsRead(serverUrl: string, channelId: string, up
         return {};
     } catch (error) {
         logDebug('error on markChannelAsRead', getFullErrorMessage(error));
+        if (getServerError(error) === ServerErrors.CHANNEL_ACCESS_DENIED) {
+            await handleChannelAccessDenied(serverUrl, channelId);
+        }
         return {error};
     }
 }
@@ -811,18 +828,23 @@ export async function joinIfNeededAndSwitchToChannel(
             }
         }
 
-        const channel = channelId ? await getChannelById(database, channelId) : await getChannelByName(database, teamId, channelName);
+        const channelByName = channelName ? await getChannelByName(database, teamId, channelName) : undefined;
+        const channel = channelByName || (channelId ? await getChannelById(database, channelId) : undefined);
         const isChannelMember = channel ? await getMyChannel(database, channel.id) : false;
-        if (!channelId) {
-            channelId = channel?.id || '';
+        if (channel) {
+            channelId = channel.id;
         }
 
         if (!isChannelMember) {
-            const fetchRequest = channelId ? await fetchChannelById(serverUrl, channelId) : await fetchChannelByName(serverUrl, teamId, channelName, true);
+            let fetchRequest = channelId ? await fetchChannelById(serverUrl, channelId) : await fetchChannelByName(serverUrl, teamId, channelName, true);
+            if (!fetchRequest.channel && channelId && channelName && isErrorWithStatusCode(fetchRequest.error) && fetchRequest.error.status_code === HTTP_NOT_FOUND) {
+                fetchRequest = await fetchChannelByName(serverUrl, teamId, channelName, true);
+            }
             if (!fetchRequest.channel) {
                 onError(joinedTeam, teamId);
                 return {error: fetchRequest.error || 'cannot fetch channel'};
             }
+            channelId = fetchRequest.channel.id;
             if (fetchRequest.channel.type === General.PRIVATE_CHANNEL) {
                 const {join} = await privateChannelJoinPrompt(fetchRequest.channel.display_name, intl);
                 if (!join) {
@@ -831,14 +853,12 @@ export async function joinIfNeededAndSwitchToChannel(
                 }
             }
 
-            logInfo('joining channel', fetchRequest.channel.display_name, fetchRequest.channel.id);
+            logInfo('joining channel', fetchRequest.channel.id, 'type', fetchRequest.channel.type);
             const joinRequest = await joinChannel(serverUrl, teamId, channelId, channelName, false);
             if (!joinRequest.channel) {
                 onError(joinedTeam, teamId);
                 return {error: joinRequest.error || 'no channel returned from join'};
             }
-
-            channelId = fetchRequest.channel.id;
         }
 
         await switchToChannelById(serverUrl, channelId, teamId);
@@ -847,24 +867,6 @@ export async function joinIfNeededAndSwitchToChannel(
         onError(joinedTeam, teamId);
         return {error};
     }
-}
-
-export async function goToNPSChannel(serverUrl: string) {
-    try {
-        const client = NetworkManager.getClient(serverUrl);
-        const user = await client.getUserByUsername(General.NPS_PLUGIN_BOT_USERNAME);
-        const {data, error} = await createDirectChannel(serverUrl, user.id);
-        if (error || !data) {
-            throw error || new Error('channel not found');
-        }
-        await switchToChannelById(serverUrl, data.id, data.team_id);
-    } catch (error) {
-        logDebug('error on goToNPSChannel', getFullErrorMessage(error));
-        forceLogoutIfNecessary(serverUrl, error);
-        return {error};
-    }
-
-    return {};
 }
 
 export async function createDirectChannel(serverUrl: string, userId: string, displayName = '') {
@@ -1069,7 +1071,7 @@ export async function createGroupChannel(serverUrl: string, userIds: string[]) {
                 }
 
                 models.push(...userModels);
-                operator.batchRecords(models, 'createGroupChannel');
+                await operator.batchRecords(models, 'createGroupChannel');
             }
         }
         EphemeralStore.creatingDMorGMTeammates = [];
@@ -1091,6 +1093,57 @@ export async function fetchSharedChannels(serverUrl: string, teamId: string, pag
         return {channels};
     } catch (error) {
         logDebug('error on fetchSharedChannels', getFullErrorMessage(error));
+        forceLogoutIfNecessary(serverUrl, error);
+        return {error};
+    }
+}
+
+export async function fetchRemoteClusters(serverUrl: string) {
+    try {
+        const client = NetworkManager.getClient(serverUrl);
+        const remoteClusters = await client.getRemoteClusters({
+            excludePlugins: true,
+            onlyConfirmed: true,
+        });
+        return {remoteClusters};
+    } catch (error) {
+        logDebug('error on fetchRemoteClusters', getFullErrorMessage(error));
+        forceLogoutIfNecessary(serverUrl, error);
+        return {error};
+    }
+}
+
+export async function fetchChannelSharedRemotes(serverUrl: string, channelId: string) {
+    try {
+        const client = NetworkManager.getClient(serverUrl);
+        const remotes = await client.getChannelSharedRemotes(channelId);
+        return {remotes};
+    } catch (error) {
+        logDebug('error on fetchChannelSharedRemotes', getFullErrorMessage(error));
+        forceLogoutIfNecessary(serverUrl, error);
+        return {error};
+    }
+}
+
+export async function shareChannelWithRemote(serverUrl: string, channelId: string, remoteId: string) {
+    try {
+        const client = NetworkManager.getClient(serverUrl);
+        await client.shareChannelWithRemote(channelId, remoteId);
+        return {};
+    } catch (error) {
+        logDebug('error on shareChannelWithRemote', getFullErrorMessage(error));
+        forceLogoutIfNecessary(serverUrl, error);
+        return {error};
+    }
+}
+
+export async function unshareChannelFromRemote(serverUrl: string, channelId: string, remoteId: string) {
+    try {
+        const client = NetworkManager.getClient(serverUrl);
+        await client.unshareChannelFromRemote(channelId, remoteId);
+        return {};
+    } catch (error) {
+        logDebug('error on unshareChannelFromRemote', getFullErrorMessage(error));
         forceLogoutIfNecessary(serverUrl, error);
         return {error};
     }
@@ -1147,10 +1200,12 @@ export async function switchToChannelById(serverUrl: string, channelId: string, 
         return {error: `${serverUrl} database not found`};
     }
 
+    DeviceEventEmitter.emit(Events.BLUR_AND_DISMISS_KEYBOARD);
     DeviceEventEmitter.emit(Events.CHANNEL_SWITCH, true);
 
     fetchPostsForChannel(serverUrl, channelId, false, false, groupLabel);
     fetchChannelBookmarks(serverUrl, channelId, false, groupLabel);
+    fetchChannelAttributeValues(serverUrl, channelId);
     await switchToChannel(serverUrl, channelId, teamId, skipLastUnread);
     openChannelIfNeeded(serverUrl, channelId, groupLabel);
     markChannelAsRead(serverUrl, channelId, false, groupLabel);
@@ -1243,6 +1298,77 @@ export const updateChannelNotifyProps = async (serverUrl: string, channelId: str
     }
 };
 
+export const setChannelAutotranslation = async (serverUrl: string, channelId: string, enabled: boolean) => {
+    try {
+        const client = NetworkManager.getClient(serverUrl);
+        const {database, operator} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
+
+        const channelData = await client.setChannelAutotranslation(channelId, enabled);
+        const models = [];
+
+        const channel = await getChannelById(database, channelData.id);
+        const autotranslationDisabled = channel && channel.autotranslation && !channelData.autotranslation;
+
+        if (channel && channel.autotranslation !== channelData.autotranslation) {
+            channel.prepareUpdate((v) => {
+                v.autotranslation = channelData.autotranslation ?? false;
+            });
+            models.push(channel);
+        }
+
+        if (models?.length) {
+            await operator.batchRecords(models, 'setChannelAutotranslation');
+        }
+
+        // Delete posts when autotranslation setting changes
+        if (autotranslationDisabled) {
+            await deletePostsForChannel(serverUrl, channelData.id);
+        }
+
+        return {channel: channelData};
+    } catch (error) {
+        logDebug('error on setChannelAutotranslation', getFullErrorMessage(error));
+        forceLogoutIfNecessary(serverUrl, error);
+        expireChannelDecisionsOnDenial(serverUrl, channelId, error);
+        return {error};
+    }
+};
+
+export const setMyChannelAutotranslation = async (serverUrl: string, channelId: string, enabled: boolean) => {
+    try {
+        const client = NetworkManager.getClient(serverUrl);
+        const {database, operator} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
+
+        await client.setMyChannelAutotranslation(channelId, enabled);
+        const models = [];
+
+        const myChannel = await getMyChannel(database, channelId);
+        const autotranslationChanged = myChannel && myChannel.autotranslationDisabled !== !enabled;
+
+        if (myChannel && autotranslationChanged) {
+            myChannel.prepareUpdate((v) => {
+                v.autotranslationDisabled = !enabled;
+            });
+            models.push(myChannel);
+        }
+
+        if (models?.length) {
+            await operator.batchRecords(models, 'setMyChannelAutotranslation');
+        }
+
+        // Delete posts when autotranslation setting changes
+        if (autotranslationChanged) {
+            await deletePostsForChannel(serverUrl, channelId);
+        }
+
+        return {data: true};
+    } catch (error) {
+        logDebug('error on setMyChannelAutotranslation', getFullErrorMessage(error));
+        forceLogoutIfNecessary(serverUrl, error);
+        return {error};
+    }
+};
+
 export const toggleMuteChannel = async (serverUrl: string, channelId: string, showSnackBar = false) => {
     try {
         const {database} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
@@ -1277,18 +1403,23 @@ export const archiveChannel = async (serverUrl: string, channelId: string) => {
         EphemeralStore.addArchivingChannel(channelId);
         const client = NetworkManager.getClient(serverUrl);
         const {database} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
-        const config = await getConfig(database);
+        const channelBeforeArchive = await getChannelById(database, channelId);
         await client.deleteChannel(channelId);
-        if (config?.ExperimentalViewArchivedChannels === 'true') {
+        if (await canViewArchivedChannels(database)) {
             await setChannelDeleteAt(serverUrl, channelId, Date.now());
         } else {
             removeCurrentUserFromChannel(serverUrl, channelId);
+        }
+
+        if (channelBeforeArchive?.teamId) {
+            await removeChannelFromManagedCategoryIfNeeded(serverUrl, channelBeforeArchive.teamId, channelId);
         }
 
         return {};
     } catch (error) {
         logDebug('error on archiveChannel', getFullErrorMessage(error));
         forceLogoutIfNecessary(serverUrl, error);
+        expireChannelDecisionsOnDenial(serverUrl, channelId, error);
         return {error};
     } finally {
         EphemeralStore.removeArchivingChannel(channelId);
@@ -1305,6 +1436,7 @@ export const unarchiveChannel = async (serverUrl: string, channelId: string) => 
     } catch (error) {
         logDebug('error on unarchiveChannel', getFullErrorMessage(error));
         forceLogoutIfNecessary(serverUrl, error);
+        expireChannelDecisionsOnDenial(serverUrl, channelId, error);
         return {error};
     } finally {
         EphemeralStore.removeArchivingChannel(channelId);
@@ -1330,6 +1462,7 @@ export const convertChannelToPrivate = async (serverUrl: string, channelId: stri
     } catch (error) {
         logDebug('error on convertChannelToPrivate', getFullErrorMessage(error));
         forceLogoutIfNecessary(serverUrl, error);
+        expireChannelDecisionsOnDenial(serverUrl, channelId, error);
         return {error};
     } finally {
         EphemeralStore.removeConvertingChannel(channelId);
@@ -1346,11 +1479,15 @@ export const handleKickFromChannel = async (serverUrl: string, channelId: string
         }
 
         const currentServer = await getActiveServer();
+        let displayName: string | undefined;
         if (currentServer?.url === serverUrl) {
             const channel = await getChannelById(database, channelId);
             if (channel) {
-                DeviceEventEmitter.emit(event, channel.displayName);
-                await dismissAllModalsAndPopToRoot();
+                // Storing display name here to display the inaccessible channel bottom sheet
+                // after navigation to the root as this navigation closes the bottom sheet first so we
+                // navigate to root first, then later open the bottom sheet.
+                displayName = channel.displayName;
+                await navigateToRoot();
             }
         }
 
@@ -1370,16 +1507,65 @@ export const handleKickFromChannel = async (serverUrl: string, channelId: string
                         await switchToChannelById(serverUrl, newChannelId, teamId, true);
                     }
                 } else {
-                    await setCurrentTeamAndChannelId(operator, teamId, channelId);
+                    // Threads and Drafts are screens, not channels: as when switching to them, no channel is current.
+                    const isGlobalScreen = newChannelId === Screens.GLOBAL_THREADS || newChannelId === Screens.GLOBAL_DRAFTS;
+                    await setCurrentTeamAndChannelId(operator, teamId, isGlobalScreen ? '' : newChannelId);
                 }
-            } // TODO else jump to "join a channel" screen https://mattermost.atlassian.net/browse/MM-41051
+            } else if (currentServer?.url === serverUrl && await getIsCRTEnabled(database)) {
+                // Nothing left in the team to fall back to: show Threads, as the tablet does for a team
+                // with no current channel.
+                await switchToGlobalThreads(serverUrl, teamId, false);
+            } else {
+                // The kicked channel is about to be removed, so it must not stay the open one.
+                await setCurrentChannelId(operator, '');
+            }
         } else {
             await setCurrentChannelId(operator, '');
+        }
+
+        if (displayName != null) {
+            DeviceEventEmitter.emit(event, displayName);
         }
         return {};
     } catch (error) {
         logDebug('cannot kick user from channel', error);
         return {error};
+    }
+};
+
+export const handleChannelAccessDenied = async (serverUrl: string, channelId: string) => {
+    const key = `${serverUrl}|${channelId}`;
+    if (channelAccessDenialsInFlight.has(key)) {
+        logDebug('handleChannelAccessDenied: denial already being handled', channelId);
+        return {};
+    }
+
+    channelAccessDenialsInFlight.add(key);
+    try {
+        const {database} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
+
+        const myChannel = await getMyChannel(database, channelId);
+        if (!myChannel) {
+            logDebug('handleChannelAccessDenied: no membership for channel', channelId);
+            return {};
+        }
+
+        const channel = await myChannel.channel.fetch();
+        if (isDMorGM(channel)) {
+            logDebug('handleChannelAccessDenied: ignoring denial for a direct or group channel', channelId);
+            return {};
+        }
+
+        if (channelId === await getCurrentChannelId(database)) {
+            await handleKickFromChannel(serverUrl, channelId, Events.CHANNEL_ACCESS_REVOKED);
+        }
+        await removeCurrentUserFromChannel(serverUrl, channelId);
+        return {};
+    } catch (error) {
+        logDebug('error on handleChannelAccessDenied', getFullErrorMessage(error));
+        return {error};
+    } finally {
+        channelAccessDenialsInFlight.delete(key);
     }
 };
 
@@ -1394,6 +1580,42 @@ export const fetchGroupMessageMembersCommonTeams = async (serverUrl: string, cha
         return {error};
     }
 };
+
+export async function switchToChannelByName(serverUrl: string, channelName: string, teamName?: string) {
+    try {
+        const {database} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
+
+        let teamId = '';
+        if (teamName) {
+            const team = await getTeamByName(database, teamName);
+            teamId = team?.id || '';
+        }
+        if (!teamId) {
+            teamId = await getCurrentTeamId(database) || '';
+        }
+
+        let channelId = '';
+        const channel = await getChannelByName(database, teamId, channelName);
+        if (channel) {
+            channelId = channel.id;
+        } else {
+            const fetchResult = await fetchChannelByName(serverUrl, teamId, channelName, true);
+            if (fetchResult.channel) {
+                channelId = fetchResult.channel.id;
+            }
+        }
+
+        if (channelId) {
+            await switchToChannelById(serverUrl, channelId, teamId);
+        }
+
+        return {};
+    } catch (error) {
+        logDebug('error on switchToChannelByName', getFullErrorMessage(error));
+        forceLogoutIfNecessary(serverUrl, error);
+        return {error};
+    }
+}
 
 export const convertGroupMessageToPrivateChannel = async (serverUrl: string, channelId: string, targetTeamId: string, displayName: string) => {
     try {

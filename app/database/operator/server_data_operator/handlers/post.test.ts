@@ -5,12 +5,13 @@
 import {Database, Q} from '@nozbe/watermelondb';
 
 import {ActionType} from '@constants';
-import {OperationType} from '@constants/database';
+import {MM_TABLES, OperationType} from '@constants/database';
 import DatabaseManager from '@database/manager';
 import {buildDraftKey} from '@database/operator/server_data_operator/comparators';
 import {transformDraftRecord, transformPostsInChannelRecord} from '@database/operator/server_data_operator/transformers/post';
 import {createPostsChain} from '@database/operator/utils/post';
 import * as ScheduledPostQueries from '@queries/servers/scheduled_post';
+import TestHelper from '@test/test_helper';
 import {logWarning} from '@utils/log';
 
 import {shouldUpdateScheduledPostRecord} from '../comparators/scheduled_post';
@@ -18,6 +19,7 @@ import {shouldUpdateScheduledPostRecord} from '../comparators/scheduled_post';
 import {exportedForTest} from './post';
 
 import type ServerDataOperator from '@database/operator/server_data_operator/index';
+import type PostModel from '@typings/database/models/servers/post';
 import type PostsInChannelModel from '@typings/database/models/servers/posts_in_channel';
 import type ScheduledPostModel from '@typings/database/models/servers/scheduled_post';
 
@@ -26,6 +28,7 @@ Q.sortBy = jest.fn().mockImplementation((field) => {
 });
 
 jest.mock('@utils/log', () => ({
+    logDebug: jest.fn(),
     logWarning: jest.fn(),
 }));
 describe('*** Operator: Post Handlers tests ***', () => {
@@ -752,6 +755,308 @@ describe('*** Operator: Post Handlers tests ***', () => {
         expect(files).toHaveLength(1);
         expect(files[0].id).toBe(uploadedFiles[0].id);
     });
+
+    it('=> HandlePosts: should update unrevealed burn-on-read post when it becomes revealed', async () => {
+        const spyOnProcessRecords = jest.spyOn(operator, 'processRecords');
+
+        const now = Date.now();
+
+        // Create an unrevealed burn-on-read post
+        const unrevealedBorPost: Post = {
+            id: 'bor_post_id',
+            create_at: 1596032651747,
+            update_at: 1596032651747,
+            edit_at: 0,
+            delete_at: 0,
+            is_pinned: false,
+            is_following: false,
+            user_id: 'user_id',
+            channel_id: 'channel_id',
+            root_id: '',
+            original_id: '',
+            message: '',
+            type: 'burn_on_read',
+            props: {expire_at: now + 1000000},
+            hashtags: '',
+            pending_post_id: '',
+            reply_count: 0,
+            last_reply_at: 0,
+            participants: null,
+            metadata: {},
+        };
+
+        // First, create the unrevealed post
+        await operator.handlePosts({
+            actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+            order: [unrevealedBorPost.id],
+            posts: [unrevealedBorPost],
+            prepareRecordsOnly: false,
+        });
+
+        // Now create a revealed version of the same post
+        const revealedBorPost: Post = {
+            ...unrevealedBorPost,
+            message: 'This is the revealed message',
+            metadata: {expire_at: now + 1000000},
+        };
+
+        // Handle the revealed post
+        await operator.handlePosts({
+            actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+            order: [revealedBorPost.id],
+            posts: [revealedBorPost],
+            prepareRecordsOnly: false,
+        });
+
+        // Verify that processRecords was called with the shouldUpdate function that handles BoR posts
+        expect(spyOnProcessRecords).toHaveBeenCalledWith(
+            expect.objectContaining({
+                createOrUpdateRawValues: [revealedBorPost],
+                shouldUpdate: expect.any(Function),
+            }),
+        );
+    });
+
+    it('=> HandlePosts: should update burn-on-read post when its read receipts change', async () => {
+        const spyOnProcessRecords = jest.spyOn(operator, 'processRecords');
+
+        const now = Date.now();
+
+        // Create an unrevealed burn-on-read post
+        const existingPost: Post = {
+            id: 'bor_post_id',
+            create_at: 1596032651747,
+            update_at: 1596032651747,
+            edit_at: 0,
+            delete_at: 0,
+            is_pinned: false,
+            is_following: false,
+            user_id: 'user_id',
+            channel_id: 'channel_id',
+            root_id: '',
+            original_id: '',
+            message: 'This is the revealed message',
+            type: 'burn_on_read',
+            props: {expire_at: now + 1000000},
+            hashtags: '',
+            pending_post_id: '',
+            reply_count: 0,
+            last_reply_at: 0,
+            participants: null,
+            metadata: {expire_at: now + 1000000},
+        };
+
+        // First, create the existing post
+        await operator.handlePosts({
+            actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+            order: [existingPost.id],
+            posts: [existingPost],
+            prepareRecordsOnly: false,
+        });
+
+        // Now create an updated version of the same post
+        const updatedPost: Post = {
+            ...existingPost,
+            metadata: {
+                ...existingPost.metadata,
+                recipients: ['receipt_id_1'],
+            },
+        };
+
+        // Handle the updated post
+        await operator.handlePosts({
+            actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+            order: [updatedPost.id],
+            posts: [updatedPost],
+            prepareRecordsOnly: false,
+        });
+
+        // Verify that processRecords was called with the shouldUpdate function that handles BoR posts
+        expect(spyOnProcessRecords).toHaveBeenCalledWith(
+            expect.objectContaining({
+                createOrUpdateRawValues: [updatedPost],
+                shouldUpdate: expect.any(Function),
+            }),
+        );
+    });
+
+    it('=> HandlePosts: should update burn-on-read post when its read by all', async () => {
+        const spyOnProcessRecords = jest.spyOn(operator, 'processRecords');
+        const now = Date.now();
+
+        const existingPost: Post = {
+            id: 'bor_post_id',
+            create_at: 1596032651747,
+            update_at: 1596032651747,
+            edit_at: 0,
+            delete_at: 0,
+            is_pinned: false,
+            is_following: false,
+            user_id: 'user_id',
+            channel_id: 'channel_id',
+            root_id: '',
+            original_id: '',
+            message: 'This is the revealed message',
+            type: 'burn_on_read',
+            props: {expire_at: now + 1000000},
+            hashtags: '',
+            pending_post_id: '',
+            reply_count: 0,
+            last_reply_at: 0,
+            participants: null,
+            metadata: {},
+        };
+
+        // First, create the existing post
+        await operator.handlePosts({
+            actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+            order: [existingPost.id],
+            posts: [existingPost],
+            prepareRecordsOnly: false,
+        });
+
+        // Now create an updated version of the same post
+        const updatedPost: Post = {
+            ...existingPost,
+            metadata: {
+                ...existingPost.metadata,
+                expire_at: now + 1000000,
+            },
+        };
+
+        // Handle the updated post
+        await operator.handlePosts({
+            actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+            order: [updatedPost.id],
+            posts: [updatedPost],
+            prepareRecordsOnly: false,
+        });
+
+        // Verify that processRecords was called with the shouldUpdate function that handles BoR posts
+        expect(spyOnProcessRecords).toHaveBeenCalledWith(
+            expect.objectContaining({
+                createOrUpdateRawValues: [updatedPost],
+                shouldUpdate: expect.any(Function),
+            }),
+        );
+    });
+});
+
+describe('*** Operator: shouldUpdateForBoRPost tests ***', () => {
+    const {shouldUpdateForBoRPost} = exportedForTest;
+
+    it('should return false for non-BoR posts', () => {
+        const existingPost = {
+            type: 'regular',
+            metadata: {},
+        } as unknown as PostModel;
+
+        const newPost = {
+            type: 'regular',
+            metadata: {},
+        } as unknown as Post;
+
+        expect(shouldUpdateForBoRPost(existingPost, newPost)).toBe(false);
+    });
+
+    it('should return false when only one post is BoR', () => {
+        const existingPost = {
+            type: 'burn_on_read',
+            metadata: {},
+        } as PostModel;
+
+        const newPost = {
+            type: 'regular',
+            metadata: {},
+        } as unknown as Post;
+
+        expect(shouldUpdateForBoRPost(existingPost, newPost)).toBe(false);
+    });
+
+    it('should return true when BoR post gets revealed', () => {
+        const existingPost = {
+            type: 'burn_on_read',
+            props: {expire_at: 123456789},
+            metadata: {},
+        } as unknown as PostModel;
+
+        const newPost = {
+            type: 'burn_on_read',
+            metadata: {expire_at: 123456789},
+        } as Post;
+
+        expect(shouldUpdateForBoRPost(existingPost, newPost)).toBe(true);
+    });
+
+    it('should return true when BoR post recipients list changes', () => {
+        const existingPost = {
+            type: 'burn_on_read',
+            metadata: {recipients: ['user1']},
+        } as PostModel;
+
+        const newPost = {
+            type: 'burn_on_read',
+            metadata: {recipients: ['user1', 'user2']},
+        } as Post;
+
+        expect(shouldUpdateForBoRPost(existingPost, newPost)).toBe(true);
+    });
+
+    it('should return true when BoR post gets read by all (expire_at added)', () => {
+        const existingPost = {
+            type: 'burn_on_read',
+            metadata: {},
+        } as PostModel;
+
+        const newPost = {
+            type: 'burn_on_read',
+            metadata: {expire_at: 123456789},
+        } as Post;
+
+        expect(shouldUpdateForBoRPost(existingPost, newPost)).toBe(true);
+    });
+
+    it('should return false when BoR posts have no relevant changes', () => {
+        const existingPost = {
+            type: 'burn_on_read',
+            metadata: {recipients: ['user1'], expire_at: 123456789},
+        } as PostModel;
+
+        const newPost = {
+            type: 'burn_on_read',
+            metadata: {recipients: ['user1'], expire_at: 123456789},
+        } as Post;
+
+        expect(shouldUpdateForBoRPost(existingPost, newPost)).toBe(false);
+    });
+
+    it('should handle missing recipients arrays', () => {
+        const existingPost = {
+            type: 'burn_on_read',
+            metadata: {},
+        } as PostModel;
+
+        const newPost = {
+            type: 'burn_on_read',
+            metadata: {recipients: ['user1']},
+        } as Post;
+
+        expect(shouldUpdateForBoRPost(existingPost, newPost)).toBe(true);
+    });
+
+    it('should handle recipients array becoming empty', () => {
+        const existingPost = {
+            type: 'burn_on_read',
+            metadata: {recipients: ['user1']},
+        } as PostModel;
+
+        const newPost = {
+            type: 'burn_on_read',
+            metadata: {recipients: []},
+        } as unknown as Post;
+
+        expect(shouldUpdateForBoRPost(existingPost, newPost)).toBe(true);
+    });
 });
 
 describe('*** Operator: merge chunks ***', () => {
@@ -848,5 +1153,678 @@ describe('*** Operator: merge chunks ***', () => {
             expect(chunk._preparedState).toBe('create');
         }
         await operator.batchRecords(result, 'test');
+    });
+});
+
+describe('*** Operator: deleted post must not create an empty PostsInChannel interval (MM-66467) ***', () => {
+    let database: Database;
+    let operator: ServerDataOperator;
+    const databaseName = 'baseHandler.test.com';
+    const channelId = 'mm66467channel';
+
+    beforeEach(async () => {
+        await DatabaseManager.init([databaseName]);
+        const serverDatabase = DatabaseManager.serverDatabases[databaseName]!;
+        database = serverDatabase.database;
+        operator = serverDatabase.operator;
+    });
+
+    afterEach(async () => {
+        await DatabaseManager.destroyServerDatabase(databaseName);
+    });
+
+    const makePost = (over: Partial<Post>): Post => ({
+        id: 'p',
+        channel_id: channelId,
+        create_at: 1000,
+        update_at: 1000,
+        edit_at: 0,
+        delete_at: 0,
+        is_pinned: false,
+        is_following: false,
+        user_id: 'user1',
+        root_id: '',
+        original_id: '',
+        message: 'message',
+        type: '',
+        props: {},
+        hashtags: '',
+        pending_post_id: '',
+        reply_count: 0,
+        last_reply_at: 0,
+        participants: null,
+        metadata: {},
+        ...over,
+    } as Post);
+
+    const intervalsForChannel = async () =>
+        (await database.get(MM_TABLES.SERVER.POSTS_IN_CHANNEL).
+            query(Q.where('channel_id', channelId)).fetch()) as PostsInChannelModel[];
+
+    it('does not create a separate empty interval from a deleted post received via RECEIVED_IN_CHANNEL', async () => {
+        // Seed an existing interval [1000, 1000] from a live root post.
+        await operator.handlePosts({
+            actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+            order: ['live-post-id'],
+            posts: [makePost({id: 'live-post-id', create_at: 1000, update_at: 1000})],
+        });
+
+        const seeded = await intervalsForChannel();
+        expect(seeded.length).toBe(1);
+        expect(seeded[0].earliest).toBe(1000);
+        expect(seeded[0].latest).toBe(1000);
+
+        // Receive a DELETED root post whose create_at (5000) is newer than the interval.
+        // The server returns deleted posts in `order` (no DeleteAt filter), and the deferred
+        // unread-channel fetch stores them as RECEIVED_IN_CHANNEL. The deleted post is not
+        // persisted, but the interval must NOT be built from it (that produced the bug:
+        // a zero-row [5000, 5000] orphan that becomes postsInChannel[0] and blanks the channel).
+        await operator.handlePosts({
+            actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+            order: ['deleted-post-id'],
+            posts: [makePost({id: 'deleted-post-id', create_at: 5000, update_at: 6000, delete_at: 6000})],
+        });
+
+        // The deleted post is not persisted...
+        const deletedRow = await database.get(MM_TABLES.SERVER.POST).
+            query(Q.where('id', 'deleted-post-id')).fetch();
+        expect(deletedRow.length).toBe(0);
+
+        // ...and crucially no empty orphan interval was created. The only interval must remain
+        // the real [1000, 1000] one, so the channel keeps rendering its history.
+        const after = await intervalsForChannel();
+        expect(after.length).toBe(1);
+        expect(after[0].earliest).toBe(1000);
+        expect(after[0].latest).toBe(1000);
+    });
+    describe('=> HandlePosts: ABAC redaction drift', () => {
+        // ABAC access changes never bump update_at, so the default "is it newer?" comparator
+        // would skip the write and leave the placeholder showing the wrong state.
+        const postId = 'abac-post-id';
+        const basePost = (metadata: PostMetadata): Post => TestHelper.fakePost({
+            id: postId,
+            channel_id: 'channel-id',
+            create_at: 1000,
+            update_at: 1000,
+            message: 'message',
+            metadata,
+        });
+
+        const write = async (post: Post) => {
+            await operator.handlePosts({
+                actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+                order: [postId],
+                posts: [post],
+                prepareRecordsOnly: false,
+            });
+        };
+
+        it('should persist a redaction change that did not move update_at', async () => {
+            await write(basePost({redacted_file_count: 0}));
+            await write(basePost({redacted_file_count: 2}));
+
+            const rows = await database.get<PostModel>(MM_TABLES.SERVER.POST).query(Q.where('id', postId)).fetch();
+            expect(rows[0].metadata?.redacted_file_count).toBe(2);
+        });
+
+        it('should still ignore an older post when the redaction state is unchanged', async () => {
+            // Guards against the redaction checks short-circuiting to "always update", which
+            // would let a stale payload overwrite newer content.
+            await write({...basePost({redacted_file_count: 1}), update_at: 2000, message: 'newest'});
+            await write({...basePost({redacted_file_count: 1}), update_at: 1000, message: 'stale'});
+
+            const rows = await database.get<PostModel>(MM_TABLES.SERVER.POST).query(Q.where('id', postId)).fetch();
+            expect(rows[0].message).toBe('newest');
+        });
+
+        it('should not let an older post with a different redaction state roll back a newer edit', async () => {
+            await write({...basePost({redacted_file_count: 0}), update_at: 2000, message: 'edited'});
+            await write({...basePost({redacted_file_count: 2}), update_at: 1000, message: 'stale'});
+
+            const rows = await database.get<PostModel>(MM_TABLES.SERVER.POST).query(Q.where('id', postId)).fetch();
+            expect(rows[0].message).toBe('edited');
+            expect(rows[0].metadata?.redacted_file_count).toBe(0);
+        });
+
+        it('should store the epoch a sanitized response was dispatched under', async () => {
+            await operator.handlePosts({
+                actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+                order: [postId],
+                posts: [basePost({redacted_file_count: 0})],
+                prepareRecordsOnly: false,
+                redactionVerifiedEpoch: 7,
+            });
+
+            const rows = await database.get<PostModel>(MM_TABLES.SERVER.POST).query(Q.where('id', postId)).fetch();
+            expect(rows[0].redactionVerifiedEpoch).toBe(7);
+        });
+
+        it('should leave the stored epoch untouched when a response carries none', async () => {
+            // Local mutations and unsanitized payloads must not promote a post to a newer decision.
+            await operator.handlePosts({
+                actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+                order: [postId],
+                posts: [basePost({redacted_file_count: 0})],
+                prepareRecordsOnly: false,
+                redactionVerifiedEpoch: 7,
+            });
+            await write({...basePost({redacted_file_count: 0}), update_at: 2000, message: 'edited locally'});
+
+            const rows = await database.get<PostModel>(MM_TABLES.SERVER.POST).query(Q.where('id', postId)).fetch();
+            expect(rows[0].message).toBe('edited locally');
+            expect(rows[0].redactionVerifiedEpoch).toBe(7);
+        });
+
+        it('should return revoked files for posts reported as redacted', async () => {
+            const withFiles = {...basePost({} as PostMetadata), file_ids: ['fileid1']};
+            await write(withFiles);
+            await operator.handleFiles({
+                files: [{id: 'fileid1', post_id: postId, name: 'secret.png', extension: 'png', localPath: '/tmp/secret.png', mime_type: 'image/png', size: 1, width: 1, height: 1} as unknown as FileInfo],
+                prepareRecordsOnly: false,
+            });
+
+            const {revokedFiles} = await operator.handlePosts({
+                actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+                order: [postId],
+                posts: [basePost({redacted_file_count: 1} as PostMetadata)],
+                prepareRecordsOnly: false,
+            });
+
+            expect(revokedFiles).toHaveLength(1);
+            expect(revokedFiles[0]).toEqual({id: 'fileid1', name: 'secret.png', extension: 'png', mime_type: 'image/png', localPath: '/tmp/secret.png'});
+        });
+
+        it('should not report files that are only missing from the payload', async () => {
+            // Thread and search payloads arrive without file_ids all the time; that is not a denial.
+            const withFiles = {...basePost({} as PostMetadata), file_ids: ['fileid2']};
+            await write(withFiles);
+            await operator.handleFiles({
+                files: [{id: 'fileid2', post_id: postId, name: 'ok.png', extension: 'png', localPath: '/tmp/ok.png', mime_type: 'image/png', size: 1, width: 1, height: 1} as unknown as FileInfo],
+                prepareRecordsOnly: false,
+            });
+
+            const {revokedFiles} = await operator.handlePosts({
+                actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+                order: [postId],
+                posts: [basePost({} as PostMetadata)],
+                prepareRecordsOnly: false,
+            });
+
+            const files = await database.get(MM_TABLES.SERVER.FILE).query(Q.where('post_id', postId)).fetch();
+            expect(files).toHaveLength(0);
+            expect(revokedFiles).toHaveLength(0);
+        });
+
+        it('should throw when its own commit fails', async () => {
+            jest.spyOn(database, 'write').mockRejectedValueOnce(new Error('write failed'));
+
+            await expect(operator.handlePosts({
+                actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+                order: [postId],
+                posts: [basePost({} as PostMetadata)],
+                prepareRecordsOnly: false,
+            })).rejects.toThrow('write failed');
+        });
+
+        it('should discard a whole response from a superseded generation', async () => {
+            // The G1 response arrives after G2 was stored. Clamping only the epoch would leave a row
+            // labelled G2 while carrying G1's attachment metadata, so the payload is dropped entirely.
+            await operator.handlePosts({
+                actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+                order: [postId],
+                posts: [{...basePost({redacted_file_count: 3}), message: 'denied at G2'}],
+                prepareRecordsOnly: false,
+                redactionVerifiedEpoch: 2,
+            });
+            await operator.handlePosts({
+                actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+                order: [postId],
+                posts: [{...basePost({redacted_file_count: 0}), update_at: 5000, message: 'allowed at G1'}],
+                prepareRecordsOnly: false,
+                redactionVerifiedEpoch: 1,
+            });
+
+            const rows = await database.get<PostModel>(MM_TABLES.SERVER.POST).query(Q.where('id', postId)).fetch();
+            expect(rows[0].message).toBe('denied at G2');
+            expect(rows[0].metadata?.redacted_file_count).toBe(3);
+            expect(rows[0].redactionVerifiedEpoch).toBe(2);
+        });
+
+        it('should not restore files from a superseded allow over a newer denial', async () => {
+            const file = {id: 'stale-file', post_id: postId, name: 'secret.png', extension: 'png', mime_type: 'image/png', size: 1, width: 1, height: 1} as FileInfo;
+            await operator.handlePosts({
+                actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+                order: [postId],
+                posts: [basePost({redacted_file_count: 1})],
+                prepareRecordsOnly: false,
+                redactionVerifiedEpoch: 2,
+            });
+            await operator.handlePosts({
+                actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+                order: [postId],
+                posts: [{...basePost({files: [file]}), file_ids: [file.id]}],
+                prepareRecordsOnly: false,
+                redactionVerifiedEpoch: 1,
+            });
+
+            const files = await database.get(MM_TABLES.SERVER.FILE).query(Q.where('post_id', postId)).fetch();
+            expect(files).toHaveLength(0);
+        });
+
+        it('should not destroy files a newer allow stored when a superseded denial arrives', async () => {
+            const file = {id: 'kept-file', post_id: postId, name: 'ok.png', extension: 'png', mime_type: 'image/png', size: 1, width: 1, height: 1} as FileInfo;
+            await operator.handlePosts({
+                actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+                order: [postId],
+                posts: [{...basePost({files: [file]}), file_ids: [file.id]}],
+                prepareRecordsOnly: false,
+                redactionVerifiedEpoch: 2,
+            });
+            const {revokedFiles} = await operator.handlePosts({
+                actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+                order: [postId],
+                posts: [basePost({redacted_file_count: 1})],
+                prepareRecordsOnly: false,
+                redactionVerifiedEpoch: 1,
+            });
+
+            const files = await database.get(MM_TABLES.SERVER.FILE).query(Q.where('post_id', postId)).fetch();
+            expect(files).toHaveLength(1);
+            expect(revokedFiles).toHaveLength(0);
+        });
+
+        it('should store a newer epoch for a post whose access did not change', async () => {
+            // Nothing but the epoch differs, so without an explicit clause the write is skipped and
+            // the post stays unverified after every invalidation.
+            const post = basePost({redacted_file_count: 0});
+            await operator.handlePosts({
+                actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+                order: [postId],
+                posts: [{...post}],
+                prepareRecordsOnly: false,
+                redactionVerifiedEpoch: 1,
+            });
+            await operator.handlePosts({
+                actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+                order: [postId],
+                posts: [{...post}],
+                prepareRecordsOnly: false,
+                redactionVerifiedEpoch: 2,
+            });
+
+            const rows = await database.get<PostModel>(MM_TABLES.SERVER.POST).query(Q.where('id', postId)).fetch();
+            expect(rows[0].redactionVerifiedEpoch).toBe(2);
+        });
+
+        it('should not let a newer epoch roll back a newer edit', async () => {
+            await operator.handlePosts({
+                actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+                order: [postId],
+                posts: [{...basePost({redacted_file_count: 0}), update_at: 2000, message: 'edited'}],
+                prepareRecordsOnly: false,
+                redactionVerifiedEpoch: 1,
+            });
+            await operator.handlePosts({
+                actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+                order: [postId],
+                posts: [{...basePost({redacted_file_count: 0}), message: 'original'}],
+                prepareRecordsOnly: false,
+                redactionVerifiedEpoch: 2,
+            });
+
+            const rows = await database.get<PostModel>(MM_TABLES.SERVER.POST).query(Q.where('id', postId)).fetch();
+            expect(rows[0].message).toBe('edited');
+            expect(rows[0].redactionVerifiedEpoch).toBe(1);
+        });
+
+        it('should not keep a verified epoch when a write without one changes the redaction state', async () => {
+            // backgroundNotification stores natively-fetched posts with no epoch. If that payload was
+            // fetched while access was allowed and lands after a denial stamped at G2, the post must
+            // not end up rendering files under the G2 stamp.
+            const file = {id: 'notif-file', post_id: postId, name: 'secret.png', extension: 'png', mime_type: 'image/png', size: 1, width: 1, height: 1} as FileInfo;
+            await operator.handlePosts({
+                actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+                order: [postId],
+                posts: [basePost({redacted_file_count: 1})],
+                prepareRecordsOnly: false,
+                redactionVerifiedEpoch: 2,
+            });
+            await write({...basePost({files: [file]}), file_ids: [file.id]});
+
+            const rows = await database.get<PostModel>(MM_TABLES.SERVER.POST).query(Q.where('id', postId)).fetch();
+            const files = await database.get(MM_TABLES.SERVER.FILE).query(Q.where('post_id', postId)).fetch();
+            const rendersFilesAsVerified = files.length > 0 && (rows[0].metadata?.redacted_file_count ?? 0) === 0 && rows[0].redactionVerifiedEpoch >= 2;
+            expect({
+                epoch: rows[0].redactionVerifiedEpoch,
+                redactedFileCount: rows[0].metadata?.redacted_file_count ?? 0,
+                fileRows: files.length,
+                rendersFilesAsVerified,
+            }).toEqual(expect.objectContaining({rendersFilesAsVerified: false}));
+        });
+
+        it('should not look up stored epochs for an unstamped write with nothing redaction-related in it', async () => {
+            // Every write while ABAC is off is unstamped; a plain text post must not cost an extra query.
+            await write({...basePost({}), message: 'first'});
+            const posts = database.get<PostModel>(MM_TABLES.SERVER.POST);
+            const query = jest.spyOn(posts, 'query');
+
+            await write({...basePost({}), update_at: 2000, message: 'edited'});
+
+            const epochLookups = query.mock.calls.filter((args) => JSON.stringify(args).includes('redaction_verified_epoch'));
+            expect(epochLookups).toHaveLength(0);
+            query.mockRestore();
+        });
+
+        it('should keep a denied root verified when a thread payload carries it without metadata', async () => {
+            // Thread payloads are unstamped and omit the root's metadata; that says nothing about its
+            // attachments, so it must neither rewrite the denial nor send the root back to unverified.
+            await operator.handlePosts({
+                actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+                order: [postId],
+                posts: [basePost({redacted_file_count: 1})],
+                prepareRecordsOnly: false,
+                redactionVerifiedEpoch: 2,
+            });
+            const {metadata, ...withoutMetadata} = basePost({});
+            expect(metadata).toBeDefined();
+            await write(withoutMetadata as Post);
+
+            const rows = await database.get<PostModel>(MM_TABLES.SERVER.POST).query(Q.where('id', postId)).fetch();
+            expect(rows[0].redactionVerifiedEpoch).toBe(2);
+            expect(rows[0].metadata?.redacted_file_count).toBe(1);
+        });
+    });
+
+    describe('=> HandlePosts: permalink embed files', () => {
+        // A permalink embed carries the linked post's files, so a host response can restore them
+        // without re-fetching the linked post. Each case pins one rule for when those copies may write rows.
+        const linkedId = 'linked-id';
+        const hostId = 'host-id';
+        const fileA = TestHelper.fakeFileInfo({id: 'file-a', post_id: linkedId});
+        const fileB = TestHelper.fakeFileInfo({id: 'file-b', post_id: linkedId});
+
+        const linkedPost = (over: Partial<Post> = {}): Post => TestHelper.fakePost({
+            id: linkedId,
+            channel_id: 'channel-b',
+            create_at: 1000,
+            update_at: 1000,
+            metadata: {},
+            ...over,
+        });
+
+        const permalinkEmbed = (over: Partial<Post> = {}): PostEmbed => ({
+            type: 'permalink',
+            url: '',
+            data: {
+                post_id: linkedId,
+                post: linkedPost({metadata: {files: [fileA, fileB]}, ...over}),
+                channel_id: 'channel-b',
+                team_name: 'team',
+                channel_display_name: 'B',
+                channel_type: 'O',
+            },
+        });
+
+        const hostPost = (embeds: PostEmbed[], over: Partial<Post> = {}): Post => TestHelper.fakePost({
+            id: hostId,
+            channel_id: 'channel-a',
+            create_at: 1000,
+            update_at: 1000,
+            metadata: {embeds},
+            ...over,
+        });
+
+        const writeLinked = async (over: Partial<Post> = {}, epoch?: number) => {
+            await operator.handlePosts({
+                actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+                order: [linkedId],
+                posts: [linkedPost(over)],
+                prepareRecordsOnly: false,
+                redactionVerifiedEpoch: epoch,
+            });
+        };
+
+        const writeHost = async (embeds: PostEmbed[], epoch?: number) => {
+            await operator.handlePosts({
+                actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+                order: [hostId],
+                posts: [hostPost(embeds)],
+                prepareRecordsOnly: false,
+                redactionVerifiedEpoch: epoch,
+            });
+        };
+
+        const linkedRowIds = async () => {
+            const rows = await database.get(MM_TABLES.SERVER.FILE).query(Q.where('post_id', linkedId)).fetch();
+            return rows.map((r) => r.id).sort();
+        };
+
+        const enforceAbac = async () => {
+            await operator.handleConfigs({
+                configs: [
+                    {id: 'FeatureFlagPermissionPolicies', value: 'true'},
+                    {id: 'EnableAttributeBasedAccessControl', value: 'true'},
+                ],
+                configsToDelete: [],
+                prepareRecordsOnly: false,
+            });
+        };
+
+        it('should store the files a stamped host embed lists for a stored linked post', async () => {
+            await writeLinked({}, 2);
+            await writeHost([permalinkEmbed()], 2);
+
+            expect(await linkedRowIds()).toEqual(['file-a', 'file-b']);
+
+            // The preview renders from the stored embed, so collecting its files must not strip them.
+            const storedHost = await database.get<PostModel>(MM_TABLES.SERVER.POST).find(hostId);
+            const embedData = storedHost.metadata?.embeds?.[0]?.data as PermalinkEmbedData | undefined;
+            expect(embedData?.post?.metadata?.files).toHaveLength(2);
+        });
+
+        it('should add the embed files missing from the rows a linked post already has', async () => {
+            await writeLinked({metadata: {files: [fileA]}, file_ids: [fileA.id]}, 2);
+            await writeHost([permalinkEmbed()], 2);
+
+            expect(await linkedRowIds()).toEqual(['file-a', 'file-b']);
+        });
+
+        it('should restore the rows of a linked post denied under an older epoch', async () => {
+            await writeLinked({metadata: {redacted_file_count: 2}}, 2);
+            await writeHost([permalinkEmbed()], 3);
+
+            expect(await linkedRowIds()).toEqual(['file-a', 'file-b']);
+        });
+
+        it('should not write rows for a linked post that is redacted in the same batch', async () => {
+            await writeLinked({}, 2);
+            await operator.handlePosts({
+                actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+                order: [hostId, linkedId],
+                posts: [hostPost([permalinkEmbed()]), linkedPost({metadata: {redacted_file_count: 2}})],
+                prepareRecordsOnly: false,
+                redactionVerifiedEpoch: 2,
+            });
+
+            expect(await linkedRowIds()).toHaveLength(0);
+        });
+
+        it('should not let an embed override a denial the linked post got under the same epoch', async () => {
+            await writeLinked({metadata: {redacted_file_count: 2}}, 2);
+            await writeHost([permalinkEmbed()], 2);
+
+            expect(await linkedRowIds()).toHaveLength(0);
+        });
+
+        it('should not write rows from an embed verified under an older epoch than the linked post', async () => {
+            await writeLinked({}, 5);
+            await writeHost([permalinkEmbed()], 4);
+
+            expect(await linkedRowIds()).toHaveLength(0);
+        });
+
+        it('should not write rows from the embeds of a superseded host response', async () => {
+            await writeLinked({}, 2);
+            await writeHost([], 3);
+            await writeHost([permalinkEmbed()], 2);
+
+            expect(await linkedRowIds()).toHaveLength(0);
+        });
+
+        it('should not write rows from an embed that reports redacted files', async () => {
+            await writeLinked({}, 2);
+            await writeHost([permalinkEmbed({metadata: {files: [fileA, fileB], redacted_file_count: 1}})], 2);
+
+            expect(await linkedRowIds()).toHaveLength(0);
+        });
+
+        it('should prepare each linked file once when two hosts embed the same post', async () => {
+            // processRecords does not dedupe, and two creates with one id would fail the whole batch.
+            await writeLinked({}, 2);
+            const {models} = await operator.handlePosts({
+                actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+                order: ['host-1', 'host-2'],
+                posts: [hostPost([permalinkEmbed()], {id: 'host-1'}), hostPost([permalinkEmbed()], {id: 'host-2'})],
+                prepareRecordsOnly: true,
+                redactionVerifiedEpoch: 2,
+            });
+
+            const fileIds = models.filter((m) => m.collection.table === MM_TABLES.SERVER.FILE).map((m) => m.id).sort();
+            expect(fileIds).toEqual(['file-a', 'file-b']);
+        });
+
+        it('should not write rows from an embed older than the stored linked post', async () => {
+            // The server caches embeds, so an edit that removed the files can leave them in an older copy.
+            await writeLinked({update_at: 2000}, 2);
+            await writeHost([permalinkEmbed({update_at: 1000})], 2);
+
+            expect(await linkedRowIds()).toHaveLength(0);
+        });
+
+        it('should not write rows for a linked post that is not stored', async () => {
+            // No cleanup path, data retention included, would ever remove rows for a post we never held.
+            await writeHost([permalinkEmbed()], 2);
+
+            expect(await linkedRowIds()).toHaveLength(0);
+        });
+
+        it('should not let a stamped embed override a denial stored without an epoch', async () => {
+            // A notification payload stores the denial unstamped; a host response captured before it
+            // cannot be ordered against it.
+            await writeLinked({metadata: {redacted_file_count: 2}});
+            await writeHost([permalinkEmbed()], 2);
+
+            expect(await linkedRowIds()).toHaveLength(0);
+        });
+
+        it('should not write rows from an embed of a deleted post', async () => {
+            await writeLinked({}, 2);
+            await writeHost([permalinkEmbed({delete_at: 2000})], 2);
+
+            expect(await linkedRowIds()).toHaveLength(0);
+        });
+
+        it('should not write rows for a linked post marked as deleted', async () => {
+            await writeLinked({}, 2);
+            const stored = await database.get<PostModel>(MM_TABLES.SERVER.POST).find(linkedId);
+            await database.write(async () => {
+                await stored.update((p) => {
+                    p.deleteAt = 2000;
+                });
+            });
+            await writeHost([permalinkEmbed()], 2);
+
+            expect(await linkedRowIds()).toHaveLength(0);
+        });
+
+        it('should only write embed files that belong to the linked post', async () => {
+            const misfiled = TestHelper.fakeFileInfo({id: 'file-x', post_id: hostId});
+            await writeLinked({}, 2);
+            await writeHost([permalinkEmbed({metadata: {files: [fileA, misfiled]}})], 2);
+
+            expect(await linkedRowIds()).toEqual(['file-a']);
+            expect(await database.get(MM_TABLES.SERVER.FILE).query(Q.where('id', 'file-x')).fetch()).toHaveLength(0);
+        });
+
+        it('should not write rows from an unstamped host response while ABAC is enforced', async () => {
+            await writeLinked({}, 2);
+            await enforceAbac();
+            await writeHost([permalinkEmbed()]);
+
+            expect(await linkedRowIds()).toHaveLength(0);
+        });
+
+        it('should restore a denial cached before ABAC was turned off from an unstamped host response', async () => {
+            await writeLinked({metadata: {redacted_file_count: 2}}, 2);
+            await writeHost([permalinkEmbed()]);
+
+            expect(await linkedRowIds()).toEqual(['file-a', 'file-b']);
+        });
+
+        it('should write rows from an unstamped host response for a linked post never verified', async () => {
+            // A thread root is stored unstamped and without metadata, so only the embed can supply its rows.
+            await writeLinked({});
+            await writeHost([permalinkEmbed()]);
+
+            expect(await linkedRowIds()).toEqual(['file-a', 'file-b']);
+        });
+    });
+});
+
+describe('*** Operator: shouldUpdateForRedaction tests ***', () => {
+    const {shouldUpdateForRedaction} = exportedForTest;
+
+    const permalinkEmbed = (postId: string, redactedFileCount: number): PostEmbed => ({
+        type: 'permalink',
+        url: '',
+        data: {
+            post_id: postId,
+            post: {metadata: {redacted_file_count: redactedFileCount}},
+        },
+    });
+
+    const existing = (metadata: PostMetadata) => ({metadata} as PostModel);
+    const incoming = (metadata: PostMetadata) => ({metadata} as Post);
+
+    it('should return true when the post redacted file count changed', () => {
+        expect(shouldUpdateForRedaction(existing({redacted_file_count: 0} as PostMetadata), incoming({redacted_file_count: 2} as PostMetadata))).toBe(true);
+    });
+
+    it('should return false when nothing about the redaction state changed', () => {
+        const metadata = {redacted_file_count: 1, embeds: [permalinkEmbed('linked-post-id', 2)]} as PostMetadata;
+
+        expect(shouldUpdateForRedaction(existing(metadata), incoming(metadata))).toBe(false);
+    });
+
+    it('should return true when a permalink embed redaction changed', () => {
+        const before = {embeds: [permalinkEmbed('linked-post-id', 0)]} as PostMetadata;
+        const after = {embeds: [permalinkEmbed('linked-post-id', 3)]} as PostMetadata;
+
+        expect(shouldUpdateForRedaction(existing(before), incoming(after))).toBe(true);
+    });
+
+    it('should compare permalink embeds by linked post id rather than by position', () => {
+        // The server does not guarantee embed order, so a reorder must not read as a change,
+        // and a change must still be caught when the embeds moved.
+        const before = {embeds: [permalinkEmbed('post-a', 1), permalinkEmbed('post-b', 0)]} as PostMetadata;
+        const reordered = {embeds: [permalinkEmbed('post-b', 0), permalinkEmbed('post-a', 1)]} as PostMetadata;
+        const reorderedAndChanged = {embeds: [permalinkEmbed('post-b', 0), permalinkEmbed('post-a', 4)]} as PostMetadata;
+
+        expect(shouldUpdateForRedaction(existing(before), incoming(reordered))).toBe(false);
+        expect(shouldUpdateForRedaction(existing(before), incoming(reorderedAndChanged))).toBe(true);
+    });
+
+    it('should ignore embeds that are not permalinks', () => {
+        const before = {embeds: [permalinkEmbed('post-a', 1)]} as PostMetadata;
+        const after = {embeds: [permalinkEmbed('post-a', 1), {type: 'opengraph', url: 'https://example.com', data: {}}]} as PostMetadata;
+
+        expect(shouldUpdateForRedaction(existing(before), incoming(after))).toBe(false);
+    });
+
+    it('should return true for a permalink embed the stored post did not have', () => {
+        const before = {embeds: []} as unknown as PostMetadata;
+        const after = {embeds: [permalinkEmbed('post-a', 0)]} as PostMetadata;
+
+        expect(shouldUpdateForRedaction(existing(before), incoming(after))).toBe(true);
     });
 });

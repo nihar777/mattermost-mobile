@@ -1,7 +1,7 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import React, {useCallback, useMemo} from 'react';
+import React, {useCallback} from 'react';
 import {defineMessage, useIntl} from 'react-intl';
 
 import SettingContainer from '@components/settings/container';
@@ -9,13 +9,11 @@ import SettingItem from '@components/settings/item';
 import {Screens} from '@constants';
 import {useTheme} from '@context/theme';
 import useAndroidHardwareBackHandler from '@hooks/android_back_handler';
+import useUserTimezoneProps from '@hooks/user_timezone';
 import {usePreventDoubleTap} from '@hooks/utils';
-import {goToScreen, popTopScreen} from '@screens/navigation';
-import {gotoSettingsScreen} from '@screens/settings/config';
-import {getUserTimezoneProps} from '@utils/user';
+import {navigateBack, navigateToSettingsScreen} from '@screens/navigation';
 
 import type UserModel from '@typings/database/models/servers/user';
-import type {AvailableScreens} from '@typings/screens/navigation';
 
 const CRT_FORMAT = [
     defineMessage({
@@ -51,7 +49,6 @@ const TIMEZONE_FORMAT = [
 ];
 
 type DisplayProps = {
-    componentId: AvailableScreens;
     currentUser?: UserModel;
     hasMilitaryTimeFormat: boolean;
     isCRTEnabled: boolean;
@@ -59,40 +56,29 @@ type DisplayProps = {
     isThemeSwitchingEnabled: boolean;
 }
 
-const Display = ({componentId, currentUser, hasMilitaryTimeFormat, isCRTEnabled, isCRTSwitchEnabled, isThemeSwitchingEnabled}: DisplayProps) => {
+const Display = ({currentUser, hasMilitaryTimeFormat, isCRTEnabled, isCRTSwitchEnabled, isThemeSwitchingEnabled}: DisplayProps) => {
     const intl = useIntl();
     const theme = useTheme();
-    const timezone = useMemo(() => getUserTimezoneProps(currentUser), [currentUser?.timezone]);
+
+    const timezone = useUserTimezoneProps(currentUser);
 
     const goToThemeSettings = usePreventDoubleTap(useCallback(() => {
-        const screen = Screens.SETTINGS_DISPLAY_THEME;
-        const title = intl.formatMessage({id: 'display_settings.theme', defaultMessage: 'Theme'});
-        goToScreen(screen, title);
-    }, [intl]));
+        navigateToSettingsScreen(Screens.SETTINGS_DISPLAY_THEME);
+    }, []));
 
     const goToClockDisplaySettings = usePreventDoubleTap(useCallback(() => {
-        const screen = Screens.SETTINGS_DISPLAY_CLOCK;
-        const title = intl.formatMessage({id: 'display_settings.clockDisplay', defaultMessage: 'Clock Display'});
-        gotoSettingsScreen(screen, title);
-    }, [intl]));
+        navigateToSettingsScreen(Screens.SETTINGS_DISPLAY_CLOCK);
+    }, []));
 
     const goToTimezoneSettings = usePreventDoubleTap(useCallback(() => {
-        const screen = Screens.SETTINGS_DISPLAY_TIMEZONE;
-        const title = intl.formatMessage({id: 'display_settings.timezone', defaultMessage: 'Timezone'});
-        gotoSettingsScreen(screen, title);
-    }, [intl]));
+        navigateToSettingsScreen(Screens.SETTINGS_DISPLAY_TIMEZONE);
+    }, []));
 
     const goToCRTSettings = usePreventDoubleTap(useCallback(() => {
-        const screen = Screens.SETTINGS_DISPLAY_CRT;
-        const title = intl.formatMessage({id: 'display_settings.crt', defaultMessage: 'Collapsed Reply Threads'});
-        gotoSettingsScreen(screen, title);
-    }, [intl]));
+        navigateToSettingsScreen(Screens.SETTINGS_DISPLAY_CRT);
+    }, []));
 
-    const close = useCallback(() => {
-        popTopScreen(componentId);
-    }, [componentId]);
-
-    useAndroidHardwareBackHandler(componentId, close);
+    useAndroidHardwareBackHandler(Screens.SETTINGS_DISPLAY, navigateBack);
 
     return (
         <SettingContainer testID='display_settings'>

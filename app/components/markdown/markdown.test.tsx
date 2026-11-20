@@ -7,7 +7,7 @@ const {Node} = CommonMark;
 import React from 'react';
 import {StyleSheet} from 'react-native';
 
-import {Preferences} from '@constants';
+import {Preferences, Screens} from '@constants';
 import {renderWithIntl} from '@test/intl-test-helper';
 import {getMarkdownTextStyles} from '@utils/markdown';
 import {typography} from '@utils/typography';
@@ -18,15 +18,27 @@ import * as Transforms from './transform';
 const Parser = jest.requireActual('commonmark').Parser;
 
 jest.mock('@screens/navigation', () => ({
-    dismissAllModalsAndPopToRoot: jest.fn(),
+    navigateToRoot: jest.fn(),
 }));
+
+jest.mock('./markdown_link', () => {
+    const MockReact = require('react');
+    const {Text} = require('react-native');
+
+    return {
+        __esModule: true,
+        default: ({href, children}: {href: string; children: React.ReactNode}) => (
+            MockReact.createElement(Text, {testID: 'markdown_link', href}, children)
+        ),
+    };
+});
 
 describe('Markdown', () => {
     const baseProps: React.ComponentProps<typeof Markdown> = {
         baseTextStyle: {},
         enableInlineLatex: true,
         enableLatex: true,
-        location: 'Channel',
+        location: Screens.CHANNEL,
         maxNodes: 2000,
         theme: Preferences.THEMES.denim,
     };
@@ -41,6 +53,19 @@ describe('Markdown', () => {
             );
 
             expect(screen.getByText('This is a test')).toBeVisible();
+        });
+
+        it('should remove object replacement characters before rendering Markdown', () => {
+            renderWithIntl(
+                <Markdown
+                    {...baseProps}
+                    value={'before\uFFFCmiddle\n\n\uFFFC\n\nafter'}
+                />,
+            );
+
+            expect(screen.getByText('beforemiddle')).toBeVisible();
+            expect(screen.getByText('after')).toBeVisible();
+            expect(screen.queryByText('\uFFFC')).toBeNull();
         });
 
         test('should catch errors when parsing Markdown', () => {
@@ -249,6 +274,78 @@ describe('Markdown', () => {
                 fontFamily: 'OpenSans',
                 color: baseProps.theme.linkColor,
             });
+        });
+    });
+
+    describe('phone number autolinking', () => {
+        beforeEach(() => {
+            jest.restoreAllMocks();
+        });
+
+        it('should autolink phone numbers when links are enabled', () => {
+            renderWithIntl(
+                <Markdown
+                    {...baseProps}
+                    value='Call 555-123-4567'
+                />,
+            );
+
+            const links = screen.getAllByTestId('markdown_link');
+            expect(links).toHaveLength(1);
+            expect(links[0].props.href).toBe('tel:5551234567');
+            expect(screen.getByText('555-123-4567')).toBeVisible();
+        });
+
+        it('should not autolink phone numbers when links are disabled', () => {
+            renderWithIntl(
+                <Markdown
+                    {...baseProps}
+                    disableLinks={true}
+                    value='Call 555-123-4567'
+                />,
+            );
+
+            expect(screen.queryAllByTestId('markdown_link')).toHaveLength(0);
+            expect(screen.getByText('Call 555-123-4567')).toBeVisible();
+        });
+
+        it('should not autolink phone numbers when the post has unsafe links', () => {
+            renderWithIntl(
+                <Markdown
+                    {...baseProps}
+                    isUnsafeLinksPost={true}
+                    value='Call 555-123-4567'
+                />,
+            );
+
+            expect(screen.queryAllByTestId('markdown_link')).toHaveLength(0);
+            expect(screen.getByText('Call 555-123-4567')).toBeVisible();
+        });
+    });
+
+    describe('link scheme allowlist', () => {
+        it('should render unknown-scheme tokens as plain text, not links', () => {
+            renderWithIntl(
+                <Markdown
+                    {...baseProps}
+                    value='Digest sha256:abc123 and image nginx:latest'
+                />,
+            );
+
+            expect(screen.queryAllByTestId('markdown_link')).toHaveLength(0);
+            expect(screen.getByText(/sha256:abc123/)).toBeVisible();
+        });
+
+        it('should keep allowed schemes as links', () => {
+            renderWithIntl(
+                <Markdown
+                    {...baseProps}
+                    value='[site](https://example.com) and [mail](mailto:a@example.com)'
+                />,
+            );
+
+            const links = screen.getAllByTestId('markdown_link');
+            expect(links.map((l) => l.props.href)).toEqual(['https://example.com', 'mailto:a@example.com']);
         });
     });
 });

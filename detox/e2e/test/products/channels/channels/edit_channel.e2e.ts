@@ -25,6 +25,7 @@ import {
     HomeScreen,
     LoginScreen,
     ServerScreen,
+    ChannelSettingsScreen,
 } from '@support/ui/screen';
 import {isAndroid, isIos, timeouts, wait} from '@support/utils';
 import {expect} from 'detox';
@@ -41,8 +42,14 @@ describe('Channels - Edit Channel', () => {
         testChannel = channel;
 
         ({user: testOtherUser1} = await User.apiCreateUser(siteOneUrl, {prefix: 'a'}));
+        if (!testOtherUser1?.id) {
+            throw new Error('[beforeAll] Failed to create testOtherUser1');
+        }
         await Team.apiAddUserToTeam(siteOneUrl, testOtherUser1.id, team.id);
         ({user: testOtherUser2} = await User.apiCreateUser(siteOneUrl, {prefix: 'b'}));
+        if (!testOtherUser2?.id) {
+            throw new Error('[beforeAll] Failed to create testOtherUser2');
+        }
         await Team.apiAddUserToTeam(siteOneUrl, testOtherUser2.id, team.id);
 
         // # Log in to server
@@ -57,13 +64,23 @@ describe('Channels - Edit Channel', () => {
     });
 
     beforeEach(async () => {
-        // * Verify on channel screen
-        await ChannelScreen.toBeVisible();
+        try {
+            await ChannelScreen.toBeVisible();
+        } catch {
+            // Prior test may have failed mid-flow (e.g. Create DM tutorial blocking channel).
+            await ChannelListScreen.toBeVisible();
+            await ChannelScreen.open(channelsCategory, testChannel.name);
+        }
     });
 
     afterAll(async () => {
-        // # Log out
-        await ChannelScreen.back();
+        // A failed test can leave the app on a screen without the home tab, so opening the channel
+        // list may fail here; logout handles navigation recovery.
+        try {
+            await ChannelListScreen.open();
+        } catch {
+            // App may be on a different screen; logout will navigate home.
+        }
         await HomeScreen.logout();
     });
 
@@ -73,7 +90,6 @@ describe('Channels - Edit Channel', () => {
         await CreateOrEditChannelScreen.openEditChannel();
 
         // * Verify basic elements on edit channel screen
-        await expect(CreateOrEditChannelScreen.backButton).toBeVisible();
         await expect(CreateOrEditChannelScreen.saveButton).toBeVisible();
         await expect(CreateOrEditChannelScreen.displayNameInput).toBeVisible();
         await expect(CreateOrEditChannelScreen.purposeInput).toBeVisible();
@@ -81,8 +97,9 @@ describe('Channels - Edit Channel', () => {
         await expect(CreateOrEditChannelScreen.headerInput).toBeVisible();
         await expect(CreateOrEditChannelScreen.headerDescription).toHaveText('Specify text to appear in the channel header beside the channel name. For example, include frequently used links by typing link text [Link Title](http://example.com).');
 
-        // # Go back to channel screen
+        // # Go back to channel screen (CreateOrEditChannel back goes to Channel Settings, then close to Channel Info, then close Channel Info)
         await CreateOrEditChannelScreen.back();
+        await ChannelSettingsScreen.close();
         await ChannelInfoScreen.close();
     });
 
@@ -103,12 +120,26 @@ describe('Channels - Edit Channel', () => {
         }
 
         // # Edit channel info and save changes
-        await CreateOrEditChannelScreen.displayNameInput.typeText(' name');
-        await CreateOrEditChannelScreen.purposeInput.typeText(' purpose');
-        await CreateOrEditChannelScreen.headerInput.typeText('\nheader1\nheader2');
+        if (isAndroid()) {
+            await CreateOrEditChannelScreen.displayNameInput.replaceText(`${testChannel.display_name} name`);
+            await CreateOrEditChannelScreen.purposeInput.replaceText(`Channel purpose: ${testChannel.display_name.toLowerCase()} purpose`);
+            await CreateOrEditChannelScreen.headerInput.replaceText(`Channel header: ${testChannel.display_name.toLowerCase()}\nheader1\nheader2`);
+        } else {
+            await CreateOrEditChannelScreen.displayNameInput.typeText(' name');
+            await CreateOrEditChannelScreen.purposeInput.typeText(' purpose');
+            await CreateOrEditChannelScreen.headerInput.typeText('\nheader1\nheader2');
+        }
         await CreateOrEditChannelScreen.saveButton.tap();
 
         // * Verify on channel info screen and changes have been saved
+        // iOS pops back to ChannelSettingsScreen after save while Android goes straight to
+        // ChannelInfoScreen, so try-catch handles both.
+        try {
+            await ChannelSettingsScreen.toBeVisible();
+            await ChannelSettingsScreen.close();
+        } catch {
+            // Android: save navigated directly to ChannelInfoScreen
+        }
         await ChannelInfoScreen.toBeVisible();
         await expect(ChannelInfoScreen.publicPrivateTitleDisplayName).toHaveText(`${testChannel.display_name} name`);
         await expect(ChannelInfoScreen.publicPrivateTitlePurpose).toHaveText(`Channel purpose: ${testChannel.display_name.toLowerCase()} purpose`);

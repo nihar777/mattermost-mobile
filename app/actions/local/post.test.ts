@@ -2,9 +2,12 @@
 // See LICENSE.txt for license information.
 
 import {ActionType, Post} from '@constants';
-import {SYSTEM_IDENTIFIERS} from '@constants/database';
+import {MM_TABLES, SYSTEM_IDENTIFIERS} from '@constants/database';
 import DatabaseManager from '@database/manager';
+import {getMyChannel} from '@queries/servers/channel';
+import {getPostById, queryPostsById, queryPostsInChannel} from '@queries/servers/post';
 import TestHelper from '@test/test_helper';
+import {deleteDownloadedFiles} from '@utils/file';
 import {COMBINED_USER_ACTIVITY} from '@utils/post_list';
 
 import {
@@ -13,14 +16,25 @@ import {
     removePost,
     markPostAsDeleted,
     storePostsForChannel,
+    batchRecordsAndDeleteRevokedFiles,
     getPosts,
     addPostAcknowledgement,
     removePostAcknowledgement,
     deletePosts,
+    deletePostsInChannelsByCutoff,
     getUsersCountFromMentions,
+    updatePostTranslation,
+    hasUnverifiedAttachmentPosts,
+    hasUnverifiedAttachmentPostsInThread,
 } from './post';
+import {RedactionInvalidationReason, invalidateRedactionGlobally} from './redaction';
 
 import type ServerDataOperator from '@database/operator/server_data_operator';
+import type {RevokedFile} from '@typings/database/database';
+import type MyChannelModel from '@typings/database/models/servers/my_channel';
+import type PostsInThreadModel from '@typings/database/models/servers/posts_in_thread';
+
+const {SERVER: {DRAFT, FILE, MY_CHANNEL, POST, POSTS_IN_CHANNEL, POSTS_IN_THREAD, REACTION, THREAD, THREAD_PARTICIPANT, THREADS_IN_TEAM}} = MM_TABLES;
 
 const serverUrl = 'baseHandler.test.com';
 let operator: ServerDataOperator;
@@ -34,6 +48,11 @@ jest.mock('@utils/general', () => {
         generateId: mockGenerateId,
     };
 });
+
+jest.mock('@utils/file', () => ({
+    ...jest.requireActual('@utils/file'),
+    deleteDownloadedFiles: jest.fn(),
+}));
 
 let mockGetIsCRTEnabled: jest.Mock;
 jest.mock('@queries/servers/thread', () => {
@@ -221,6 +240,76 @@ describe('storePostsForChannel', () => {
         expect(models).toBeDefined();
         expect(models?.length).toBe(4); // Post, PostsInChannel, User, MyChannel
     });
+
+    it('should not advance lastFetchedAt for a thread payload', async () => {
+        await operator.handleMyChannel({channels: [channel], myChannels: [channelMember], prepareRecordsOnly: false});
+
+        const seed = [100, 105, 110].map((t) => TestHelper.fakePost({
+            id: `seed-${t}`, channel_id: channelId, user_id: user.id, create_at: t, update_at: t,
+        }));
+        await storePostsForChannel(serverUrl, channelId, seed, seed.map((p) => p.id), '', ActionType.POSTS.RECEIVED_IN_CHANNEL, [user]);
+
+        const database = DatabaseManager.serverDatabases[serverUrl]!.database;
+        expect((await getMyChannel(database, channelId))?.lastFetchedAt).toBe(110);
+        const intervalsBefore = await queryPostsInChannel(database, channelId).fetch();
+        expect(intervalsBefore.length).toBe(1);
+
+        // A thread reply far newer than the channel tail, as delivered by a push notification.
+        const root = TestHelper.fakePost({id: 'root', channel_id: channelId, user_id: user.id, create_at: 90, update_at: 90});
+        const reply = TestHelper.fakePost({id: 'reply', channel_id: channelId, user_id: user.id, create_at: 200, update_at: 200, root_id: 'root'});
+        await storePostsForChannel(serverUrl, channelId, [root, reply], [reply.id, root.id], '', ActionType.POSTS.RECEIVED_IN_THREAD, [user]);
+
+        // The watermark must stay put: posts created between 110 and 200 were never fetched,
+        // and getPostsSince would skip them forever if it moved.
+        expect((await getMyChannel(database, channelId))?.lastFetchedAt).toBe(110);
+
+        const intervalsAfter = await queryPostsInChannel(database, channelId).fetch();
+        expect(intervalsAfter.length).toBe(1);
+        expect(intervalsAfter[0].latest).toBe(110);
+    });
+
+    it('should return revoked files when only preparing', async () => {
+        await operator.handleMyChannel({channels: [channel], myChannels: [channelMember], prepareRecordsOnly: false});
+        await storePostsForChannel(serverUrl, channelId, [{...post, file_ids: ['fileid']}], [post.id], '', ActionType.POSTS.RECEIVED_IN_CHANNEL, [user]);
+        await operator.handleFiles({
+            files: [TestHelper.fakeFileInfo({id: 'fileid', post_id: post.id})],
+            prepareRecordsOnly: false,
+        });
+        jest.mocked(deleteDownloadedFiles).mockClear();
+
+        const redacted = {...post, file_ids: [], metadata: {redacted_file_count: 1}};
+        const {models, revokedFiles, error} = await storePostsForChannel(serverUrl, channelId, [redacted], [post.id], '', ActionType.POSTS.RECEIVED_IN_CHANNEL, [user], true);
+        await operator.batchRecords(models ?? [], 'test');
+
+        expect(error).toBeUndefined();
+        expect(revokedFiles).toHaveLength(1);
+        expect(revokedFiles?.[0].id).toBe('fileid');
+        expect(deleteDownloadedFiles).not.toHaveBeenCalled();
+    });
+});
+
+describe('batchRecordsAndDeleteRevokedFiles', () => {
+    const revokedFiles: RevokedFile[] = [{id: 'fileid', name: 'secret.png', extension: 'png', mime_type: 'image/png', localPath: '/tmp/secret.png'}];
+
+    it('should delete the files after the batch commits', async () => {
+        const post = TestHelper.fakePost({channel_id: channelId, user_id: user.id});
+        const {models} = await operator.handlePosts({actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL, order: [post.id], posts: [post], prepareRecordsOnly: true});
+
+        await batchRecordsAndDeleteRevokedFiles(serverUrl, models, revokedFiles, 'test');
+
+        const database = DatabaseManager.serverDatabases[serverUrl]!.database;
+        expect(await getPostById(database, post.id)).toBeDefined();
+        expect(deleteDownloadedFiles).toHaveBeenCalledWith(serverUrl, revokedFiles);
+    });
+
+    it('should keep the files when the batch fails', async () => {
+        const post = TestHelper.fakePost({channel_id: channelId, user_id: user.id});
+        const {models} = await operator.handlePosts({actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL, order: [post.id], posts: [post], prepareRecordsOnly: true});
+        jest.spyOn(operator.database, 'write').mockRejectedValueOnce(new Error('write failed'));
+
+        await expect(batchRecordsAndDeleteRevokedFiles(serverUrl, models, revokedFiles, 'test')).rejects.toThrow('write failed');
+        expect(deleteDownloadedFiles).not.toHaveBeenCalled();
+    });
 });
 
 describe('getPosts', () => {
@@ -350,5 +439,356 @@ describe('getUsersCountFromMentions', () => {
 
         const num = await getUsersCountFromMentions(serverUrl, [user.username]);
         expect(num).toBe(1);
+    });
+});
+
+describe('updatePostTranslation', () => {
+    const post = TestHelper.fakePost({id: 'postid4', channel_id: channelId});
+
+    it('post not found', async () => {
+        const translation: PostTranslation = {object: {message: 'Hola'}, state: 'ready', source_lang: 'en'};
+        const result = await updatePostTranslation(serverUrl, 'nonexistent', 'es', translation);
+        expect(result.error).toBe('Post not found');
+    });
+
+    it('updates post metadata with translation', async () => {
+        await operator.handlePosts({
+            actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+            order: [post.id],
+            posts: [post],
+            prepareRecordsOnly: false,
+        });
+
+        const translation: PostTranslation = {object: {message: 'Hola'}, state: 'ready', source_lang: 'en'};
+        const result = await updatePostTranslation(serverUrl, post.id, 'es', translation);
+        expect(result.error).toBeUndefined();
+
+        const updatedPost = await getPostById(operator.database, post.id);
+        expect(updatedPost).toBeDefined();
+        expect(updatedPost?.metadata?.translations?.es).toEqual(translation);
+    });
+
+    it('handle database write error', async () => {
+        await operator.handlePosts({
+            actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+            order: [post.id],
+            posts: [post],
+            prepareRecordsOnly: false,
+        });
+
+        const originalWrite = operator.database.write;
+        operator.database.write = jest.fn().mockRejectedValue(new Error('Write failed'));
+
+        const translation: PostTranslation = {object: {message: 'Hola'}, state: 'ready', source_lang: 'en'};
+        const result = await updatePostTranslation(serverUrl, post.id, 'es', translation);
+
+        operator.database.write = originalWrite;
+
+        expect(result.error).toBeTruthy();
+    });
+});
+
+describe('deletePostsInChannelsByCutoff', () => {
+    const CUTOFF = 50_000_000;
+    const OLD = 10_000_000;
+    const RECENT = 90_000_000;
+
+    const postsInChannel = [
+        TestHelper.fakePost({channel_id: 'cId', create_at: OLD}),
+        TestHelper.fakePost({channel_id: 'cId', create_at: RECENT}),
+    ];
+
+    async function writeRootPost(id: string, chanId: string, createAt: number): Promise<void> {
+        await operator.database.write(async () => {
+            await operator.database.get(POST).create((r: any) => {
+                r._raw.id = id;
+                r.channelId = chanId;
+                r.createAt = createAt;
+                r.deleteAt = 0;
+                r.editAt = 0;
+                r.isPinned = false;
+                r.message = '';
+                r.messageSource = '';
+                r.originalId = '';
+                r.pendingPostId = '';
+                r.previousPostId = '';
+                r.props = '{}';
+                r.rootId = '';
+                r.type = '';
+                r.updateAt = 0;
+                r.userId = '';
+            });
+        });
+    }
+
+    async function writePostsInThread(rootId: string, earliest: number, latest: number): Promise<PostsInThreadModel> {
+        let record!: PostsInThreadModel;
+        await operator.database.write(async () => {
+            record = await operator.database.get<PostsInThreadModel>(POSTS_IN_THREAD).create((r) => {
+                r.rootId = rootId;
+                r.earliest = earliest;
+                r.latest = latest;
+            });
+        });
+        return record;
+    }
+
+    async function writeMyChannel(chanId: string, lastFetchedAt: number): Promise<MyChannelModel> {
+        let record!: MyChannelModel;
+        await operator.database.write(async () => {
+            record = await operator.database.get<MyChannelModel>(MY_CHANNEL).create((r) => {
+                r._raw.id = chanId;
+                r.lastPostAt = 0;
+                r.lastFetchedAt = lastFetchedAt;
+                r.lastViewedAt = 0;
+                r.manuallyUnread = false;
+                r.messageCount = 0;
+                r.mentionsCount = 0;
+                r.isUnread = false;
+                r.roles = '';
+                r.viewedAt = 0;
+                r.lastPlaybookRunsFetchAt = 0;
+                r.autotranslationDisabled = false;
+            });
+        });
+        return record;
+    }
+
+    it('handle not found database', async () => {
+        const {error} = await deletePostsInChannelsByCutoff('foo', [channelId], CUTOFF);
+        expect(error).toBeTruthy();
+    });
+
+    it('should return count of posts matched by cutoff', async () => {
+        jest.spyOn(operator.database.adapter, 'unsafeExecute').mockResolvedValue();
+        jest.spyOn(operator.database.adapter.underlyingAdapter, 'count').mockImplementation((_query, callback) => callback({value: 2}));
+        const oldPosts = [
+            TestHelper.fakePost({channel_id: channelId, create_at: OLD}),
+            TestHelper.fakePost({channel_id: channelId, create_at: OLD}),
+        ];
+        const recentPost = TestHelper.fakePost({channel_id: channelId, create_at: RECENT});
+
+        await operator.handlePosts({
+            actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+            order: [oldPosts[0].id, oldPosts[1].id, recentPost.id],
+            posts: [...oldPosts, recentPost],
+            prepareRecordsOnly: false,
+        });
+
+        const {error, deletedCount} = await deletePostsInChannelsByCutoff(serverUrl, [channelId], CUTOFF);
+
+        expect(error).toBeUndefined();
+        expect(deletedCount).toBe(2);
+    });
+
+    // A cached model whose earliest advances has to go through the model layer (fires observers)
+    it('advances the cached PostsInChannel earliest through the model layer', async () => {
+        jest.spyOn(operator.database.adapter, 'unsafeExecute').mockResolvedValue();
+        jest.spyOn(operator.database.adapter.underlyingAdapter, 'count').mockImplementation((_query, callback) => callback({value: 0}));
+        const [pic] = await operator.handleReceivedPostsInChannel(postsInChannel);
+
+        await deletePostsInChannelsByCutoff(serverUrl, ['cId'], CUTOFF);
+
+        expect(pic.earliest).toBe(CUTOFF);
+    });
+
+    it('advances the cached PostsInThread earliest through the model layer', async () => {
+        jest.spyOn(operator.database.adapter, 'unsafeExecute').mockResolvedValue();
+        jest.spyOn(operator.database.adapter.underlyingAdapter, 'count').mockImplementation((_query, callback) => callback({value: 0}));
+        await writeRootPost('rootId', 'cId', OLD);
+        const pit = await writePostsInThread('rootId', OLD, RECENT);
+
+        await deletePostsInChannelsByCutoff(serverUrl, ['cId'], CUTOFF);
+
+        expect(pit.earliest).toBe(CUTOFF);
+    });
+
+    it('resets the cached MyChannel lastFetchedAt when no PostsInChannel range survives for the channel', async () => {
+        jest.spyOn(operator.database.adapter, 'unsafeExecute').mockResolvedValue();
+        jest.spyOn(operator.database.adapter.underlyingAdapter, 'count').mockImplementation((_query, callback) => callback({value: 0}));
+        const myChannel = await writeMyChannel('cId', RECENT);
+
+        await deletePostsInChannelsByCutoff(serverUrl, ['cId'], CUTOFF);
+
+        expect(myChannel.lastFetchedAt).toBe(0);
+    });
+
+    it('leaves the cached MyChannel lastFetchedAt untouched when a PostsInChannel range still exists for the channel', async () => {
+        jest.spyOn(operator.database.adapter, 'unsafeExecute').mockResolvedValue();
+        await operator.handleReceivedPostsInChannel(postsInChannel);
+        const myChannel = await writeMyChannel('cId', RECENT);
+
+        await deletePostsInChannelsByCutoff(serverUrl, ['cId'], CUTOFF);
+
+        expect(myChannel.lastFetchedAt).toBe(RECENT);
+    });
+
+    it('includes the PostsInChannel destroy/update and MyChannel reset, in that order, in the same unsafeExecute call as the post delete', async () => {
+        const database = operator.database;
+        jest.spyOn(database.adapter, 'unsafeExecute').mockImplementation(() => Promise.resolve());
+        jest.spyOn(database.adapter.underlyingAdapter, 'count').mockImplementation((_query, callback) => callback({value: 0}));
+
+        const {error} = await deletePostsInChannelsByCutoff(serverUrl, [channelId], CUTOFF);
+
+        expect(error).toBeUndefined();
+        const hasActiveReply = `EXISTS (SELECT 1 FROM ${POSTS_IN_THREAD} WHERE ${POSTS_IN_THREAD}.root_id = ${POST}.id AND ${POSTS_IN_THREAD}.latest >= ${CUTOFF})`;
+        const hasDraft = `EXISTS (SELECT 1 FROM ${DRAFT} WHERE ${DRAFT}.root_id = ${POST}.id)`;
+        const postCondition = `channel_id IN (?) AND create_at < ${CUTOFF} AND NOT ${hasActiveReply} AND NOT ${hasDraft}`;
+        const postSubquery = `SELECT id FROM ${POST} WHERE ${postCondition}`;
+        const rootInChannelsExists = `EXISTS (SELECT 1 FROM ${POST} WHERE ${POST}.id = ${POSTS_IN_THREAD}.root_id AND ${POST}.channel_id IN (?))`;
+        expect(database.adapter.unsafeExecute).toHaveBeenCalledWith({
+            sqls: [
+                [`DELETE FROM ${REACTION} WHERE post_id IN (${postSubquery})`, [channelId]],
+                [`DELETE FROM ${FILE} WHERE post_id IN (${postSubquery})`, [channelId]],
+                [`DELETE FROM ${POSTS_IN_THREAD} WHERE latest < ${CUTOFF} AND ${rootInChannelsExists}`, [channelId]],
+                [`UPDATE ${POSTS_IN_THREAD} SET earliest = ${CUTOFF} WHERE earliest < ${CUTOFF} AND ${rootInChannelsExists}`, [channelId]],
+                [`DELETE FROM ${THREAD} WHERE id IN (${postSubquery})`, [channelId]],
+                [`DELETE FROM ${THREAD_PARTICIPANT} WHERE thread_id IN (${postSubquery})`, [channelId]],
+                [`DELETE FROM ${THREADS_IN_TEAM} WHERE thread_id IN (${postSubquery})`, [channelId]],
+                [`DELETE FROM ${POST} WHERE ${postCondition}`, [channelId]],
+                [`DELETE FROM ${POSTS_IN_CHANNEL} WHERE channel_id IN (?) AND latest < ${CUTOFF}`, [channelId]],
+                [`UPDATE ${POSTS_IN_CHANNEL} SET earliest = ${CUTOFF} WHERE channel_id IN (?) AND earliest < ${CUTOFF}`, [channelId]],
+                [`UPDATE ${MY_CHANNEL} SET last_fetched_at = 0 WHERE id IN (?) AND last_fetched_at > 0 AND NOT EXISTS (SELECT 1 FROM ${POSTS_IN_CHANNEL} WHERE channel_id = ${MY_CHANNEL}.id)`, [channelId]],
+            ],
+        });
+    });
+
+    it('returns an error and no deleted count when the underlying transaction fails', async () => {
+        const database = operator.database;
+        jest.spyOn(database.adapter, 'unsafeExecute').mockImplementation(() => Promise.reject(new Error('fail')));
+
+        const {error, deletedCount} = await deletePostsInChannelsByCutoff(serverUrl, [channelId], CUTOFF);
+
+        expect(error).toBeTruthy();
+        expect(deletedCount).toBe(0);
+    });
+
+    it('returns an error without deleting anything when counting matched posts fails', async () => {
+        const database = operator.database;
+        jest.spyOn(database.adapter.underlyingAdapter, 'count').mockImplementation((_query, callback) => {
+            callback({error: new Error('count failed')});
+        });
+        const unsafeExecuteSpy = jest.spyOn(database.adapter, 'unsafeExecute');
+
+        const {error, deletedCount} = await deletePostsInChannelsByCutoff(serverUrl, [channelId], CUTOFF);
+
+        expect(error).toBeTruthy();
+        expect(deletedCount).toBe(0);
+        expect(unsafeExecuteSpy).not.toHaveBeenCalled();
+    });
+
+    it('scopes the post delete and its dependent subqueries to exclude the given post IDs', async () => {
+        const database = operator.database;
+        jest.spyOn(database.adapter, 'unsafeExecute').mockImplementation(() => Promise.resolve());
+        jest.spyOn(database.adapter.underlyingAdapter, 'count').mockImplementation((_query, callback) => callback({value: 0}));
+
+        const {error} = await deletePostsInChannelsByCutoff(serverUrl, [channelId], CUTOFF, new Set(['excluded-1', 'excluded-2']));
+
+        expect(error).toBeUndefined();
+        const hasActiveReply = `EXISTS (SELECT 1 FROM ${POSTS_IN_THREAD} WHERE ${POSTS_IN_THREAD}.root_id = ${POST}.id AND ${POSTS_IN_THREAD}.latest >= ${CUTOFF})`;
+        const hasDraft = `EXISTS (SELECT 1 FROM ${DRAFT} WHERE ${DRAFT}.root_id = ${POST}.id)`;
+        const postCondition = `channel_id IN (?) AND create_at < ${CUTOFF} AND NOT ${hasActiveReply} AND NOT ${hasDraft} AND id NOT IN (?,?)`;
+        const postSubquery = `SELECT id FROM ${POST} WHERE ${postCondition}`;
+        const postConditionArgs = [channelId, 'excluded-1', 'excluded-2'];
+        expect(database.adapter.unsafeExecute).toHaveBeenCalledWith(
+            expect.objectContaining({
+                sqls: expect.arrayContaining([
+                    [`DELETE FROM ${REACTION} WHERE post_id IN (${postSubquery})`, postConditionArgs],
+                    [`DELETE FROM ${POST} WHERE ${postCondition}`, postConditionArgs],
+                ]),
+            }),
+        );
+    });
+});
+
+describe('hasUnverifiedAttachmentPosts', () => {
+    const enforceRedaction = async () => {
+        await operator.handleConfigs({
+            configs: [
+                {id: 'FeatureFlagPermissionPolicies', value: 'true'},
+                {id: 'EnableAttributeBasedAccessControl', value: 'true'},
+            ],
+            configsToDelete: [],
+            prepareRecordsOnly: false,
+        });
+    };
+
+    const storePosts = async (posts: Post[]) => {
+        await operator.handlePosts({
+            actionType: ActionType.POSTS.RECEIVED_IN_CHANNEL,
+            order: posts.map((p) => p.id),
+            posts,
+            prepareRecordsOnly: false,
+            redactionVerifiedEpoch: 1,
+        });
+        return queryPostsById(operator.database, posts.map((p) => p.id)).fetch();
+    };
+
+    const storeUnverifiedPost = async (overrides: Partial<Post>) => {
+        const models = await storePosts([TestHelper.fakePost({id: 'postid', channel_id: channelId, ...overrides})]);
+        await invalidateRedactionGlobally(serverUrl, RedactionInvalidationReason.GlobalPolicy);
+        return models;
+    };
+
+    it('should return false when redaction is not enforced', async () => {
+        const posts = await storeUnverifiedPost({metadata: {redacted_file_count: 1}});
+
+        expect(await hasUnverifiedAttachmentPosts(operator.database, channelId, posts)).toBe(false);
+    });
+
+    it('should return false when the unverified posts are text-only', async () => {
+        await enforceRedaction();
+        const posts = await storeUnverifiedPost({metadata: {}});
+
+        expect(await hasUnverifiedAttachmentPosts(operator.database, channelId, posts)).toBe(false);
+    });
+
+    it('should return false when the posts are verified', async () => {
+        await enforceRedaction();
+        const posts = await storePosts([TestHelper.fakePost({id: 'postid', channel_id: channelId, metadata: {redacted_file_count: 1}})]);
+
+        expect(await hasUnverifiedAttachmentPosts(operator.database, channelId, posts)).toBe(false);
+    });
+
+    it('should return true for an unverified post with a stored file', async () => {
+        await enforceRedaction();
+        const posts = await storeUnverifiedPost({metadata: {files: [TestHelper.fakeFileInfo({id: 'fileid', post_id: 'postid'})]}});
+
+        expect(await hasUnverifiedAttachmentPosts(operator.database, channelId, posts)).toBe(true);
+    });
+
+    it('should return true for an unverified post with redacted files', async () => {
+        await enforceRedaction();
+        const posts = await storeUnverifiedPost({metadata: {redacted_file_count: 1}});
+
+        expect(await hasUnverifiedAttachmentPosts(operator.database, channelId, posts)).toBe(true);
+    });
+
+    it('should return true for an unverified post with a permalink embed', async () => {
+        await enforceRedaction();
+        const posts = await storeUnverifiedPost({metadata: {embeds: [{type: 'permalink', url: '', data: {}}]}});
+
+        expect(await hasUnverifiedAttachmentPosts(operator.database, channelId, posts)).toBe(true);
+    });
+
+    describe('hasUnverifiedAttachmentPostsInThread', () => {
+        it('should return true when only the root has files', async () => {
+            await enforceRedaction();
+            await storePosts([
+                TestHelper.fakePost({id: 'rootid', channel_id: channelId, metadata: {redacted_file_count: 1}}),
+                TestHelper.fakePost({id: 'replyid', channel_id: channelId, root_id: 'rootid', metadata: {}}),
+            ]);
+            await invalidateRedactionGlobally(serverUrl, RedactionInvalidationReason.GlobalPolicy);
+
+            expect(await hasUnverifiedAttachmentPostsInThread(operator.database, 'rootid')).toBe(true);
+        });
+
+        it('should return false when the root is not stored', async () => {
+            await enforceRedaction();
+            await storePosts([TestHelper.fakePost({id: 'replyid', channel_id: channelId, root_id: 'rootid', metadata: {redacted_file_count: 1}})]);
+            await invalidateRedactionGlobally(serverUrl, RedactionInvalidationReason.GlobalPolicy);
+
+            expect(await hasUnverifiedAttachmentPostsInThread(operator.database, 'rootid')).toBe(false);
+        });
     });
 });

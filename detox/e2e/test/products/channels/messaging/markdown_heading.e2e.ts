@@ -8,7 +8,6 @@
 // *******************************************************************
 
 import {
-    Post,
     Setup,
 } from '@support/server_api';
 import {
@@ -53,13 +52,12 @@ describe('Messaging - Markdown Heading', () => {
         const message = 'Heading';
         const markdownHeading = `## ${message}`;
         await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelScreen.postMessage(markdownHeading);
 
         // * Verify markdown heading is displayed
-        const {post} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
+        const {post} = await ChannelScreen.postMessageAndVerify(markdownHeading, testChannel.id, siteOneUrl);
         const {postListPostItemHeading} = ChannelScreen.getPostListPostItem(post.id, message);
-        await expect(postListPostItemHeading).toBeVisible();
-        await expect(element(by.text(message))).toBeVisible();
+        await expect(postListPostItemHeading).toBeVisible(50);
+        await expect(element(by.text(message))).toBeVisible(50);
 
         // # Go back to channel list screen
         await ChannelScreen.back();

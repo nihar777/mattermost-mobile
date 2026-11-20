@@ -10,13 +10,16 @@ import DatabaseManager from '@database/manager';
 import {getConfigValue} from '@queries/servers/system';
 import {hasReliableWebsocket} from '@utils/config';
 import {toMilliseconds} from '@utils/datetime';
+import {getFullErrorMessage} from '@utils/errors';
 import {logDebug, logError, logInfo, logWarning} from '@utils/log';
+import {isSecureUrl} from '@utils/url';
 
 const MAX_WEBSOCKET_FAILS = 7;
 const WEBSOCKET_TIMEOUT = toMilliseconds({seconds: 30});
 const MIN_WEBSOCKET_RETRY_TIME = toMilliseconds({seconds: 3});
 const MAX_WEBSOCKET_RETRY_TIME = toMilliseconds({minutes: 5});
 const PING_INTERVAL = toMilliseconds({seconds: 30});
+const WAIT_FOR_CLOSE_TIMEOUT = 500;
 const DEFAULT_OPTIONS = {
     forceConnection: true,
 };
@@ -35,6 +38,7 @@ export default class WebSocketClient {
 
     private pingInterval: NodeJS.Timeout | undefined;
     private waitingForPong: boolean = false;
+    private pendingCloseResolver?: () => void;
 
     // The first time we connect to a server (on init or login)
     // we do the sync out of the websocket lifecycle.
@@ -87,6 +91,12 @@ export default class WebSocketClient {
             getConfigValue(database, 'Version'),
             getConfigValue(database, 'EnableReliableWebSockets'),
         ]);
+
+        // Bail if teardown started while we were awaiting config values
+        if (this.stop) {
+            return;
+        }
+
         const connectionUrl = (websocketUrl || this.serverUrl) + '/api/v4/websocket';
 
         if (this.connectingCallback) {
@@ -111,7 +121,7 @@ export default class WebSocketClient {
         const reliableWebSockets = hasReliableWebsocket(version, reliableWebsocketConfig);
         if (reliableWebSockets) {
             // Add connection id, and last_sequence_number to the query param.
-            // We cannot also send it as part of the auth_challenge, because the session cookie is already sent with the request.
+            // We cannot also send it as part of the auth_challenge, because on iOS the session cookie is already sent with the request and on Android the bearer header is.
             this.url = `${connectionUrl}?connection_id=${this.connectionId}&sequence_number=${this.serverSequence}`;
         }
 
@@ -138,13 +148,19 @@ export default class WebSocketClient {
                 headers.Authorization = `Bearer ${this.token}`;
             }
 
-            // Add shared password header if available
-            if (this.preauthSecret) {
+            // Add shared password header if available, only over TLS
+            if (this.preauthSecret && isSecureUrl(this.url)) {
                 headers[ClientConstants.HEADER_X_MATTERMOST_PREAUTH_SECRET] = this.preauthSecret;
                 logDebug('WebSocket: Added shared password header for', this.serverUrl);
             }
 
             const {client} = await getOrCreateWebSocketClient(this.url, {headers, timeoutInterval: WEBSOCKET_TIMEOUT});
+
+            // Bail if teardown started while we were awaiting the native client
+            if (this.stop) {
+                client.invalidate();
+                return;
+            }
 
             // Check again if the client is the same, to avoid race conditions
             if (this.conn === client) {
@@ -157,8 +173,16 @@ export default class WebSocketClient {
                 }
                 return;
             }
+
+            // Invalidate the previous native client so it doesn't remain as an orphan
+            // in the native registry. With reliable websockets each reconnect builds a
+            // new URL (different connection_id/sequence_number), so getOrCreateWebSocketClient
+            // creates a new native entry — the old one must be explicitly removed.
+            this.conn?.invalidate();
             this.conn = client;
         } catch (error) {
+            const errorMessage = getFullErrorMessage(error).replace(this.url, '<redacted websocket URL>');
+            logError('WebSocketClient.initialize: failed to create WebSocket client', 'server', this.serverUrl, errorMessage);
             return;
         }
 
@@ -225,6 +249,11 @@ export default class WebSocketClient {
             this.conn = undefined;
             this.responseSequence = 1;
 
+            if (this.pendingCloseResolver) {
+                this.pendingCloseResolver();
+                this.pendingCloseResolver = undefined;
+            }
+
             // We skip the sync on first connect, since we are syncing along
             // the init logic. If the connection closes at any point after that,
             // we don't want to skip the sync. If we keep the same connection and
@@ -273,8 +302,7 @@ export default class WebSocketClient {
         this.conn!.onError((evt: any) => {
             if (evt.url === this.url) {
                 if (this.connectFailCount <= 1) {
-                    logError('websocket error', this.url);
-                    logError('WEBSOCKET ERROR EVENT', evt);
+                    logError('websocket error', 'server', this.serverUrl, 'code', evt?.code, 'reason', evt?.reason);
                 }
 
                 if (this.errorCallback) {
@@ -384,6 +412,24 @@ export default class WebSocketClient {
         clearTimeout(this.connectionTimeout);
         clearInterval(this.pingInterval);
         this.conn?.close();
+    }
+
+    public waitForClose(): Promise<void> {
+        if (!this.conn) {
+            return Promise.resolve();
+        }
+
+        return new Promise<void>((resolve) => {
+            const timer = setTimeout(() => {
+                this.pendingCloseResolver = undefined;
+                resolve();
+            }, WAIT_FOR_CLOSE_TIMEOUT);
+
+            this.pendingCloseResolver = () => {
+                clearTimeout(timer);
+                resolve();
+            };
+        });
     }
 
     public invalidate() {

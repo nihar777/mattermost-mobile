@@ -2,11 +2,12 @@
 // See LICENSE.txt for license information.
 
 import React, {useCallback} from 'react';
-import {Text, TouchableOpacity, View} from 'react-native';
+import {Pressable, Text, View} from 'react-native';
 
 import CompassIcon from '@components/compass_icon';
 import {useTheme} from '@context/theme';
 import {makeStyleSheetFromTheme, changeOpacity} from '@utils/theme';
+import {typography} from '@utils/typography';
 
 const getStyleSheet = makeStyleSheetFromTheme((theme: Theme) => {
     return {
@@ -27,12 +28,18 @@ const getStyleSheet = makeStyleSheetFromTheme((theme: Theme) => {
             height: 1,
             marginLeft: 15,
         },
+        pressed: {
+            opacity: 0.72,
+        },
         checkmark: {
             fontSize: 12,
             color: theme.linkColor,
         },
+        checkmarkHidden: {
+            opacity: 0,
+        },
         text: {
-            fontSize: 12,
+            ...typography('Body', 75, 'Regular'),
             color: theme.centerChannelColor,
         },
     };
@@ -44,6 +51,8 @@ type Props = {
     text: string;
     isLast: boolean;
     isSelected: boolean;
+    testID?: string;
+    labelPosition?: 'before' | 'after';
 }
 function RadioEntry({
     handleChange,
@@ -51,6 +60,8 @@ function RadioEntry({
     text,
     isLast,
     isSelected,
+    testID,
+    labelPosition,
 }: Props) {
     const theme = useTheme();
     const style = getStyleSheet(theme);
@@ -58,26 +69,45 @@ function RadioEntry({
         handleChange(value);
     }, [handleChange, value]);
 
+    const textEl = (
+        <View style={style.rowContainer}>
+            <Text style={style.text}>{text}</Text>
+        </View>
+    );
+
+    // Leading checkmark keeps its space when unselected so labels stay aligned.
+    const checkmarkEl = (isSelected || labelPosition === 'after') && (
+        <CompassIcon
+            name='check'
+            style={[style.checkmark, !isSelected && style.checkmarkHidden]}
+        />
+    );
+
     return (
-        <TouchableOpacity
+        <Pressable
             onPress={onPress}
-            key={value}
+            testID={testID}
+            style={({pressed}) => [pressed && style.pressed]}
+            accessibilityRole='radio'
+            accessibilityState={{checked: isSelected}}
         >
             <View style={style.container}>
-                <View style={style.rowContainer}>
-                    <Text style={style.text}>{text}</Text>
-                </View>
-                {isSelected && (
-                    <CompassIcon
-                        name='check'
-                        style={style.checkmark}
-                    />
+                {labelPosition === 'after' ? (
+                    <>
+                        {checkmarkEl}
+                        {textEl}
+                    </>
+                ) : (
+                    <>
+                        {textEl}
+                        {checkmarkEl}
+                    </>
                 )}
             </View>
             {!isLast && (
                 <View style={style.separator}/>
             )}
-        </TouchableOpacity>
+        </Pressable>
     );
 }
 

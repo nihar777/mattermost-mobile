@@ -8,7 +8,6 @@
 // *******************************************************************
 
 import {
-    Post,
     Setup,
 } from '@support/server_api';
 import {
@@ -48,20 +47,22 @@ describe('Messaging - Markdown Latex', () => {
         await HomeScreen.logout();
     });
 
-    // TODO: Uncomment the test when the issue is fixed https://mattermost.atlassian.net/browse/MM-63817
-    it.skip('MM-T4900_1 - should be able to display markdown latex code block', async () => {
+    it('MM-T4900_1 - should be able to display markdown latex code block', async () => {
         // # Open a channel screen and post a markdown latex code block
-        // eslint-disable-next-line no-useless-escape
-        const message = 'X_k = \sum_{n=0}^{2N-1} x_n \cos \left[\frac{\pi}{N} \left(n+\frac{1}{2}+\frac{N}{2}\right) \left(k+\frac{1}{2}\right) \right]';
+        const message = String.raw`X_k = \sum_{n=0}^{2N-1} x_n \cos\left[\frac{\pi}{N}\left(n+\frac{1}{2}\right)\left(k+\frac{N}{2}\right)\right]`;
         const markdownLatexCodeBlock = `\`\`\`latex\n${message}\n\`\`\``;
+
         await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelScreen.postMessage(markdownLatexCodeBlock);
 
         // * Verify markdown latex code block is displayed
-        const {post} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
+        const {post} = await ChannelScreen.postMessageAndVerify(markdownLatexCodeBlock, testChannel.id, siteOneUrl);
         const {postListPostItemLatexCodeBlock} = ChannelScreen.getPostListPostItem(post.id);
-        await waitFor(postListPostItemLatexCodeBlock).toBeVisible().whileElement(by.id(ChannelScreen.postList.testID.flatList)).scroll(50, 'down');
-        await expect(postListPostItemLatexCodeBlock).toBeVisible();
+
+        await waitFor(postListPostItemLatexCodeBlock).
+            toBeVisible(50).
+            whileElement(by.id(ChannelScreen.postList.testID.flatList)).
+            scroll(50, 'down');
+        await expect(postListPostItemLatexCodeBlock).toBeVisible(50);
 
         // # Go back to channel list screen
         await ChannelScreen.back();
@@ -73,12 +74,11 @@ describe('Messaging - Markdown Latex', () => {
         const message = 'X_k = \\sum_{n=0}^{2N-1} x_n \\cos \\left[\\frac{\\pi}{N} \\left(n+\\frac{1}{2}+\\frac{N}{2}\\right) \\left(k+\\frac{1}{2}\\right) \\right]';
         const markdownInlineLatex = `$${message}$`;
         await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelScreen.postMessage(markdownInlineLatex);
 
         // * Verify markdown inline latex is displayed
-        const {post} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
+        const {post} = await ChannelScreen.postMessageAndVerify(markdownInlineLatex, testChannel.id, siteOneUrl);
         const {postListPostItemInlineLatex} = ChannelScreen.getPostListPostItem(post.id);
-        await expect(postListPostItemInlineLatex).toBeVisible();
+        await expect(postListPostItemInlineLatex).toBeVisible(50);
 
         // # Go back to channel list screen
         await ChannelScreen.back();

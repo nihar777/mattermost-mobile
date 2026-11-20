@@ -8,6 +8,7 @@ import {StyleSheet, View} from 'react-native';
 import Action from './action';
 
 type Props = {
+    allowSaveToLocation: boolean;
     canDownloadFiles: boolean;
     disabled: boolean;
     enablePublicLinks: boolean;
@@ -26,8 +27,9 @@ const styles = StyleSheet.create({
 });
 
 const Actions = ({
-    canDownloadFiles, disabled, enablePublicLinks, fileId, onCopyPublicLink,
-    onDownload, onShare,
+    allowSaveToLocation, canDownloadFiles, disabled,
+    enablePublicLinks, fileId,
+    onCopyPublicLink, onDownload, onShare,
 }: Props) => {
     const managedConfig = useManagedConfig<ManagedConfig>();
     const canCopyPublicLink = !fileId.startsWith('uid') && enablePublicLinks && managedConfig.copyAndPasteProtection !== 'true';
@@ -39,18 +41,23 @@ const Actions = ({
                 disabled={disabled}
                 iconName='link-variant'
                 onPress={onCopyPublicLink}
+                testID='gallery.footer.copy_public_link.button'
             />}
             {canDownloadFiles &&
             <>
+                {allowSaveToLocation &&
                 <Action
                     disabled={disabled}
                     iconName='download-outline'
                     onPress={onDownload}
+                    testID='gallery.footer.download.button'
                 />
+                }
                 <Action
                     disabled={disabled}
                     iconName='export-variant'
                     onPress={onShare}
+                    testID='gallery.footer.share.button'
                 />
             </>
             }

@@ -14,14 +14,17 @@ import {getConfigValue, getCurrentChannelId, getCurrentTeamId} from '@queries/se
 import {getIsCRTEnabled, getThreadById, getTeamThreadsSyncData} from '@queries/servers/thread';
 import {getCurrentUser} from '@queries/servers/user';
 import {getFullErrorMessage} from '@utils/errors';
+import {deleteDownloadedFiles} from '@utils/file';
 import {logDebug, logError} from '@utils/log';
 import {showThreadFollowingSnackbar} from '@utils/snack_bar';
 import {getThreadsListEdges} from '@utils/thread';
 
+import {fetchChannelAttributeValues} from './classification';
 import {forceLogoutIfNecessary} from './session';
 
 import type {Client} from '@client/rest';
 import type Model from '@nozbe/watermelondb/Model';
+import type {RevokedFile} from '@typings/database/database';
 
 type FetchThreadsOptions = {
     before?: string;
@@ -47,6 +50,17 @@ export const fetchAndSwitchToThread = async (serverUrl: string, rootId: string, 
 
     // Load thread before we open to the thread modal
     fetchPostThread(serverUrl, rootId, undefined, false, groupLabel);
+
+    // The thread screen renders the channel banner, and a thread can be opened
+    // without ever entering its channel — from a notification, or by restoring the
+    // last-viewed thread on launch. switchToChannelById does not run on those
+    // paths, so the values it would have fetched are requested here too. The fetch
+    // dedupes per channel, so the common case of opening a thread from its own
+    // channel costs nothing.
+    const threadPost = await getPostById(database, rootId);
+    if (threadPost?.channelId) {
+        fetchChannelAttributeValues(serverUrl, threadPost.channelId);
+    }
 
     // Mark thread as read
     const isCRTEnabled = await getIsCRTEnabled(database);
@@ -162,12 +176,15 @@ export const markThreadAsUnread = async (serverUrl: string, teamId: string, thre
 
         const data = await client.markThreadAsUnread('me', threadTeamId, threadId, postId);
 
-        // Update locally
+        // Update locally using response data so unread_replies is set immediately
+        // (without waiting for the THREAD_READ_CHANGED WS event)
         const post = await getPostById(database, postId);
         if (post) {
             await updateThread(serverUrl, threadId, {
                 last_viewed_at: post.createAt - 1,
                 viewed_at: post.createAt - 1,
+                unread_replies: data?.unread_replies ?? 1,
+                unread_mentions: data?.unread_mentions ?? 0,
             });
         }
 
@@ -297,6 +314,7 @@ export const syncThreadsIfNeeded = async (
         const {operator} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
         const promises = [];
         const models: Model[][] = [];
+        const revokedFiles: RevokedFile[] = [];
 
         if (teams?.length) {
             for (const team of teams) {
@@ -310,15 +328,19 @@ export const syncThreadsIfNeeded = async (
                 if (r.models?.length) {
                     models.push(r.models);
                 }
+                if (r.revokedFiles?.length) {
+                    revokedFiles.push(...r.revokedFiles);
+                }
             }
         }
 
         const flat = removeDuplicatesModels(models.flat());
         if (!fetchOnly && flat.length) {
-            await operator.batchRecords(flat, 'syncThreadsIfNeeded');
+            await operator.batchRecords(flat, 'syncThreadsIfNeeded', true);
+            deleteDownloadedFiles(serverUrl, revokedFiles);
         }
 
-        return {models: flat};
+        return {models: flat, revokedFiles};
     } catch (error) {
         logError('syncThreadsIfNeeded: Error', error);
         return {error, models: undefined};
@@ -434,12 +456,15 @@ export const syncTeamThreads = async (
         }
 
         const models: Model[] = [];
+        const revokedFiles: RevokedFile[] = [];
 
         if (threads.length) {
-            const {error, models: threadModels = []} = await processReceivedThreads(serverUrl, threads, teamId, true);
-            if (error) {
-                return {error};
+            const processed = await processReceivedThreads(serverUrl, threads, teamId, true);
+            if (processed.error) {
+                return {error: processed.error};
             }
+            const threadModels = processed.models ?? [];
+            revokedFiles.push(...(processed.revokedFiles ?? []));
 
             if (threadModels?.length) {
                 models.push(...threadModels);
@@ -454,7 +479,8 @@ export const syncTeamThreads = async (
 
             if (!fetchOnly && models?.length) {
                 try {
-                    await operator.batchRecords(models, 'syncTeamThreads');
+                    await operator.batchRecords(models, 'syncTeamThreads', true);
+                    deleteDownloadedFiles(serverUrl, revokedFiles);
                 } catch (err) {
                     if (__DEV__) {
                         throw err;
@@ -463,7 +489,7 @@ export const syncTeamThreads = async (
                 }
             }
         }
-        return {error: false, models};
+        return {error: false, models, revokedFiles};
     } catch (error) {
         return {error};
     }
@@ -491,13 +517,16 @@ export const loadEarlierThreads = async (serverUrl: string, teamId: string, last
         }
 
         const models: Model[] = [];
+        const revokedFiles: RevokedFile[] = [];
         const threads = fetchedThreads.threads || [];
 
         if (threads?.length) {
-            const {error, models: threadModels = []} = await processReceivedThreads(serverUrl, threads, teamId, true);
-            if (error) {
-                return {error};
+            const processed = await processReceivedThreads(serverUrl, threads, teamId, true);
+            if (processed.error) {
+                return {error: processed.error};
             }
+            const threadModels = processed.models ?? [];
+            revokedFiles.push(...(processed.revokedFiles ?? []));
 
             if (threadModels?.length) {
                 models.push(...threadModels);
@@ -515,7 +544,8 @@ export const loadEarlierThreads = async (serverUrl: string, teamId: string, last
 
             if (!prepareRecordsOnly && models?.length) {
                 try {
-                    await operator.batchRecords(models, 'loadEarlierThreads');
+                    await operator.batchRecords(models, 'loadEarlierThreads', true);
+                    deleteDownloadedFiles(serverUrl, revokedFiles);
                 } catch (err) {
                     if (__DEV__) {
                         throw err;
@@ -525,8 +555,58 @@ export const loadEarlierThreads = async (serverUrl: string, teamId: string, last
             }
         }
 
-        return {models, threads};
+        return {models, threads, revokedFiles};
     } catch (error) {
         return {error};
+    }
+};
+
+const handlePostDeletedForChannelIfNeededBatch: Record<string, {
+    timeout: NodeJS.Timeout | undefined;
+    teamIds: Set<string>;
+}> = {};
+
+const handlePostDeletedForChannelIfNeededBatchTimeout = 500;
+
+export const batchTeamThreadSync = async (serverUrl: string, teamId: string) => {
+    try {
+        const {database} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
+        const isCRTEnabled = await getIsCRTEnabled(database);
+        if (!isCRTEnabled) {
+            return;
+        }
+
+        let existingBatch = handlePostDeletedForChannelIfNeededBatch[serverUrl];
+        if (!existingBatch) {
+            existingBatch = {
+                timeout: undefined,
+                teamIds: new Set(),
+            };
+            handlePostDeletedForChannelIfNeededBatch[serverUrl] = existingBatch;
+        }
+
+        clearTimeout(existingBatch.timeout);
+
+        existingBatch.teamIds.add(teamId);
+
+        existingBatch.timeout = setTimeout(async () => {
+            const batch = handlePostDeletedForChannelIfNeededBatch[serverUrl];
+            if (!batch) {
+                return;
+            }
+            delete handlePostDeletedForChannelIfNeededBatch[serverUrl];
+
+            const includeDirect = batch.teamIds.has('');
+            const teamIds = Array.from(batch.teamIds).filter((t) => t !== '');
+            const promises = teamIds.map((t, idx) => syncTeamThreads(serverUrl, t, {excludeDirect: !includeDirect || idx !== 0, refresh: true, fetchOnly: false}));
+            const results = await Promise.all(promises);
+            for (const r of results) {
+                if (r.error) {
+                    logError('batchTeamThreadSync: Error', r.error);
+                }
+            }
+        }, handlePostDeletedForChannelIfNeededBatchTimeout);
+    } catch (error) {
+        logError('handlePostDeletedForChannelIfNeeded: Error', error);
     }
 };

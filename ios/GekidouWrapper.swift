@@ -8,13 +8,36 @@
 
 import Foundation
 import Gekidou
-import react_native_emm
+import TurboLogIOSNative
+import react_native_network_client_session_attributes
 
 @objc class GekidouWrapper: NSObject {
   @objc public static let `default` = GekidouWrapper()
 
-  override init() {
-    ScreenCaptureManager.startTrackingScreens()
+  @objc func registerSessionAttributesOutboundHeader() {
+    SessionAttributesOutboundHeader.setHandler { serverUrl in
+      SessionAttributes.getOutboundHeader(serverUrl)
+    }
+  }
+
+  @objc func configureTurboLogForGekidou() {
+    GekidouLogger.shared.setLogHandler { level, message in
+      let turboLevel: TurboLogIOSNative.TurboLogLevel
+      switch level {
+      case .debug:
+        turboLevel = .debug
+      case .info:
+        turboLevel = .info
+      case .warning:
+        turboLevel = .warning
+      case .error:
+        turboLevel = .error
+      @unknown default:
+        turboLevel = .debug
+      }
+
+      TurboLogIOSNative.TurboLogger.write(level: turboLevel, message: message)
+    }
   }
 
   @objc func postNotificationReceipt(_ userInfo: [AnyHashable:Any]) {
@@ -46,7 +69,7 @@ import react_native_emm
 
   @objc func getToken(for url: String) -> String? {
     if let credentials = try? Keychain.default.getCredentials(for: url) {
-      return credentials?.token
+      return credentials.token
     }
 
     return nil

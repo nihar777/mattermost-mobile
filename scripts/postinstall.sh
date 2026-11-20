@@ -1,20 +1,13 @@
 #!/usr/bin/env bash
-
-function installPods() {
-    echo "Getting Cocoapods dependencies"
-    npm run pod-install
-}
-
-function installPodsM1() {
-    echo "Getting Cocoapods dependencies"
-    npm run pod-install-m1
-}
+set -euo pipefail
 
 if [[ "$OSTYPE" == "darwin"* ]]; then
-  if [[ $(uname -p) == 'arm' ]]; then
-    installPodsM1
+  if [ "${INTUNE_ENABLED:-}" = "1" ]; then
+    echo "🔐 INTUNE_ENABLED detected"
+    npm run intune:init
   else
-    installPods
+    echo "Getting Cocoapods dependencies"
+    npm run pod-install
   fi
 fi
 
@@ -35,6 +28,16 @@ if [ -z "$ASSETS" ]; then
 else
     echo "Generating app assets"
 fi
+
+GENERATE_GLYPH_MAP_SCRIPT="scripts/generate-compass-glyph-map.mjs"
+
+if [ ! -f "$GENERATE_GLYPH_MAP_SCRIPT" ]; then
+    echo "Compass glyph map script not found at: $GENERATE_GLYPH_MAP_SCRIPT"
+    exit 1
+fi
+
+echo "Generating Compass Icons glyph map"
+node "$GENERATE_GLYPH_MAP_SCRIPT"
 
 SOUNDS="assets/sounds"
 if [ -z "$SOUNDS" ]; then

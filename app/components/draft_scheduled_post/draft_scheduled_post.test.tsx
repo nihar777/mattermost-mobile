@@ -1,13 +1,13 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import {fireEvent, screen} from '@testing-library/react-native';
+import {act, fireEvent, screen} from '@testing-library/react-native';
 import React from 'react';
 
 import {switchToThread} from '@actions/local/thread';
 import {switchToChannelById} from '@actions/remote/channel';
 import {DRAFT_TYPE_DRAFT, DRAFT_TYPE_SCHEDULED} from '@constants/draft';
-import {openAsBottomSheet} from '@screens/navigation';
+import {navigateToScreen} from '@screens/navigation';
 import {renderWithIntlAndTheme} from '@test/intl-test-helper';
 import TestHelper from '@test/test_helper';
 
@@ -24,14 +24,27 @@ jest.mock('@actions/remote/channel', () => ({
 }));
 
 jest.mock('@screens/navigation', () => ({
-    openAsBottomSheet: jest.fn(),
+    navigateToScreen: jest.fn(),
 }));
 
 jest.mock('@context/server', () => ({
     useServerUrl: jest.fn().mockReturnValue('https://server.com'),
+    withServerUrl: (Component: React.ComponentType<any>) => (props: any) => (
+        <Component
+            {...props}
+            serverUrl={'https://server.com'}
+        />
+    ),
 }));
 
-jest.mock('@components/draft_scheduled_post_header', () => () => null);
+const mockHeaderProps = jest.fn();
+jest.mock('@components/draft_scheduled_post_header', () => {
+    const MockDraftAndScheduledPostHeader = (props: Record<string, unknown>) => {
+        mockHeaderProps(props);
+        return null;
+    };
+    return MockDraftAndScheduledPostHeader;
+});
 
 jest.mock('./draft_scheduled_post_container', () => () => null);
 
@@ -102,6 +115,42 @@ describe('DraftAndScheduledPost', () => {
         renderWithIntlAndTheme(<DraftAndScheduledPost {...baseProps}/>);
 
         expect(screen.queryByTestId('draft_post.error_line')).toBeNull();
+    });
+
+    it('should flag weekly scheduled posts as recurring in the header', () => {
+        const props = {
+            ...baseProps,
+            draftType: DRAFT_TYPE_SCHEDULED,
+            post: TestHelper.fakeScheduledPostModel({
+                rootId: '',
+                updateAt: 1234567890,
+                metadata: {},
+                files: [] as FileInfo[],
+                scheduledAt: 1234567890,
+                repeatType: 'weekly',
+            }),
+        };
+        renderWithIntlAndTheme(<DraftAndScheduledPost {...props}/>);
+
+        expect(mockHeaderProps).toHaveBeenCalledWith(expect.objectContaining({isRecurring: true}));
+    });
+
+    it('should not flag one-time scheduled posts as recurring in the header', () => {
+        const props = {
+            ...baseProps,
+            draftType: DRAFT_TYPE_SCHEDULED,
+            post: TestHelper.fakeScheduledPostModel({
+                rootId: '',
+                updateAt: 1234567890,
+                metadata: {},
+                files: [] as FileInfo[],
+                scheduledAt: 1234567890,
+                repeatType: '',
+            }),
+        };
+        renderWithIntlAndTheme(<DraftAndScheduledPost {...props}/>);
+
+        expect(mockHeaderProps).toHaveBeenCalledWith(expect.objectContaining({isRecurring: false}));
     });
 
     it('renders post priority when enabled and present', () => {
@@ -187,18 +236,20 @@ describe('DraftAndScheduledPost', () => {
         expect(switchToThread).not.toHaveBeenCalled();
     });
 
-    it('opens options on long press for draft', () => {
-        const mockOpenAsBottonSheet = jest.mocked(openAsBottomSheet);
+    it('opens options on long press for draft', async () => {
+        const mockOpenAsBottonSheet = jest.mocked(navigateToScreen);
         renderWithIntlAndTheme(<DraftAndScheduledPost {...baseProps}/>);
 
-        fireEvent(screen.getByTestId('draft_post'), 'longPress');
+        await act(async () => {
+            fireEvent(screen.getByTestId('draft_post'), 'longPress');
+        });
 
         expect(mockOpenAsBottonSheet).toHaveBeenCalled();
-        expect(mockOpenAsBottonSheet.mock.calls[0][0].props?.draftType).toBe(DRAFT_TYPE_DRAFT);
+        expect(mockOpenAsBottonSheet.mock.calls[0][1]?.draftType).toBe(DRAFT_TYPE_DRAFT);
     });
 
-    it('opens options on long press for scheduled post', () => {
-        const mockOpenAsBottonSheet = jest.mocked(openAsBottomSheet);
+    it('opens options on long press for scheduled post', async () => {
+        const mockOpenAsBottonSheet = jest.mocked(navigateToScreen);
         const props = {
             ...baseProps,
             draftType: DRAFT_TYPE_SCHEDULED,
@@ -212,9 +263,64 @@ describe('DraftAndScheduledPost', () => {
         };
         renderWithIntlAndTheme(<DraftAndScheduledPost {...props}/>);
 
-        fireEvent(screen.getByTestId('draft_post'), 'longPress');
+        await act(async () => {
+            fireEvent(screen.getByTestId('draft_post'), 'longPress');
+        });
 
         expect(mockOpenAsBottonSheet).toHaveBeenCalled();
-        expect(mockOpenAsBottonSheet.mock.calls[0][0].props?.draftType).toBe(DRAFT_TYPE_SCHEDULED);
+        expect(mockOpenAsBottonSheet.mock.calls[0][1]?.draftType).toBe(DRAFT_TYPE_SCHEDULED);
+    });
+
+    it('renders BoR indicator for BoR scheduled post', () => {
+        const props = {
+            ...baseProps,
+            draftType: DRAFT_TYPE_SCHEDULED,
+            post: TestHelper.fakeScheduledPostModel({
+                id: 'post_id_1',
+                rootId: '',
+                updateAt: 1234567890,
+                metadata: {},
+                files: [] as FileInfo[],
+                scheduledAt: 1234567890,
+                errorCode: '',
+                type: 'burn_on_read',
+            }),
+            borUserTimeLimit: 100000,
+        };
+        renderWithIntlAndTheme(<DraftAndScheduledPost {...props}/>);
+        expect(screen.getByTestId('post_id_1_bor_label')).toBeVisible();
+    });
+
+    it('renders BoR indicator with post priority if set', () => {
+        const props = {
+            ...baseProps,
+            draftType: DRAFT_TYPE_SCHEDULED,
+            isPostPriorityEnabled: true,
+            post: TestHelper.fakeScheduledPostModel({
+                id: 'post_id_1',
+                rootId: '',
+                updateAt: 1234567890,
+                metadata: {
+                    priority: {
+                        priority: 'urgent',
+                        requested_ack: true,
+                        persistent_notifications: true,
+                    },
+                },
+                files: [] as FileInfo[],
+                scheduledAt: 1234567890,
+                errorCode: '',
+                type: 'burn_on_read',
+            }),
+            borUserTimeLimit: 100000,
+        };
+        renderWithIntlAndTheme(<DraftAndScheduledPost {...props}/>);
+
+        expect(screen.getByTestId('post_id_1_bor_label')).toBeVisible();
+
+        expect(screen.getByTestId('draft_post.priority')).toBeVisible();
+        expect(screen.getByTestId('urgent_post_priority_label')).toBeVisible();
+        expect(screen.getByTestId('drafts.requested_ack.icon')).toBeVisible();
+        expect(screen.getByTestId('drafts.persistent_notifications.icon')).toBeVisible();
     });
 });

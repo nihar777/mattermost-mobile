@@ -15,11 +15,12 @@ import {getActiveServerUrl} from '@queries/app/servers';
 import {prepareCategoriesAndCategoriesChannels} from '@queries/servers/categories';
 import {prepareMyChannelsForTeam, getDefaultChannelForTeam} from '@queries/servers/channel';
 import {prepareCommonSystemValues, getCurrentTeamId, getCurrentUserId} from '@queries/servers/system';
-import {addTeamToTeamHistory, prepareDeleteTeam, prepareMyTeams, getNthLastChannelFromTeam, queryTeamsById, getLastTeam, getTeamById, removeTeamFromTeamHistory, queryMyTeams} from '@queries/servers/team';
-import {dismissAllModalsAndPopToRoot} from '@screens/navigation';
+import {addTeamToTeamHistory, prepareDeleteTeam, prepareMyTeams, getNthLastChannelFromTeam, queryTeamsById, getLastTeam, getTeamById, removeTeamFromTeamHistory} from '@queries/servers/team';
+import {navigateToRoot} from '@screens/navigation';
 import EphemeralStore from '@store/ephemeral_store';
 import {setTeamLoading} from '@store/team_load_store';
 import {getFullErrorMessage} from '@utils/errors';
+import {deleteDownloadedFiles} from '@utils/file';
 import {isTablet} from '@utils/helpers';
 import {logDebug} from '@utils/log';
 
@@ -32,6 +33,7 @@ import {syncThreadsIfNeeded} from './thread';
 
 import type {Client} from '@client/rest';
 import type {Model} from '@nozbe/watermelondb';
+import type {RevokedFile} from '@typings/database/database';
 
 export type MyTeamsRequest = {
     teams?: Team[];
@@ -109,7 +111,7 @@ export async function addUserToTeam(serverUrl: string, teamId: string, userId: s
     }
 }
 
-export async function addUsersToTeam(serverUrl: string, teamId: string, userIds: string[], fetchOnly = false) {
+export async function addUsersToTeam(serverUrl: string, teamId: string, userIds: string[], fetchOnly = false): Promise<{members: TeamMemberWithError[]; error?: unknown}> {
     try {
         const client = NetworkManager.getClient(serverUrl);
         const {operator} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
@@ -142,20 +144,33 @@ export async function addUsersToTeam(serverUrl: string, teamId: string, userIds:
         }
 
         forceLogoutIfNecessary(serverUrl, error);
-        return {error};
+        return {members: [], error};
     }
 }
 
-export async function sendEmailInvitesToTeam(serverUrl: string, teamId: string, emails: string[]) {
+export async function sendEmailInvitesToTeam(serverUrl: string, teamId: string, emails: string[]): Promise<{members: TeamInviteWithError[]; error?: unknown}> {
     try {
         const client = NetworkManager.getClient(serverUrl);
         const members = await client.sendEmailInvitesToTeamGracefully(teamId, emails);
 
-        return {members};
+        return {members, error: undefined};
     } catch (error) {
         logDebug('error on sendEmailInvitesToTeam', getFullErrorMessage(error));
         forceLogoutIfNecessary(serverUrl, error);
-        return {error};
+        return {members: [], error};
+    }
+}
+
+export async function sendGuestEmailInvitesToTeam(serverUrl: string, teamId: string, emails: string[], channels: string[], message = '', guestMagicLink = false): Promise<{members: TeamInviteWithError[]; error?: unknown}> {
+    try {
+        const client = NetworkManager.getClient(serverUrl);
+        const members = await client.sendGuestEmailInvitesToTeamGracefully(teamId, emails, channels, message, guestMagicLink);
+
+        return {members, error: undefined};
+    } catch (error) {
+        logDebug('error on sendGuestEmailInvitesToTeam', getFullErrorMessage(error));
+        forceLogoutIfNecessary(serverUrl, error);
+        return {members: [], error};
     }
 }
 
@@ -311,9 +326,8 @@ export async function fetchTeamsForComponent(
 export const updateCanJoinTeams = async (serverUrl: string, groupLabel?: RequestGroupLabel) => {
     try {
         const client = NetworkManager.getClient(serverUrl);
-        const {database} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
 
-        const myTeams = await queryMyTeams(database).fetch();
+        const myTeams = await client.getMyTeams(groupLabel);
         const myTeamsIds = new Set(myTeams.map((m) => m.id));
 
         const canJoin = await recCanJoinTeams(client, myTeamsIds, 0, groupLabel);
@@ -321,8 +335,11 @@ export const updateCanJoinTeams = async (serverUrl: string, groupLabel?: Request
         EphemeralStore.setCanJoinOtherTeams(serverUrl, canJoin);
         return {};
     } catch (error) {
+        // Preserve the last known value on transient failures so a spotty
+        // connection doesn't hide the Join Team affordance for users who can
+        // legitimately join. The ephemeral store defaults to false, so this
+        // only retains a previously-computed value.
         logDebug('error on updateCanJoinTeams', getFullErrorMessage(error));
-        EphemeralStore.setCanJoinOtherTeams(serverUrl, false);
         forceLogoutIfNecessary(serverUrl, error);
         return {error};
     }
@@ -334,6 +351,7 @@ export const fetchTeamsThreads = async (
     try {
         const {operator} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
         const result: Model[] = [];
+        const revokedFiles: RevokedFile[] = [];
 
         // process up to 15 teams at a time
         const chunks = chunk(teams, 15);
@@ -345,7 +363,10 @@ export const fetchTeamsThreads = async (
             }
 
             if (!fetchOnly && models.length) {
-                await operator.batchRecords(removeDuplicatesModels(models), 'fetchTeamsThreads');
+                await operator.batchRecords(removeDuplicatesModels(models), 'fetchTeamsThreads', true);
+                deleteDownloadedFiles(serverUrl, threads.revokedFiles ?? []);
+            } else if (threads.revokedFiles?.length) {
+                revokedFiles.push(...threads.revokedFiles);
             }
 
             if (models.length) {
@@ -353,7 +374,7 @@ export const fetchTeamsThreads = async (
             }
         }
 
-        return {error: undefined, models: result};
+        return {error: undefined, models: result, revokedFiles};
     } catch (error) {
         logDebug('error on fetchTeamsThreads', getFullErrorMessage(error));
         return {error};
@@ -465,7 +486,7 @@ export async function handleKickFromTeam(serverUrl: string, teamId: string) {
         if (currentServer === serverUrl) {
             const team = await getTeamById(database, teamId);
             DeviceEventEmitter.emit(Events.LEAVE_TEAM, team?.displayName);
-            await dismissAllModalsAndPopToRoot();
+            await navigateToRoot();
         }
 
         await removeTeamFromTeamHistory(operator, teamId);
@@ -483,7 +504,7 @@ export async function handleKickFromTeam(serverUrl: string, teamId: string) {
     }
 }
 
-export async function getTeamMembersByIds(serverUrl: string, teamId: string, userIds: string[], fetchOnly?: boolean) {
+export async function getTeamMembersByIds(serverUrl: string, teamId: string, userIds: string[], fetchOnly?: boolean): Promise<{members: TeamMembership[]; error?: unknown}> {
     try {
         const client = NetworkManager.getClient(serverUrl);
         const {operator} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
@@ -505,7 +526,7 @@ export async function getTeamMembersByIds(serverUrl: string, teamId: string, use
     } catch (error) {
         logDebug('error on getTeamMembersByIds', getFullErrorMessage(error));
         forceLogoutIfNecessary(serverUrl, error);
-        return {error};
+        return {members: [], error};
     }
 }
 

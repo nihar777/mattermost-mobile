@@ -1,13 +1,14 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import {getPosts} from '@actions/local/post';
+import {batchRecordsAndDeleteRevokedFiles, getPosts} from '@actions/local/post';
+import {captureRedactionEpoch} from '@actions/local/redaction';
 import {General} from '@constants';
 import {SYSTEM_IDENTIFIERS} from '@constants/database';
 import DatabaseManager from '@database/manager';
 import NetworkManager from '@managers/network_manager';
 import {prepareMissingChannelsForAllTeams} from '@queries/servers/channel';
-import {getConfigValue, getCurrentTeamId} from '@queries/servers/system';
+import {canViewArchivedChannels, getCurrentTeamId} from '@queries/servers/system';
 import {getIsCRTEnabled, prepareThreadsFromReceivedPosts} from '@queries/servers/thread';
 import {getCurrentUser} from '@queries/servers/user';
 import {getFullErrorMessage} from '@utils/errors';
@@ -19,6 +20,7 @@ import {fetchPostAuthors, fetchMissingChannelsFromPosts} from './post';
 import {forceLogoutIfNecessary} from './session';
 
 import type Model from '@nozbe/watermelondb/Model';
+import type {RevokedFile} from '@typings/database/database';
 import type ChannelModel from '@typings/database/models/servers/channel';
 import type PostModel from '@typings/database/models/servers/post';
 
@@ -58,14 +60,18 @@ export const searchPosts = async (serverUrl: string, teamId: string, params: Pos
     try {
         const {database, operator} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
         const client = NetworkManager.getClient(serverUrl);
-        const viewArchivedChannels = await getConfigValue(database, 'ExperimentalViewArchivedChannels');
+        const viewArchivedChannels = await canViewArchivedChannels(database);
         const user = await getCurrentUser(database);
         const timezoneOffset = getUtcOffsetForTimeZone(getUserTimezone(user)) * 60;
+
+        // The epoch counter is at least every channel's requirement, so one capture covers results
+        // spanning channels.
+        const redactionVerifiedEpoch = await captureRedactionEpoch(serverUrl);
 
         let postsArray: Post[] = [];
         const data = await client.searchPostsWithParams(teamId, {
             ...params,
-            include_deleted_channels: Boolean(viewArchivedChannels),
+            include_deleted_channels: viewArchivedChannels,
             time_zone_offset: timezoneOffset,
         });
 
@@ -73,6 +79,8 @@ export const searchPosts = async (serverUrl: string, teamId: string, params: Pos
         const order = data.order || [];
 
         const promises: Array<Promise<Model[]>> = [];
+        let postModels: Model[] = [];
+        let revokedFiles: RevokedFile[] = [];
         postsArray = order.map((id) => posts[id]);
         if (postsArray.length) {
             const isCRTEnabled = await getIsCRTEnabled(database);
@@ -99,15 +107,14 @@ export const searchPosts = async (serverUrl: string, teamId: string, params: Pos
                 }
             }
 
-            promises.push(
-                operator.handlePosts({
-                    actionType: '',
-                    order: [],
-                    posts: postsArray,
-                    previousPostId: '',
-                    prepareRecordsOnly: true,
-                }),
-            );
+            ({models: postModels, revokedFiles} = await operator.handlePosts({
+                actionType: '',
+                order: [],
+                posts: postsArray,
+                previousPostId: '',
+                prepareRecordsOnly: true,
+                redactionVerifiedEpoch,
+            }));
         }
 
         const modelArrays = await Promise.all(promises);
@@ -117,8 +124,9 @@ export const searchPosts = async (serverUrl: string, teamId: string, params: Pos
             }
             return mdls;
         });
+        models.push(...postModels);
 
-        await operator.batchRecords(models, 'searchPosts');
+        await batchRecordsAndDeleteRevokedFiles(serverUrl, models, revokedFiles, 'searchPosts');
         return {
             order,
             posts: postsArray,

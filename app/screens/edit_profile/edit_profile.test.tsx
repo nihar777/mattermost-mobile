@@ -2,13 +2,12 @@
 // See LICENSE.txt for license information.
 
 /* eslint-disable max-lines */
-import {act} from '@testing-library/react-hooks';
-import {fireEvent, screen, waitFor} from '@testing-library/react-native';
+import {act, fireEvent, screen, waitFor} from '@testing-library/react-native';
 import React from 'react';
 
-import AvailableScreens from '@constants/screens';
 import {renderWithIntlAndTheme} from '@test/intl-test-helper';
 import TestHelper from '@test/test_helper';
+import {logError} from '@utils/log';
 
 import EditProfile from './edit_profile';
 
@@ -78,8 +77,7 @@ const mockFetchCustomProfileAttributes = jest.fn();
 // Add mock for updateCustomProfileAttributes to track calls
 const mockUpdateCustomProfileAttributes = jest.fn();
 
-// Mock logError function
-const mockLogError = jest.fn();
+const mockLogError = logError as jest.Mock;
 
 jest.mock('@actions/remote/custom_profile', () => ({
     fetchCustomProfileAttributes: (...args: any[]) => mockFetchCustomProfileAttributes(...args),
@@ -87,7 +85,10 @@ jest.mock('@actions/remote/custom_profile', () => ({
 }));
 
 jest.mock('@utils/log', () => ({
-    logError: (...args: any[]) => mockLogError(...args),
+    logError: jest.fn(),
+    logWarning: jest.fn(),
+    logDebug: jest.fn(),
+    logInfo: jest.fn(),
 }));
 
 jest.mock('@actions/remote/user', () => ({
@@ -184,7 +185,6 @@ describe('EditProfile', () => {
     it('should update custom attribute value while preserving name and sort order', async () => {
         const {findAllByTestId} = renderWithIntlAndTheme(
             <EditProfile
-                componentId={AvailableScreens.EDIT_PROFILE}
                 currentUser={mockCurrentUser}
                 isModal={false}
                 isTablet={false}
@@ -231,7 +231,6 @@ describe('EditProfile', () => {
         // Setup component with database values from customAttributesSet prop
         const {findAllByTestId, rerender} = renderWithIntlAndTheme(
             <EditProfile
-                componentId={AvailableScreens.EDIT_PROFILE}
                 currentUser={mockCurrentUser}
                 isModal={false}
                 isTablet={false}
@@ -273,7 +272,6 @@ describe('EditProfile', () => {
             // Rerender with server values
             rerender(
                 <EditProfile
-                    componentId={AvailableScreens.EDIT_PROFILE}
                     currentUser={mockCurrentUser}
                     isModal={false}
                     isTablet={false}
@@ -310,7 +308,6 @@ describe('EditProfile', () => {
         // Setup component with empty attributes initially
         const {findAllByTestId, queryAllByTestId, rerender} = renderWithIntlAndTheme(
             <EditProfile
-                componentId={AvailableScreens.EDIT_PROFILE}
                 currentUser={mockCurrentUser}
                 isModal={false}
                 isTablet={false}
@@ -333,7 +330,6 @@ describe('EditProfile', () => {
         await act(async () => {
             rerender(
                 <EditProfile
-                    componentId={AvailableScreens.EDIT_PROFILE}
                     currentUser={mockCurrentUser}
                     isModal={false}
                     isTablet={false}
@@ -383,7 +379,6 @@ describe('EditProfile', () => {
         await act(async () => {
             rerender(
                 <EditProfile
-                    componentId={AvailableScreens.EDIT_PROFILE}
                     currentUser={mockCurrentUser}
                     isModal={false}
                     isTablet={false}
@@ -414,7 +409,6 @@ describe('EditProfile', () => {
         it('should update custom attributes when enableCustomAttributes is true and customAttributes exist', async () => {
             renderWithIntlAndTheme(
                 <EditProfile
-                    componentId={AvailableScreens.EDIT_PROFILE}
                     currentUser={mockCurrentUser}
                     isModal={false}
                     isTablet={true}
@@ -462,7 +456,6 @@ describe('EditProfile', () => {
         it('should not update custom attributes when enableCustomAttributes is false', async () => {
             const {getByTestId} = renderWithIntlAndTheme(
                 <EditProfile
-                    componentId={AvailableScreens.EDIT_PROFILE}
                     currentUser={mockCurrentUser}
                     isModal={false}
                     isTablet={true}
@@ -507,7 +500,6 @@ describe('EditProfile', () => {
 
             const {getByTestId} = renderWithIntlAndTheme(
                 <EditProfile
-                    componentId={AvailableScreens.EDIT_PROFILE}
                     currentUser={mockCurrentUser}
                     isModal={false}
                     isTablet={true}
@@ -552,7 +544,6 @@ describe('EditProfile', () => {
 
             renderWithIntlAndTheme(
                 <EditProfile
-                    componentId={AvailableScreens.EDIT_PROFILE}
                     currentUser={mockCurrentUser}
                     isModal={false}
                     isTablet={true}
@@ -596,13 +587,94 @@ describe('EditProfile', () => {
                     }),
                 );
             });
+
+            expect(screen.getByTestId('edit_profile.error.text')).toBeTruthy();
+            expect(screen.queryByTestId('edit_profile_form.username.input.error')).toBeNull();
+        });
+
+        it('should clear username field error when a later save fails on custom attributes', async () => {
+            const {updateMe: mockUpdateMe} = jest.requireMock('@actions/remote/user');
+            mockUpdateMe.mockClear();
+            mockUpdateMe.mockResolvedValueOnce({error: new Error('Username is already taken')});
+            mockUpdateMe.mockResolvedValue({error: undefined});
+
+            mockUpdateCustomProfileAttributes.mockResolvedValue({
+                success: false,
+                error: new Error('Failed to update custom attributes'),
+            });
+
+            const currentUser = {
+                ...mockCurrentUser,
+                authService: '',
+            } as UserModel;
+
+            const {getByTestId} = renderWithIntlAndTheme(
+                <EditProfile
+                    currentUser={currentUser}
+                    isModal={false}
+                    isTablet={true}
+                    lockedFirstName={false}
+                    lockedLastName={false}
+                    lockedNickname={false}
+                    lockedPosition={false}
+                    lockedPicture={false}
+                    enableCustomAttributes={true}
+                    customFields={[]}
+                    customAttributesSet={serverAttributesSet}
+                />,
+            );
+
+            await waitFor(async () => {
+                const customAttributeItems = await screen.findAllByTestId(new RegExp('^edit_profile_form.customAttributes.attr[0-9]+.input$'));
+                expect(customAttributeItems.length).toBeGreaterThan(0);
+            });
+
+            const usernameField = getByTestId('edit_profile_form.username.input');
+            await act(async () => {
+                fireEvent.changeText(usernameField, 'takenname');
+            });
+
+            const saveButton = getByTestId('edit_profile.save.button');
+            await act(async () => {
+                fireEvent.press(saveButton);
+            });
+
+            await waitFor(() => {
+                expect(mockUpdateMe).toHaveBeenCalled();
+                expect(screen.getByTestId('edit_profile_form.username.input.error')).toBeTruthy();
+            });
+            expect(screen.queryByTestId('edit_profile.error.text')).toBeNull();
+
+            // Revert username so updateMe is skipped; change a custom attribute so the next save hits that path.
+            await act(async () => {
+                fireEvent.changeText(usernameField, 'johndoe');
+            });
+
+            const customAttributeItems = await screen.findAllByTestId(new RegExp('^edit_profile_form.customAttributes.attr[0-9]+.input$'));
+            await act(async () => {
+                fireEvent.changeText(customAttributeItems[0], 'modified value that will error');
+            });
+
+            // usePreventDoubleTap ignores presses within 750ms of the previous save.
+            await act(async () => {
+                await new Promise((resolve) => setTimeout(resolve, 800));
+            });
+
+            await act(async () => {
+                fireEvent.press(getByTestId('edit_profile.save.button'));
+            });
+
+            await waitFor(() => {
+                expect(mockUpdateCustomProfileAttributes).toHaveBeenCalled();
+                expect(screen.getByTestId('edit_profile.error.text')).toBeTruthy();
+            });
+            expect(screen.queryByTestId('edit_profile_form.username.input.error')).toBeNull();
         });
     });
 
     it('should pass customFields prop to ProfileForm component', async () => {
         renderWithIntlAndTheme(
             <EditProfile
-                componentId={AvailableScreens.EDIT_PROFILE}
                 currentUser={mockCurrentUser}
                 isModal={false}
                 isTablet={false}
@@ -617,12 +689,14 @@ describe('EditProfile', () => {
             />,
         );
 
-        // Verify the ProfileForm component is rendered (which means customFields was passed)
-        const scrollView = screen.getByTestId('edit_profile.scroll_view');
-        expect(scrollView).toBeTruthy();
+        await waitFor(() => {
+            // Verify the ProfileForm component is rendered (which means customFields was passed)
+            const scrollView = screen.getByTestId('edit_profile.scroll_view');
+            expect(scrollView).toBeTruthy();
+        });
     });
 
-    describe('SAML Field Handling', () => {
+    describe('Read-only Field Handling', () => {
         const samlLinkedCustomField = TestHelper.fakeCustomProfileFieldModel({
             id: 'saml-field-1',
             attrs: {
@@ -636,6 +710,14 @@ describe('EditProfile', () => {
             attrs: {
                 saml: '',
                 sort_order: 2,
+            },
+        });
+
+        const adminManagedCustomField = TestHelper.fakeCustomProfileFieldModel({
+            id: 'admin-managed-field-1',
+            attrs: {
+                managed: 'admin',
+                sort_order: 3,
             },
         });
 
@@ -654,6 +736,25 @@ describe('EditProfile', () => {
                 type: 'text',
                 sort_order: 2,
             },
+            'admin-managed-field-1': {
+                id: 'admin-managed-field-1',
+                name: 'Clearance',
+                value: 'Eligible',
+                type: 'text',
+                sort_order: 3,
+            },
+        };
+
+        const cachedReadOnlyAttributes = {
+            ...customAttributesWithSaml,
+            'saml-field-1': {
+                ...customAttributesWithSaml['saml-field-1'],
+                value: 'Previous Department',
+            },
+            'admin-managed-field-1': {
+                ...customAttributesWithSaml['admin-managed-field-1'],
+                value: 'Previous Clearance',
+            },
         };
 
         beforeEach(() => {
@@ -664,10 +765,9 @@ describe('EditProfile', () => {
             });
         });
 
-        it('should not submit SAML-linked custom fields during profile update', async () => {
+        it('should submit only user-editable custom fields during profile update', async () => {
             const {getByTestId} = renderWithIntlAndTheme(
                 <EditProfile
-                    componentId={AvailableScreens.EDIT_PROFILE}
                     currentUser={mockCurrentUser}
                     isModal={false}
                     isTablet={true}
@@ -677,8 +777,8 @@ describe('EditProfile', () => {
                     lockedPosition={false}
                     lockedPicture={false}
                     enableCustomAttributes={true}
-                    customFields={[samlLinkedCustomField, nonSamlCustomField]}
-                    customAttributesSet={customAttributesWithSaml}
+                    customFields={[samlLinkedCustomField, nonSamlCustomField, adminManagedCustomField]}
+                    customAttributesSet={cachedReadOnlyAttributes}
                 />,
             );
 
@@ -716,10 +816,11 @@ describe('EditProfile', () => {
                 }),
             );
 
-            // Verify SAML field was not included
+            // Verify read-only fields were not included
             const lastCall = mockUpdateCustomProfileAttributes.mock.calls[mockUpdateCustomProfileAttributes.mock.calls.length - 1];
             const submittedAttributes = lastCall[2];
             expect(submittedAttributes).not.toHaveProperty('saml-field-1');
+            expect(submittedAttributes).not.toHaveProperty('admin-managed-field-1');
         });
 
         it('should not submit SAML-locked standard profile fields', async () => {
@@ -730,7 +831,6 @@ describe('EditProfile', () => {
 
             const {getByTestId} = renderWithIntlAndTheme(
                 <EditProfile
-                    componentId={AvailableScreens.EDIT_PROFILE}
                     currentUser={mockCurrentUser}
                     isModal={false}
                     isTablet={true}
@@ -785,7 +885,6 @@ describe('EditProfile', () => {
 
             const {getByTestId} = renderWithIntlAndTheme(
                 <EditProfile
-                    componentId={AvailableScreens.EDIT_PROFILE}
                     currentUser={mockCurrentUser}
                     isModal={false}
                     isTablet={true}
@@ -838,7 +937,6 @@ describe('EditProfile', () => {
 
             const {getByTestId} = renderWithIntlAndTheme(
                 <EditProfile
-                    componentId={AvailableScreens.EDIT_PROFILE}
                     currentUser={mockCurrentUser}
                     isModal={false}
                     isTablet={true}

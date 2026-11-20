@@ -19,7 +19,7 @@ import type {GalleryItemType, GalleryPagerItem} from '@typings/screens/gallery';
 export type PagerContentProps = {
     totalCount: number;
     pages: GalleryItemType[];
-    renderPage: (props: GalleryPagerItem, index: number) => JSX.Element | null;
+    renderPage: (props: GalleryPagerItem, index: number) => React.ReactNode;
     shouldRenderGutter: boolean;
     width: number;
     height: number;
@@ -116,13 +116,23 @@ export function PagerContent({
         }
 
         return temp;
-
-        // The missing dependencies are intentional as they are SharedValues or DerivedValues
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [
-        totalCount, pages, activeIndex, diffValue, onPageStateChange,
-        gutterWidthToUse, renderPage, getPageTranslate,
-        width, height, shouldRenderGutter, panGesture, tapGesture, lightboxPanGesture,
+        totalCount,
+        pages,
+        activeIndex,
+        diffValue,
+        index,
+        onPageStateChange,
+        gutterWidthToUse,
+        renderPage,
+        getPageTranslate,
+        width,
+        height,
+        isPagerInProgress,
+        shouldRenderGutter,
+        panGesture,
+        tapGesture,
+        lightboxPanGesture,
     ]);
 
     return (

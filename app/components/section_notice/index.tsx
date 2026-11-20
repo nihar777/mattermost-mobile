@@ -6,15 +6,15 @@ import {Pressable, Text, View} from 'react-native';
 
 import Tag from '@components/tag';
 import {useTheme} from '@context/theme';
-import {getMarkdownBlockStyles, getMarkdownTextStyles} from '@utils/markdown';
 import {changeOpacity, makeStyleSheetFromTheme} from '@utils/theme';
 import {typography} from '@utils/typography';
 
-import CompassIcon from '../compass_icon';
+import CompassIcon, {type CompassIconName} from '../compass_icon';
 import Markdown from '../markdown';
 
 import SectionNoticeButton from './section_notice_button';
 
+import type {SectionNoticeButtonProps} from './types';
 import type {AvailableScreens} from '@typings/screens/navigation';
 
 type Props = {
@@ -32,7 +32,7 @@ type Props = {
     squareCorners?: boolean;
 }
 
-const iconByType = {
+const iconByType: Record<string, CompassIconName | undefined> = {
     info: 'information-outline',
     hint: 'lightbulb-outline',
     success: 'check',
@@ -206,8 +206,6 @@ const SectionNotice = ({
                             theme={theme}
                             location={location}
                             baseTextStyle={styles.baseText}
-                            textStyles={getMarkdownTextStyles(theme)}
-                            blockStyles={getMarkdownBlockStyles(theme)}
                             value={text}
                         />
                     )}

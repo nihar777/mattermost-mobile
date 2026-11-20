@@ -2,17 +2,13 @@
 // See LICENSE.txt for license information.
 
 import RNUtils, {type WindowDimensions} from '@mattermost/rnutils';
-import React, {type RefObject, useEffect, useRef, useState, useContext} from 'react';
-import {AppState, Keyboard, NativeEventEmitter, Platform, View} from 'react-native';
+import React, {useEffect, useRef, useState, useContext} from 'react';
+import {AppState, Keyboard, NativeEventEmitter, Platform} from 'react-native';
 import {useSafeAreaInsets} from 'react-native-safe-area-context';
 
 import {DeviceContext} from '@context/device';
 
-import type {KeyboardAwareScrollView} from 'react-native-keyboard-aware-scroll-view';
-
 let utilsEmitter = new NativeEventEmitter(RNUtils);
-
-const isOlderAndroidOS = Platform.OS === 'android' && Platform.Version < 30;
 
 export function testSetUtilsEmitter(emitter: NativeEventEmitter) {
     utilsEmitter = emitter;
@@ -62,27 +58,11 @@ export function useKeyboardHeightWithDuration() {
     const insets = useSafeAreaInsets();
 
     useEffect(() => {
-        if (Platform.OS === 'ios') {
-            const currentKeyboardMetrics = Keyboard.metrics();
-
-            if (Keyboard.isVisible() && currentKeyboardMetrics) {
-                setKeyboardHeight({height: currentKeyboardMetrics.height, duration: 0});
-            }
-        }
-
         const show = Keyboard.addListener(Platform.select({ios: 'keyboardWillShow', default: 'keyboardDidShow'}), async (event) => {
-            // Do not use set the height on Android versions below 11
-            if (isOlderAndroidOS) {
-                return;
-            }
             setKeyboardHeight({height: event.endCoordinates.height, duration: event.duration});
         });
 
         const hide = Keyboard.addListener(Platform.select({ios: 'keyboardWillHide', default: 'keyboardDidHide'}), (event) => {
-            // Do not use set the height on Android versions below 11
-            if (isOlderAndroidOS) {
-                return;
-            }
 
             if (updateTimeout.current != null) {
                 clearTimeout(updateTimeout.current);
@@ -105,51 +85,11 @@ export function useKeyboardHeight() {
     return height;
 }
 
-export function useViewPosition(viewRef: RefObject<View>, deps: React.DependencyList = []) {
-    const [modalPosition, setModalPosition] = useState(0);
-    const isTablet = useIsTablet();
-    const height = useKeyboardHeight();
-
-    useEffect(() => {
-        if (Platform.OS === 'ios' && isTablet) {
-            viewRef.current?.measureInWindow((_, y) => {
-                if (y !== modalPosition) {
-                    setModalPosition(y);
-                }
-            });
-        }
-    }, [...deps, isTablet, height, viewRef, modalPosition]); // eslint-disable-line react-hooks/exhaustive-deps -- can't verify ...deps
-
-    return modalPosition;
-}
-
-export function useKeyboardOverlap(viewRef: RefObject<View>, containerHeight: number) {
+export function useKeyboardOverlap() {
     const keyboardHeight = useKeyboardHeight();
-    const isTablet = useIsTablet();
-    const viewPosition = useViewPosition(viewRef, [containerHeight]);
-    const dimensions = useWindowDimensions();
     const insets = useSafeAreaInsets();
 
-    const bottomSpace = (dimensions.height - containerHeight - viewPosition);
-    const tabletOverlap = Math.max(0, keyboardHeight - bottomSpace);
     const phoneOverlap = keyboardHeight || insets.bottom;
-    const overlap = Platform.select({
-        ios: isTablet ? tabletOverlap : phoneOverlap,
-        default: 0,
-    });
 
-    return overlap;
-}
-
-export function useAvoidKeyboard(ref: RefObject<KeyboardAwareScrollView>, dimisher = 3) {
-    const height = useKeyboardHeight();
-
-    useEffect(() => {
-        let offsetY = height / dimisher;
-        if (offsetY < 80) {
-            offsetY = 0;
-        }
-
-        ref.current?.scrollToPosition(0, offsetY);
-    }, [height, dimisher, ref]);
+    return phoneOverlap;
 }

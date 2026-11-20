@@ -77,7 +77,12 @@ const ChannelHandler = <TBase extends Constructor<ServerDataOperatorBase>>(super
                 return res;
             }
 
-            if (e.updateAt !== c.update_at || e.deleteAt !== c.delete_at || c.fake) {
+            if (
+                e.updateAt !== c.update_at ||
+                e.deleteAt !== c.delete_at ||
+                c.fake ||
+                e.shared !== c.shared // Backwards compatibility: server may not update UpdateAt when sending shared updates (see mattermost/mattermost#35448)
+            ) {
                 res.push(c);
             }
 
@@ -279,7 +284,7 @@ const ChannelHandler = <TBase extends Constructor<ServerDataOperatorBase>>(super
             const lastPostAt = isCRT ? (chan.last_root_post_at || chan.last_post_at) : chan.last_post_at;
             if ((chan && e.lastPostAt < lastPostAt) ||
                 e.isUnread !== my.is_unread || e.lastViewedAt < my.last_viewed_at ||
-                e.roles !== my.roles
+                e.roles !== my.roles || e.autotranslationDisabled !== my.autotranslation_disabled
             ) {
                 res.push(my);
             }

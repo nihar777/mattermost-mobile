@@ -3,10 +3,16 @@
 
 /* eslint-disable max-lines */
 
+import {BOARDS_TABLES} from '@boards/constants/database';
+
+import {AGENTS_TABLES} from '@agents/constants/database';
 import {MM_TABLES} from '@constants/database';
 import {PLAYBOOK_TABLES} from '@playbooks/constants/database';
 
 import {serverSchema} from './index';
+
+const {AI_BOT, AI_THREAD} = AGENTS_TABLES;
+const {BOARD_VIEW} = BOARDS_TABLES;
 
 const {
     CATEGORY,
@@ -32,6 +38,8 @@ const {
     POSTS_IN_CHANNEL,
     POSTS_IN_THREAD,
     PREFERENCE,
+    PROPERTY_FIELD,
+    PROPERTY_VALUE,
     REACTION,
     ROLE,
     SCHEDULED_POST,
@@ -52,9 +60,53 @@ const {PLAYBOOK_RUN, PLAYBOOK_CHECKLIST, PLAYBOOK_CHECKLIST_ITEM, PLAYBOOK_RUN_A
 describe('*** Test schema for SERVER database ***', () => {
     it('=> The SERVER SCHEMA should strictly match', () => {
         expect(serverSchema).toEqual({
-            version: 14,
+            version: 25,
             unsafeSql: undefined,
             tables: {
+                [AI_BOT]: {
+                    name: AI_BOT,
+                    unsafeSql: undefined,
+                    columns: {
+                        display_name: {name: 'display_name', type: 'string'},
+                        username: {name: 'username', type: 'string'},
+                        last_icon_update: {name: 'last_icon_update', type: 'number'},
+                        dm_channel_id: {name: 'dm_channel_id', type: 'string', isIndexed: true},
+                        channel_access_level: {name: 'channel_access_level', type: 'number'},
+                        channel_ids: {name: 'channel_ids', type: 'string'},
+                        user_access_level: {name: 'user_access_level', type: 'number'},
+                        user_ids: {name: 'user_ids', type: 'string'},
+                        team_ids: {name: 'team_ids', type: 'string'},
+                    },
+                    columnArray: [
+                        {name: 'display_name', type: 'string'},
+                        {name: 'username', type: 'string'},
+                        {name: 'last_icon_update', type: 'number'},
+                        {name: 'dm_channel_id', type: 'string', isIndexed: true},
+                        {name: 'channel_access_level', type: 'number'},
+                        {name: 'channel_ids', type: 'string'},
+                        {name: 'user_access_level', type: 'number'},
+                        {name: 'user_ids', type: 'string'},
+                        {name: 'team_ids', type: 'string'},
+                    ],
+                },
+                [AI_THREAD]: {
+                    name: AI_THREAD,
+                    unsafeSql: undefined,
+                    columns: {
+                        message: {name: 'message', type: 'string'},
+                        title: {name: 'title', type: 'string'},
+                        channel_id: {name: 'channel_id', type: 'string', isIndexed: true},
+                        reply_count: {name: 'reply_count', type: 'number'},
+                        update_at: {name: 'update_at', type: 'number', isIndexed: true},
+                    },
+                    columnArray: [
+                        {name: 'message', type: 'string'},
+                        {name: 'title', type: 'string'},
+                        {name: 'channel_id', type: 'string', isIndexed: true},
+                        {name: 'reply_count', type: 'number'},
+                        {name: 'update_at', type: 'number', isIndexed: true},
+                    ],
+                },
                 [CATEGORY]: {
                     name: CATEGORY,
                     unsafeSql: undefined,
@@ -130,6 +182,7 @@ describe('*** Test schema for SERVER database ***', () => {
                         update_at: {name: 'update_at', type: 'number'},
                         banner_info: {name: 'banner_info', type: 'string', isOptional: true},
                         abac_policy_enforced: {name: 'abac_policy_enforced', type: 'boolean', isOptional: true},
+                        autotranslation: {name: 'autotranslation', type: 'boolean', isOptional: true},
                     },
                     columnArray: [
                         {name: 'create_at', type: 'number'},
@@ -144,6 +197,7 @@ describe('*** Test schema for SERVER database ***', () => {
                         {name: 'update_at', type: 'number'},
                         {name: 'banner_info', type: 'string', isOptional: true},
                         {name: 'abac_policy_enforced', type: 'boolean', isOptional: true},
+                        {name: 'autotranslation', type: 'boolean', isOptional: true},
                     ],
                 },
                 [CHANNEL_BOOKMARK]: {
@@ -269,6 +323,9 @@ describe('*** Test schema for SERVER database ***', () => {
                         viewed_at: {name: 'viewed_at', type: 'number'},
                         last_fetched_at: {name: 'last_fetched_at', type: 'number', isIndexed: true},
                         last_playbook_runs_fetch_at: {name: 'last_playbook_runs_fetch_at', type: 'number'},
+                        autotranslation_disabled: {name: 'autotranslation_disabled', type: 'boolean', isOptional: true},
+                        urgent_mention_count: {name: 'urgent_mention_count', type: 'number'},
+                        redaction_required_epoch: {name: 'redaction_required_epoch', type: 'number'},
                     },
                     columnArray: [
                         {name: 'is_unread', type: 'boolean'},
@@ -281,6 +338,9 @@ describe('*** Test schema for SERVER database ***', () => {
                         {name: 'viewed_at', type: 'number'},
                         {name: 'last_fetched_at', type: 'number', isIndexed: true},
                         {name: 'last_playbook_runs_fetch_at', type: 'number'},
+                        {name: 'autotranslation_disabled', type: 'boolean', isOptional: true},
+                        {name: 'urgent_mention_count', type: 'number'},
+                        {name: 'redaction_required_epoch', type: 'number'},
                     ],
                 },
                 [MY_CHANNEL_SETTINGS]: {
@@ -317,6 +377,7 @@ describe('*** Test schema for SERVER database ***', () => {
                         root_id: {name: 'root_id', type: 'string', isIndexed: true},
                         metadata: {name: 'metadata', type: 'string', isOptional: true},
                         update_at: {name: 'update_at', type: 'number'},
+                        type: {name: 'type', type: 'string', isOptional: true},
                     },
                     columnArray: [
                         {name: 'channel_id', type: 'string', isIndexed: true},
@@ -325,6 +386,7 @@ describe('*** Test schema for SERVER database ***', () => {
                         {name: 'root_id', type: 'string', isIndexed: true},
                         {name: 'metadata', type: 'string', isOptional: true},
                         {name: 'update_at', type: 'number'},
+                        {name: 'type', type: 'string', isOptional: true},
                     ],
                 },
                 [FILE]: {
@@ -452,6 +514,7 @@ describe('*** Test schema for SERVER database ***', () => {
                         active_stage: {name: 'active_stage', type: 'number'},
                         active_stage_title: {name: 'active_stage_title', type: 'string'},
                         participant_ids: {name: 'participant_ids', type: 'string'}, // JSON string
+                        timeline_events: {name: 'timeline_events', type: 'string', isOptional: true}, // JSON string
                         summary: {name: 'summary', type: 'string'},
                         current_status: {name: 'current_status', type: 'string', isIndexed: true},
                         last_status_update_at: {name: 'last_status_update_at', type: 'number'},
@@ -463,6 +526,7 @@ describe('*** Test schema for SERVER database ***', () => {
                         items_order: {name: 'items_order', type: 'string'},
                         previous_reminder: {name: 'previous_reminder', type: 'number', isOptional: true},
                         update_at: {name: 'update_at', type: 'number'},
+                        type: {name: 'type', type: 'string'},
                     },
                     columnArray: [
                         {name: 'playbook_id', type: 'string'},
@@ -478,6 +542,7 @@ describe('*** Test schema for SERVER database ***', () => {
                         {name: 'active_stage', type: 'number'},
                         {name: 'active_stage_title', type: 'string'},
                         {name: 'participant_ids', type: 'string'}, // JSON string
+                        {name: 'timeline_events', type: 'string', isOptional: true}, // JSON string
                         {name: 'summary', type: 'string'},
                         {name: 'current_status', type: 'string', isIndexed: true},
                         {name: 'last_status_update_at', type: 'number'},
@@ -489,6 +554,7 @@ describe('*** Test schema for SERVER database ***', () => {
                         {name: 'previous_reminder', type: 'number', isOptional: true},
                         {name: 'items_order', type: 'string'},
                         {name: 'update_at', type: 'number'},
+                        {name: 'type', type: 'string'},
                     ],
                 },
                 [PLAYBOOK_CHECKLIST]: {
@@ -527,6 +593,7 @@ describe('*** Test schema for SERVER database ***', () => {
                         due_date: {name: 'due_date', type: 'number'},
                         completed_at: {name: 'completed_at', type: 'number'},
                         task_actions: {name: 'task_actions', type: 'string', isOptional: true}, // JSON string
+                        requirements: {name: 'requirements', type: 'string', isOptional: true}, // JSON string
                         condition_action: {name: 'condition_action', type: 'string'},
                         condition_reason: {name: 'condition_reason', type: 'string'},
                         sync: {name: 'sync', type: 'string', isIndexed: true, isOptional: true},
@@ -546,6 +613,7 @@ describe('*** Test schema for SERVER database ***', () => {
                         {name: 'due_date', type: 'number'},
                         {name: 'completed_at', type: 'number'},
                         {name: 'task_actions', type: 'string', isOptional: true}, // JSON string
+                        {name: 'requirements', type: 'string', isOptional: true}, // JSON string
                         {name: 'condition_action', type: 'string'},
                         {name: 'condition_reason', type: 'string'},
                         {name: 'sync', type: 'string', isIndexed: true, isOptional: true},
@@ -586,11 +654,13 @@ describe('*** Test schema for SERVER database ***', () => {
                         attribute_id: {name: 'attribute_id', type: 'string', isIndexed: true},
                         run_id: {name: 'run_id', type: 'string', isIndexed: true},
                         value: {name: 'value', type: 'string'},
+                        update_at: {name: 'update_at', type: 'number'},
                     },
                     columnArray: [
                         {name: 'attribute_id', type: 'string', isIndexed: true},
                         {name: 'run_id', type: 'string', isIndexed: true},
                         {name: 'value', type: 'string'},
+                        {name: 'update_at', type: 'number'},
                     ],
                 },
                 [POSTS_IN_THREAD]: {
@@ -623,6 +693,7 @@ describe('*** Test schema for SERVER database ***', () => {
                         pending_post_id: {name: 'pending_post_id', type: 'string', isIndexed: true},
                         previous_post_id: {name: 'previous_post_id', type: 'string'},
                         props: {name: 'props', type: 'string'},
+                        redaction_verified_epoch: {name: 'redaction_verified_epoch', type: 'number'},
                         root_id: {name: 'root_id', type: 'string'},
                         type: {name: 'type', type: 'string', isIndexed: true},
                         update_at: {name: 'update_at', type: 'number'},
@@ -641,6 +712,7 @@ describe('*** Test schema for SERVER database ***', () => {
                         {name: 'pending_post_id', type: 'string', isIndexed: true},
                         {name: 'previous_post_id', type: 'string'},
                         {name: 'props', type: 'string'},
+                        {name: 'redaction_verified_epoch', type: 'number'},
                         {name: 'root_id', type: 'string'},
                         {name: 'type', type: 'string', isIndexed: true},
                         {name: 'update_at', type: 'number'},
@@ -715,6 +787,9 @@ describe('*** Test schema for SERVER database ***', () => {
                         scheduled_at: {name: 'scheduled_at', type: 'number'},
                         processed_at: {name: 'processed_at', type: 'number'},
                         error_code: {name: 'error_code', type: 'string'},
+                        type: {name: 'type', type: 'string', isOptional: true},
+                        repeat_type: {name: 'repeat_type', type: 'string'},
+                        repeat_timezone: {name: 'repeat_timezone', type: 'string'},
                     },
                     columnArray: [
                         {name: 'channel_id', type: 'string', isIndexed: true},
@@ -727,6 +802,9 @@ describe('*** Test schema for SERVER database ***', () => {
                         {name: 'scheduled_at', type: 'number'},
                         {name: 'processed_at', type: 'number'},
                         {name: 'error_code', type: 'string'},
+                        {name: 'type', type: 'string', isOptional: true},
+                        {name: 'repeat_type', type: 'string'},
+                        {name: 'repeat_timezone', type: 'string'},
                     ],
                 },
                 [SYSTEM]: {
@@ -925,6 +1003,102 @@ describe('*** Test schema for SERVER database ***', () => {
                         {name: 'username', type: 'string'},
                         {name: 'terms_of_service_id', type: 'string'},
                         {name: 'terms_of_service_create_at', type: 'number'},
+                    ],
+                },
+                [BOARD_VIEW]: {
+                    name: BOARD_VIEW,
+                    unsafeSql: undefined,
+                    columns: {
+                        channel_id: {name: 'channel_id', type: 'string', isIndexed: true},
+                        type: {name: 'type', type: 'string'},
+                        creator_id: {name: 'creator_id', type: 'string'},
+                        title: {name: 'title', type: 'string'},
+                        description: {name: 'description', type: 'string', isOptional: true},
+                        sort_order: {name: 'sort_order', type: 'number'},
+                        props: {name: 'props', type: 'string', isOptional: true},
+                        create_at: {name: 'create_at', type: 'number'},
+                        update_at: {name: 'update_at', type: 'number', isIndexed: true},
+                        delete_at: {name: 'delete_at', type: 'number'},
+                    },
+                    columnArray: [
+                        {name: 'channel_id', type: 'string', isIndexed: true},
+                        {name: 'type', type: 'string'},
+                        {name: 'creator_id', type: 'string'},
+                        {name: 'title', type: 'string'},
+                        {name: 'description', type: 'string', isOptional: true},
+                        {name: 'sort_order', type: 'number'},
+                        {name: 'props', type: 'string', isOptional: true},
+                        {name: 'create_at', type: 'number'},
+                        {name: 'update_at', type: 'number', isIndexed: true},
+                        {name: 'delete_at', type: 'number'},
+                    ],
+                },
+                [PROPERTY_FIELD]: {
+                    name: PROPERTY_FIELD,
+                    unsafeSql: undefined,
+                    columns: {
+                        group_id: {name: 'group_id', type: 'string'},
+                        name: {name: 'name', type: 'string'},
+                        type: {name: 'type', type: 'string'},
+                        attrs: {name: 'attrs', type: 'string', isOptional: true},
+                        object_type: {name: 'object_type', type: 'string'},
+                        target_id: {name: 'target_id', type: 'string', isIndexed: true},
+                        target_type: {name: 'target_type', type: 'string'},
+                        protected: {name: 'protected', type: 'boolean'},
+                        permission_field: {name: 'permission_field', type: 'string', isOptional: true},
+                        permission_values: {name: 'permission_values', type: 'string', isOptional: true},
+                        permission_options: {name: 'permission_options', type: 'string', isOptional: true},
+                        create_at: {name: 'create_at', type: 'number'},
+                        update_at: {name: 'update_at', type: 'number', isIndexed: true},
+                        delete_at: {name: 'delete_at', type: 'number'},
+                        created_by: {name: 'created_by', type: 'string'},
+                        updated_by: {name: 'updated_by', type: 'string'},
+                    },
+                    columnArray: [
+                        {name: 'group_id', type: 'string'},
+                        {name: 'name', type: 'string'},
+                        {name: 'type', type: 'string'},
+                        {name: 'attrs', type: 'string', isOptional: true},
+                        {name: 'object_type', type: 'string'},
+                        {name: 'target_id', type: 'string', isIndexed: true},
+                        {name: 'target_type', type: 'string'},
+                        {name: 'protected', type: 'boolean'},
+                        {name: 'permission_field', type: 'string', isOptional: true},
+                        {name: 'permission_values', type: 'string', isOptional: true},
+                        {name: 'permission_options', type: 'string', isOptional: true},
+                        {name: 'create_at', type: 'number'},
+                        {name: 'update_at', type: 'number', isIndexed: true},
+                        {name: 'delete_at', type: 'number'},
+                        {name: 'created_by', type: 'string'},
+                        {name: 'updated_by', type: 'string'},
+                    ],
+                },
+                [PROPERTY_VALUE]: {
+                    name: PROPERTY_VALUE,
+                    unsafeSql: undefined,
+                    columns: {
+                        field_id: {name: 'field_id', type: 'string', isIndexed: true},
+                        target_id: {name: 'target_id', type: 'string', isIndexed: true},
+                        target_type: {name: 'target_type', type: 'string'},
+                        group_id: {name: 'group_id', type: 'string'},
+                        value: {name: 'value', type: 'string'},
+                        create_at: {name: 'create_at', type: 'number'},
+                        update_at: {name: 'update_at', type: 'number'},
+                        delete_at: {name: 'delete_at', type: 'number'},
+                        created_by: {name: 'created_by', type: 'string'},
+                        updated_by: {name: 'updated_by', type: 'string'},
+                    },
+                    columnArray: [
+                        {name: 'field_id', type: 'string', isIndexed: true},
+                        {name: 'target_id', type: 'string', isIndexed: true},
+                        {name: 'target_type', type: 'string'},
+                        {name: 'group_id', type: 'string'},
+                        {name: 'value', type: 'string'},
+                        {name: 'create_at', type: 'number'},
+                        {name: 'update_at', type: 'number'},
+                        {name: 'delete_at', type: 'number'},
+                        {name: 'created_by', type: 'string'},
+                        {name: 'updated_by', type: 'string'},
                     ],
                 },
             },

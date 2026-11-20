@@ -2,7 +2,7 @@
 // See LICENSE.txt for license information.
 import {Screens} from '@constants';
 import {SNACK_BAR_TYPE, type SnackBarConfig} from '@constants/snack_bar';
-import {showOverlay} from '@screens/navigation';
+import SnackBarStore from '@store/snackbar_store';
 
 import type {AvailableScreens} from '@typings/screens/navigation';
 import type {PrimitiveType} from 'react-intl';
@@ -12,13 +12,16 @@ export type ShowSnackBarArgs = {
     onAction?: () => void;
     sourceScreen?: AvailableScreens;
     messageValues?: Record<string, PrimitiveType>;
+    descriptionValues?: Record<string, PrimitiveType>;
     customMessage?: string;
+    customDescription?: string;
     type?: SnackBarConfig['type'];
+    actionText?: string;
+    isPersistent?: SnackBarConfig['isPersistent'];
 };
 
 export const showSnackBar = (passProps: ShowSnackBarArgs) => {
-    const screen = Screens.SNACK_BAR;
-    showOverlay(screen, passProps);
+    SnackBarStore.show(passProps);
 };
 
 export const showMuteChannelSnackbar = (muted: boolean, onAction: () => void) => {
@@ -68,5 +71,21 @@ export const showScheduledPostCreationErrorSnackbar = (errorMessage: string) => 
 export const showPlaybookErrorSnackbar = () => {
     return showSnackBar({
         barType: SNACK_BAR_TYPE.PLAYBOOK_ERROR,
+    });
+};
+
+export const showEnableTranslationSnackbar = (onAction: () => void, location: AvailableScreens) => {
+    return showSnackBar({
+        onAction,
+        barType: SNACK_BAR_TYPE.ENABLE_TRANSLATION,
+        sourceScreen: location,
+        actionText: 'Enable',
+    });
+};
+
+export const showBoRPostErrorSnackbar = (message?: string) => {
+    return showSnackBar({
+        barType: SNACK_BAR_TYPE.BOR_POST_EXPIRED,
+        customMessage: message,
     });
 };

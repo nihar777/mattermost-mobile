@@ -1,20 +1,20 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import {deleteAsync} from 'expo-file-system';
+import {viewDocument} from '@react-native-documents/viewer';
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {useIntl} from 'react-intl';
 import {Platform, StatusBar, type StatusBarStyle} from 'react-native';
-import FileViewer from 'react-native-file-viewer';
 import tinyColor from 'tinycolor2';
 
 import {getLocalFileInfo} from '@actions/local/file';
 import {buildFilePreviewUrl, buildFileUrl, downloadFile} from '@actions/remote/file';
 import {useServerUrl} from '@context/server';
 import {useTheme} from '@context/theme';
+import EphemeralStore from '@store/ephemeral_store';
 import {alertDownloadFailed, alertFailedToOpenDocument, alertOnlyPDFSupported} from '@utils/document';
 import {getFullErrorMessage, isErrorWithMessage} from '@utils/errors';
-import {fileExists, getLocalFilePathFromFile, isAudio, isGif, isImage, isPdf, isVideo} from '@utils/file';
+import {deleteFile, fileExists, getLocalFilePathFromFile, isAudio, isGif, isImage, isPdf, isVideo} from '@utils/file';
 import {getImageSize} from '@utils/gallery';
 import {logDebug} from '@utils/log';
 import {previewPdf} from '@utils/navigation';
@@ -45,7 +45,7 @@ const getFileInfo = async (serverUrl: string, bookmarks: ChannelBookmarkModel[],
 
                 let {width, height} = fileInfo;
                 if (imageFile && !width) {
-                    const size = await getImageSize(uri);
+                    const size = await getImageSize(serverUrl, uri, b.fileId);
                     width = size.width;
                     height = size.height;
                 }
@@ -68,7 +68,11 @@ export const useImageAttachments = (filesInfo: FileInfo[]) => {
             const videoFile = isVideo(file);
             const audioFile = isAudio(file);
 
-            if (imageFile || videoFile || audioFile) {
+            // Check if file is rejected by plugin - treat rejected files as non-images
+            // so they display as file cards instead of broken image previews
+            const isRejected = file.id && EphemeralStore.isFileRejected(file.id);
+
+            if ((imageFile || videoFile || audioFile) && !isRejected) {
                 let uri;
                 if (file.localPath) {
                     uri = file.localPath;
@@ -103,7 +107,7 @@ export const useDownloadFileAndPreview = (enableSecureFilePreview: boolean) => {
     const serverUrl = useServerUrl();
     const intl = useIntl();
     const theme = useTheme();
-    const downloadTask = useRef<ProgressPromise<ClientResponse>>();
+    const downloadTask = useRef<ProgressPromise<ClientResponse> | undefined>(undefined);
 
     const [progress, setProgress] = useState<number>(0);
 
@@ -133,12 +137,12 @@ export const useDownloadFileAndPreview = (enableSecureFilePreview: boolean) => {
         setStatusBarColor();
     }, [setStatusBarColor]);
 
-    const openDocument = useCallback(async (file: FileInfo) => {
+    const openDocument = useCallback((file: FileInfo) => {
         if (!didCancel && !preview) {
             let path = decodeURIComponent(file.localPath || '');
             let exists = false;
             if (path) {
-                exists = await fileExists(path);
+                exists = fileExists(path);
             }
 
             if (!exists) {
@@ -156,21 +160,21 @@ export const useDownloadFileAndPreview = (enableSecureFilePreview: boolean) => {
 
             setPreview(true);
             setStatusBarColor('dark-content');
-            FileViewer.open(path!.replace('file://', ''), {
-                displayName: decodeURIComponent(file.name),
-                onDismiss: onDonePreviewingFile,
-                showOpenWithDialog: true,
-                showAppsSuggestions: true,
+            viewDocument({
+                uri: path!,
+                headerTitle: decodeURIComponent(file.name),
+                mimeType: file.mime_type,
             }).then(() => {
                 setDownloading(false);
                 setProgress(0);
             }).catch(() => {
                 alertFailedToOpenDocument(file, intl);
-                onDonePreviewingFile();
 
                 if (path) {
-                    deleteAsync(path, {idempotent: true});
+                    deleteFile(path);
                 }
+            }).finally(() => {
+                onDonePreviewingFile();
             });
         }
     }, [didCancel, preview, enableSecureFilePreview, setStatusBarColor, onDonePreviewingFile, serverUrl, theme, intl]);
@@ -183,12 +187,12 @@ export const useDownloadFileAndPreview = (enableSecureFilePreview: boolean) => {
         try {
             path = decodeURIComponent(file.localPath || '');
             if (path) {
-                exists = await fileExists(path);
+                exists = fileExists(path);
             }
 
             if (!exists) {
                 path = getLocalFilePathFromFile(serverUrl, file);
-                exists = await fileExists(path);
+                exists = fileExists(path);
             }
 
             if (exists) {
@@ -204,7 +208,7 @@ export const useDownloadFileAndPreview = (enableSecureFilePreview: boolean) => {
             }
         } catch (error) {
             if (path) {
-                deleteAsync(path, {idempotent: true});
+                deleteFile(path);
             }
             setDownloading(false);
             setProgress(0);

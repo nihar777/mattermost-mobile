@@ -9,7 +9,6 @@ import Markdown from '@components/markdown';
 import {postTypeMessages} from '@components/post_list/combined_user_activity/messages';
 import {Post} from '@constants';
 import {useTheme} from '@context/theme';
-import {getMarkdownTextStyles} from '@utils/markdown';
 import {changeOpacity, makeStyleSheetFromTheme} from '@utils/theme';
 import {secureGetFromRecord, ensureString} from '@utils/types';
 import {typography} from '@utils/typography';
@@ -30,9 +29,6 @@ type RenderersProps = SystemMessageProps & {
     styles: {
         containerStyle: StyleProp<ViewStyle>;
         messageStyle: StyleProp<TextStyle>;
-        textStyles: {
-            [key: string]: TextStyle;
-        };
     };
     theme: Theme;
 }
@@ -68,7 +64,7 @@ const renderUsername = (value = '') => {
 };
 
 const renderMessage = ({location, post, styles, intl, localeHolder, theme, values, skipMarkdown = false}: RenderMessageProps) => {
-    const {containerStyle, messageStyle, textStyles} = styles;
+    const {containerStyle, messageStyle} = styles;
 
     if (skipMarkdown) {
         return (
@@ -85,7 +81,6 @@ const renderMessage = ({location, post, styles, intl, localeHolder, theme, value
                 channelId={post.channelId}
                 disableGallery={true}
                 location={location}
-                textStyles={textStyles}
                 value={intl.formatMessage(localeHolder, values)}
                 theme={theme}
             />
@@ -235,6 +230,65 @@ const unarchivedMessages = defineMessages({
     },
 });
 
+const sharedChannelStateMessages = defineMessages({
+    nowShared: {
+        id: 'shared_channel.system_message.now_shared',
+        defaultMessage: 'This channel is now shared with {workspaceName}.',
+    },
+    noLongerSharedUnknown: {
+        id: 'shared_channel.system_message.no_longer_shared_unknown',
+        defaultMessage: 'This channel is no longer shared with another workspace.',
+    },
+    noLongerShared: {
+        id: 'shared_channel.system_message.no_longer_shared',
+        defaultMessage: 'This channel is no longer shared with {workspaceName}.',
+    },
+});
+
+const renderSharedChannelStateMessage = ({post, location, styles, intl, theme}: RenderersProps) => {
+    const state = ensureString(post.props?.shared_channel_state);
+    const workspaceName = ensureString(post.props?.workspace_name);
+
+    if (state === 'shared') {
+        return renderMessage({
+            post,
+            styles,
+            intl,
+            location,
+            localeHolder: sharedChannelStateMessages.nowShared,
+            values: {workspaceName},
+            skipMarkdown: true,
+            theme,
+        });
+    }
+    if (state === 'unshared') {
+        if (workspaceName === '') {
+            return renderMessage({
+                post,
+                styles,
+                intl,
+                location,
+                localeHolder: sharedChannelStateMessages.noLongerSharedUnknown,
+                values: {},
+                skipMarkdown: true,
+                theme,
+            });
+        }
+        return renderMessage({
+            post,
+            styles,
+            intl,
+            location,
+            localeHolder: sharedChannelStateMessages.noLongerShared,
+            values: {workspaceName},
+            skipMarkdown: true,
+            theme,
+        });
+    }
+
+    return null;
+};
+
 const renderUnarchivedMessage = ({post, author, location, styles, intl, theme}: RenderersProps) => {
     if (!author?.username) {
         return null;
@@ -293,14 +347,14 @@ const systemMessageRenderers = {
     [Post.POST_TYPES.PURPOSE_CHANGE]: renderPurposeChangeMessage,
     [Post.POST_TYPES.CHANNEL_DELETED]: renderArchivedMessage,
     [Post.POST_TYPES.CHANNEL_UNARCHIVED]: renderUnarchivedMessage,
+    [Post.POST_TYPES.SHARED_CHANNEL_STATE]: renderSharedChannelStateMessage,
 };
 
 export const SystemMessage = ({post, location, author, hideGuestTags}: SystemMessageProps & { hideGuestTags: boolean}) => {
     const intl = useIntl();
     const theme = useTheme();
     const style = getStyleSheet(theme);
-    const textStyles = getMarkdownTextStyles(theme);
-    const styles = {messageStyle: style.systemMessage, textStyles, containerStyle: style.container};
+    const styles = {messageStyle: style.systemMessage, containerStyle: style.container};
 
     if (post.type === Post.POST_TYPES.GUEST_JOIN_CHANNEL) {
         return renderGuestJoinChannelMessage({post, author, location, styles, intl, theme}, hideGuestTags);
@@ -317,7 +371,6 @@ export const SystemMessage = ({post, location, author, hideGuestTags}: SystemMes
                 channelId={post.channelId}
                 location={location}
                 disableGallery={true}
-                textStyles={styles.textStyles}
                 value={post.message}
                 theme={theme}
             />

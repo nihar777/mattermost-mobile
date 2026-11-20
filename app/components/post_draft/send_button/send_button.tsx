@@ -1,8 +1,8 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import React, {useCallback, useEffect, useMemo, useState} from 'react';
-import {InteractionManager, View} from 'react-native';
+import React, {useCallback, useMemo, useRef, useState} from 'react';
+import {View} from 'react-native';
 import Tooltip from 'react-native-walkthrough-tooltip';
 
 import {storeScheduledPostTutorial} from '@actions/app/global';
@@ -10,6 +10,7 @@ import CompassIcon from '@components/compass_icon';
 import ScheduledPostTooltip from '@components/post_draft/send_button/scheduled_post_tooltip';
 import TouchableWithFeedback from '@components/touchable_with_feedback';
 import {useTheme} from '@context/theme';
+import useDidMount from '@hooks/did_mount';
 import {usePreventDoubleTap} from '@hooks/utils';
 import {changeOpacity, makeStyleSheetFromTheme} from '@utils/theme';
 
@@ -64,19 +65,20 @@ const SendButton: React.FC<Props> = ({
     const style = getStyleSheet(theme);
 
     const [scheduledPostTooltipVisible, setScheduledPostTooltipVisible] = useState(false);
+    const idleCallbackHandle = useRef<number | undefined>(undefined);
 
-    useEffect(() => {
-        if (scheduledPostFeatureTooltipWatched || !scheduledPostEnabled) {
-            return;
+    useDidMount(() => {
+        if (!scheduledPostFeatureTooltipWatched && scheduledPostEnabled) {
+            idleCallbackHandle.current = requestIdleCallback(() => {
+                setScheduledPostTooltipVisible(true);
+            });
         }
-
-        InteractionManager.runAfterInteractions(() => {
-            setScheduledPostTooltipVisible(true);
-        });
-
-        // This effect is intended to run only on the first mount, so dependencies are omitted intentionally.
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+        return () => {
+            if (idleCallbackHandle.current !== undefined) {
+                cancelIdleCallback(idleCallbackHandle.current);
+            }
+        };
+    });
 
     const onCloseScheduledPostTooltip = useCallback(() => {
         setScheduledPostTooltipVisible(false);
@@ -100,7 +102,6 @@ const SendButton: React.FC<Props> = ({
         >
             <Tooltip
                 isVisible={scheduledPostTooltipVisible}
-                useInteractionManager={true}
                 placement='top'
                 content={<ScheduledPostTooltip onClose={onCloseScheduledPostTooltip}/>}
                 onClose={onCloseScheduledPostTooltip}

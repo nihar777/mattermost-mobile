@@ -11,6 +11,7 @@ import {
     Post,
     Setup,
 } from '@support/server_api';
+import {assertServerBaseline} from '@support/server_baseline';
 import {
     serverOneUrl,
     siteOneUrl,
@@ -26,8 +27,8 @@ import {
     ThreadOptionsScreen,
     ThreadScreen,
 } from '@support/ui/screen';
-import {getRandomId, timeouts, wait} from '@support/utils';
-import {expect} from 'detox';
+import {getRandomId, timeouts} from '@support/utils';
+import {expect, waitFor} from 'detox';
 
 describe('Threads - Mark Thread as Read and Unread', () => {
     const serverOneDisplayName = 'Server 1';
@@ -37,6 +38,12 @@ describe('Threads - Mark Thread as Read and Unread', () => {
     beforeAll(async () => {
         const {channel, user} = await Setup.apiInit(siteOneUrl);
         testChannel = channel;
+
+        // # Assert server baseline (CRT always_on, ThreadAutoFollow) for thread UI.
+        await assertServerBaseline(siteOneUrl, [
+            'ServiceSettings.CollapsedThreads',
+            'ServiceSettings.ThreadAutoFollow',
+        ]);
 
         // # Log in to server
         await ServerScreen.connectToServer(serverOneUrl, serverOneDisplayName);
@@ -57,20 +64,18 @@ describe('Threads - Mark Thread as Read and Unread', () => {
         // # Create a thread started by the current user which another user replied to, go back to channel list screen, then go to global threads screen, and tap on unread threads button
         const parentMessage = `Message ${getRandomId()}`;
         await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelScreen.postMessage(parentMessage);
-        const {post: parentPost} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
+        const {post: parentPost} = await ChannelScreen.postMessageAndVerify(parentMessage, testChannel.id, siteOneUrl);
         await Post.apiCreatePost(siteOneUrl, {
             channelId: testChannel.id,
             message: `${parentMessage} reply`,
             rootId: parentPost.id,
         });
         await ChannelScreen.back();
-        await device.reloadReactNative();
         await GlobalThreadsScreen.open();
         await GlobalThreadsScreen.headerUnreadThreadsButton.tap();
 
         // * Verify thread is displayed as unread in unread threads section with unread dot badge and footer unread replies
-        await expect(GlobalThreadsScreen.getThreadItem(parentPost.id)).toBeVisible();
+        await waitFor(GlobalThreadsScreen.getThreadItem(parentPost.id)).toBeVisible().withTimeout(timeouts.HALF_MIN);
         await expect(GlobalThreadsScreen.getThreadItemUnreadDotBadge(parentPost.id)).toBeVisible();
         await expect(GlobalThreadsScreen.getThreadItemFooterUnreadReplies(parentPost.id)).toHaveText('1 new reply');
 
@@ -97,15 +102,13 @@ describe('Threads - Mark Thread as Read and Unread', () => {
         // # Create a thread started by the current user which another user replied to, go back to channel list screen, then go to global threads screen, and tap on unread threads button
         const parentMessage = `Message ${getRandomId()}`;
         await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelScreen.postMessage(parentMessage);
-        const {post: parentPost} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
+        const {post: parentPost} = await ChannelScreen.postMessageAndVerify(parentMessage, testChannel.id, siteOneUrl);
         await Post.apiCreatePost(siteOneUrl, {
             channelId: testChannel.id,
             message: `${parentMessage} reply`,
             rootId: parentPost.id,
         });
         await ChannelScreen.back();
-        await device.reloadReactNative();
         await GlobalThreadsScreen.open();
         await GlobalThreadsScreen.headerUnreadThreadsButton.tap();
 
@@ -119,15 +122,14 @@ describe('Threads - Mark Thread as Read and Unread', () => {
         await ThreadOptionsScreen.markAsReadOption.tap();
 
         // * Verify thread is not displayed anymore in unread threads section
-        await wait(timeouts.ONE_SEC);
-        await expect(GlobalThreadsScreen.getThreadItem(parentPost.id)).not.toBeVisible();
+        await waitFor(GlobalThreadsScreen.getThreadItem(parentPost.id)).not.toBeVisible().withTimeout(timeouts.TEN_SEC);
 
         // # Tap on all your threads button
         await GlobalThreadsScreen.headerAllThreadsButton.tap();
 
         // * Verify thread is displayed as read in all your threads section without unread dot badge and with footer reply count
-        await expect(GlobalThreadsScreen.getThreadItem(parentPost.id)).toBeVisible();
-        await expect(GlobalThreadsScreen.getThreadItemUnreadDotBadge(parentPost.id)).not.toBeVisible();
+        await waitFor(GlobalThreadsScreen.getThreadItem(parentPost.id)).toBeVisible().withTimeout(timeouts.TEN_SEC);
+        await waitFor(GlobalThreadsScreen.getThreadItemUnreadDotBadge(parentPost.id)).not.toBeVisible().withTimeout(timeouts.TEN_SEC);
         await expect(GlobalThreadsScreen.getThreadItemFooterReplyCount(parentPost.id)).toHaveText('1 reply');
 
         // # Open thread options for thread and tap on mark as unread option
@@ -135,9 +137,8 @@ describe('Threads - Mark Thread as Read and Unread', () => {
         await ThreadOptionsScreen.markAsUnreadOption.tap();
 
         // * Verify thread is displayed as unread in all your threads section with unread dot badge and footer unread replies
-        await wait(timeouts.ONE_SEC);
+        await waitFor(GlobalThreadsScreen.getThreadItemUnreadDotBadge(parentPost.id)).toBeVisible().withTimeout(timeouts.TEN_SEC);
         await expect(GlobalThreadsScreen.getThreadItem(parentPost.id)).toBeVisible();
-        await expect(GlobalThreadsScreen.getThreadItemUnreadDotBadge(parentPost.id)).toBeVisible();
         await expect(GlobalThreadsScreen.getThreadItemFooterUnreadReplies(parentPost.id)).toHaveText('1 new reply');
 
         // # Go back to channel list screen
@@ -148,15 +149,13 @@ describe('Threads - Mark Thread as Read and Unread', () => {
         // # Create a thread started by the current user which another user replied to, go back to channel list screen, then go to global threads screen, and tap on unread threads button
         const parentMessage = `Message ${getRandomId()}`;
         await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelScreen.postMessage(parentMessage);
-        const {post: parentPost} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
+        const {post: parentPost} = await ChannelScreen.postMessageAndVerify(parentMessage, testChannel.id, siteOneUrl);
         await Post.apiCreatePost(siteOneUrl, {
             channelId: testChannel.id,
             message: `${parentMessage} reply`,
             rootId: parentPost.id,
         });
         await ChannelScreen.back();
-        await device.reloadReactNative();
         await GlobalThreadsScreen.open();
         await GlobalThreadsScreen.headerUnreadThreadsButton.tap();
 
@@ -175,6 +174,7 @@ describe('Threads - Mark Thread as Read and Unread', () => {
         await Alert.markReadButton.tap();
 
         // * Verify thread is not displayed anymore and unread threads section is empty
+        await waitFor(GlobalThreadsScreen.getThreadItem(parentPost.id)).not.toBeVisible().withTimeout(timeouts.TEN_SEC);
         await expect(GlobalThreadsScreen.getThreadItem(parentPost.id)).not.toBeVisible();
         await expect(GlobalThreadsScreen.emptyThreadsList).toBeVisible();
 

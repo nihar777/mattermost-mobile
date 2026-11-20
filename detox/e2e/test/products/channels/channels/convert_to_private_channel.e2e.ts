@@ -7,7 +7,11 @@
 // - Use element testID when selecting an element. Create one if none.
 // *******************************************************************
 
-import {siteOneUrl} from '@support/test_config';
+import {Setup, User} from '@support/server_api';
+import {
+    serverOneUrl,
+    siteOneUrl,
+} from '@support/test_config';
 import {
     ChannelScreen,
     ChannelListScreen,
@@ -16,24 +20,45 @@ import {
     LoginScreen,
     ServerScreen,
     ChannelInfoScreen,
+    ChannelSettingsScreen,
 } from '@support/ui/screen';
-import {getAdminAccount, getRandomId, timeouts, wait} from '@support/utils';
-import {expect} from 'detox';
+import {enableSynchronization, getRandomId, timeouts} from '@support/utils';
+import {expect, waitFor} from 'detox';
 
 describe('Channels - Convert to Private Channel', () => {
-    const siteOneDisplayName = 'Server 1';
+    const serverOneDisplayName = 'Server 1';
+    let testUser: any;
 
     beforeAll(async () => {
+        // # Create a fresh user with system_admin role in an isolated team.
+        // Using the shared sysadmin account causes the mqt_js thread to stay busy
+        // for minutes loading all accumulated teams and channels from prior test runs.
+        const {user} = await Setup.apiInit(siteOneUrl);
+        await User.apiUpdateUserRoles(siteOneUrl, user.id, 'system_user system_admin');
+        testUser = user;
 
-        // # Log in to server as admin
-        await ServerScreen.connectToServer(siteOneUrl, siteOneDisplayName);
-        await LoginScreen.loginAsAdmin(getAdminAccount());
-        await wait(timeouts.TWO_SEC);
+        // # Ensure a clean app state regardless of what the previous suite left behind.
+        // Disable Detox synchronization during app init: after newInstance the JS bridge
+        // (mqt_js) is busy bootstrapping React Native, causing BridgeIdlingResource to
+        // block indefinitely and LoginScreen.toBeVisible() to time out on Android CI.
+        await device.launchApp({newInstance: true, launchArgs: {detoxDisableSynchronization: 'YES'}});
+
+        // # Log in as the fresh system admin user
+        await ServerScreen.connectToServer(serverOneUrl, serverOneDisplayName);
+        await LoginScreen.login(testUser);
+
+        // Re-enable synchronization now that the app has settled past the init bridge burst.
+        await enableSynchronization();
+
+        // Wait for the channel list header plus button to be fully visible and hittable
+        // before any test attempts to tap it. A fixed sleep was insufficient on CI where
+        // the navigation animation can take longer after relaunch.
+        await waitFor(ChannelListScreen.headerPlusButton).toBeVisible().withTimeout(timeouts.HALF_MIN);
     });
 
     beforeEach(async () => {
         // * Verify on channel list screen
-        await waitFor(ChannelListScreen.channelListScreen).toBeVisible().withTimeout(timeouts.TWO_MIN);
+        await ChannelListScreen.toBeVisible();
     });
 
     afterAll(async () => {
@@ -42,39 +67,44 @@ describe('Channels - Convert to Private Channel', () => {
     });
 
     it('MM-T4972_1 - should be able to convert public channel to private and confirm', async () => {
-        // # Create a public channel screen, open channel info screen, and tap on convert to private channel option and confirm
+        // # Create a public channel screen, open channel info screen, go to channel settings, and tap on convert to private channel option and confirm
         const channelDisplayName = `Channel ${getRandomId()}`;
         await CreateOrEditChannelScreen.openCreateChannel();
         await CreateOrEditChannelScreen.displayNameInput.replaceText(channelDisplayName);
         await CreateOrEditChannelScreen.createButton.tap();
-        await wait(timeouts.TWO_SEC);
-        await ChannelScreen.scheduledPostTooltipCloseButtonAdminAccount.tap();
+        await ChannelScreen.dismissScheduledPostTooltip();
         await ChannelInfoScreen.open();
-        await ChannelInfoScreen.convertToPrivateChannel(channelDisplayName, {confirm: true});
+        await ChannelInfoScreen.openChannelSettings();
+        await ChannelSettingsScreen.toBeVisible();
+        await ChannelSettingsScreen.convertToPrivateChannel(channelDisplayName, {confirm: true});
 
-        // * Verify on channel info screen and convert to private channel option does not exist
-        await ChannelInfoScreen.toBeVisible();
-        await expect(ChannelInfoScreen.convertPrivateOption).not.toExist();
+        // * Verify on channel settings screen and convert to private channel option does not exist
+        await ChannelSettingsScreen.toBeVisible();
+        await expect(ChannelSettingsScreen.convertPrivateOption).not.toExist();
 
         // # Go back to channel list screen
+        await ChannelSettingsScreen.close();
         await ChannelInfoScreen.close();
         await ChannelScreen.back();
     });
 
     it('MM-T4972_2 - should be able to convert public channel to private and cancel', async () => {
-        // # Create a public channel screen, open channel info screen, and tap on convert to private channel option and cancel
+        // # Create a public channel screen, open channel info screen, go to channel settings, and tap on convert to private channel option and cancel
         const channelDisplayName = `Channel ${getRandomId()}`;
         await CreateOrEditChannelScreen.openCreateChannel();
         await CreateOrEditChannelScreen.displayNameInput.replaceText(channelDisplayName);
         await CreateOrEditChannelScreen.createButton.tap();
         await ChannelInfoScreen.open();
-        await ChannelInfoScreen.convertToPrivateChannel(channelDisplayName, {confirm: false});
+        await ChannelInfoScreen.openChannelSettings();
+        await ChannelSettingsScreen.toBeVisible();
+        await ChannelSettingsScreen.convertToPrivateChannel(channelDisplayName, {confirm: false});
 
-        // * Verify on channel info screen and convert to private channel option still exists
-        await ChannelInfoScreen.toBeVisible();
-        await expect(ChannelInfoScreen.convertPrivateOption).toExist();
+        // * Verify on channel settings screen and convert to private channel option still exists
+        await ChannelSettingsScreen.toBeVisible();
+        await expect(ChannelSettingsScreen.convertPrivateOption).toExist();
 
         // # Go back to channel list screen
+        await ChannelSettingsScreen.close();
         await ChannelInfoScreen.close();
         await ChannelScreen.back();
     });

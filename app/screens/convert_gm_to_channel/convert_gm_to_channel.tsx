@@ -8,19 +8,19 @@ import {View} from 'react-native';
 import {fetchChannelMemberships, fetchGroupMessageMembersCommonTeams} from '@actions/remote/channel';
 import {PER_PAGE_DEFAULT} from '@client/rest/constants';
 import Loading from '@components/loading';
+import {Screens} from '@constants';
 import {useServerUrl} from '@context/server';
 import {useTheme} from '@context/theme';
-import SecurityManager from '@managers/security_manager';
+import useAndroidHardwareBackHandler from '@hooks/android_back_handler';
+import useDidMount from '@hooks/did_mount';
+import {navigateBack} from '@screens/navigation';
 import {changeOpacity, makeStyleSheetFromTheme} from '@utils/theme';
 import {typography} from '@utils/typography';
 
 import ConvertGMToChannelForm from './convert_gm_to_channel_form';
 
-import type {AvailableScreens} from '@typings/screens/navigation';
-
 type Props = {
     channelId: string;
-    componentId: AvailableScreens;
     currentUserId?: string;
 }
 
@@ -72,7 +72,6 @@ const getStyleFromTheme = makeStyleSheetFromTheme((theme: Theme) => {
 
 const ConvertGMToChannel = ({
     channelId,
-    componentId,
     currentUserId,
 }: Props) => {
     const theme = useTheme();
@@ -89,9 +88,9 @@ const ConvertGMToChannel = ({
     const serverUrl = useServerUrl();
     const mounted = useRef(false);
 
-    const loadingAnimationTimeoutRef = useRef<NodeJS.Timeout>();
+    const loadingAnimationTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
 
-    useEffect(() => {
+    useDidMount(() => {
         loadingAnimationTimeoutRef.current = setTimeout(() => setLoadingAnimationTimeout(true), loadingIndicatorTimeout);
         async function work() {
             const {teams} = await fetchGroupMessageMembersCommonTeams(serverUrl, channelId);
@@ -107,15 +106,16 @@ const ConvertGMToChannel = ({
         return () => {
             clearTimeout(loadingAnimationTimeoutRef.current);
         };
-    }, []);
 
-    useEffect(() => {
+    });
+
+    useDidMount(() => {
         mounted.current = true;
 
         return () => {
             mounted.current = false;
         };
-    }, []);
+    });
 
     useEffect(() => {
         if (!currentUserId) {
@@ -135,6 +135,8 @@ const ConvertGMToChannel = ({
             setChannelMembersFetched(true);
         });
     }, [serverUrl, channelId, currentUserId]);
+
+    useAndroidHardwareBackHandler(Screens.CONVERT_GM_TO_CHANNEL, navigateBack);
 
     const showLoader = !loadingAnimationTimeout || !commonTeamsFetched || !channelMembersFetched;
 
@@ -160,10 +162,7 @@ const ConvertGMToChannel = ({
     }
 
     return (
-        <View
-            nativeID={SecurityManager.getShieldScreenId(componentId)}
-            style={styles.flex}
-        >
+        <View style={styles.flex}>
             {component}
         </View>
     );

@@ -4,7 +4,6 @@
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {useIntl} from 'react-intl';
 import {FlatList, SectionList, Text, View, type DefaultSectionT, type ListRenderItemInfo, type SectionListData} from 'react-native';
-import {SafeAreaView} from 'react-native-safe-area-context';
 
 import {switchToChannelById} from '@actions/remote/channel';
 import FormattedText from '@components/formatted_text';
@@ -14,13 +13,10 @@ import {General, Screens} from '@constants';
 import {useServerUrl} from '@context/server';
 import {useTheme} from '@context/theme';
 import useAndroidHardwareBackHandler from '@hooks/android_back_handler';
-import SecurityManager from '@managers/security_manager';
+import useDidMount from '@hooks/did_mount';
 import {fetchPlaybooks} from '@playbooks/actions/remote/playbooks';
 import {fetchPlaybookRunsForChannel} from '@playbooks/actions/remote/runs';
-import {
-    popTo,
-    popTopScreen,
-} from '@screens/navigation';
+import {navigateToRoot, navigateBack} from '@screens/navigation';
 import {changeOpacity, getKeyboardAppearanceFromTheme, makeStyleSheetFromTheme} from '@utils/theme';
 import {typography} from '@utils/typography';
 
@@ -28,17 +24,11 @@ import {goToPlaybookRun, goToStartARun} from '../navigation';
 
 import PlaybookRow from './playbook_row';
 
-import type {AvailableScreens} from '@typings/screens/navigation';
-
-const close = () => {
-    popTopScreen();
-};
-
 export type Props = {
     currentTeamId: string;
     currentUserId: string;
-    componentId: AvailableScreens;
     playbooksUsedInChannel: Set<string>;
+    channelId?: string;
 }
 
 const getStyleSheet = makeStyleSheetFromTheme((theme: Theme) => {
@@ -81,6 +71,10 @@ const getStyleSheet = makeStyleSheetFromTheme((theme: Theme) => {
             flex: 0,
             backgroundColor: changeOpacity(theme.centerChannelColor, 0.1),
         },
+        sectionHeaderContainer: {
+            backgroundColor: theme.centerChannelBg,
+            paddingVertical: 8,
+        },
         sectionHeader: {
             color: changeOpacity(theme.centerChannelColor, 0.56),
             ...typography('Body', 75, 'SemiBold'),
@@ -94,8 +88,8 @@ const EMPTY_DATA: Playbook[] = [];
 function SelectPlaybook({
     currentTeamId,
     currentUserId,
-    componentId,
     playbooksUsedInChannel,
+    channelId,
 }: Props) {
     const serverUrl = useServerUrl();
     const theme = useTheme();
@@ -111,7 +105,7 @@ function SelectPlaybook({
     const [searchResults, setSearchResults] = useState<Playbook[]>([]);
 
     const page = useRef<number>(-1);
-    const next = useRef<boolean>(true);
+    const hasMore = useRef<boolean>(true);
 
     // Callbacks
     const clearSearch = useCallback(() => {
@@ -121,7 +115,7 @@ function SelectPlaybook({
     }, []);
 
     const loadMore = useCallback(async () => {
-        if (next.current && !loading) {
+        if (hasMore.current && !loading) {
             setLoading(true);
             const result = await fetchPlaybooks(serverUrl, {
                 team_id: currentTeamId,
@@ -133,7 +127,7 @@ function SelectPlaybook({
             }
 
             page.current++;
-            next.current = Boolean(result.data?.has_more);
+            hasMore.current = Boolean(result.data?.has_more);
             setLoading(false);
         }
     }, [loading, serverUrl, currentTeamId]);
@@ -160,13 +154,15 @@ function SelectPlaybook({
 
             if (result.data) {
                 setSearchResults(result.data.items);
+            } else {
+                setSearchResults(EMPTY_DATA);
             }
 
             setSearching(false);
         }, General.SEARCH_TIMEOUT_MILLISECONDS);
     }, [clearSearch, serverUrl, currentTeamId]);
 
-    useAndroidHardwareBackHandler(componentId, close);
+    useAndroidHardwareBackHandler(Screens.PLAYBOOKS_SELECT_PLAYBOOK, navigateBack);
 
     useEffect(() => {
         return () => {
@@ -177,15 +173,17 @@ function SelectPlaybook({
         };
     }, []);
 
-    useEffect(() => {
+    useDidMount(() => {
         loadMore();
+    });
 
-        // We only want to load the playbooks once on mount
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+    const renderNoResults = useCallback((): React.ReactNode => {
+        if (loading && page.current === -1) {
+            // Already handled by the loading component
+            return null;
+        }
 
-    const renderNoResults = useCallback((): JSX.Element | null => {
-        if (searching || (loading && page.current === -1)) {
+        if (searching) {
             return (
                 <Loading
                     color={theme.buttonBg}
@@ -207,15 +205,15 @@ function SelectPlaybook({
     }, [loading, searching, style.loadingContainer, style.noResultContainer, style.noResultText, theme.buttonBg]);
 
     const onRunCreated = useCallback(async (run: PlaybookRun) => {
-        await popTo(Screens.HOME);
+        await navigateToRoot();
         await fetchPlaybookRunsForChannel(serverUrl, run.channel_id);
         await switchToChannelById(serverUrl, run.channel_id);
-        await goToPlaybookRun(intl, run.id);
-    }, [intl, serverUrl]);
+        await goToPlaybookRun(run.id);
+    }, [serverUrl]);
 
     const onPress = useCallback((playbook: Playbook) => {
-        goToStartARun(intl, theme, playbook, onRunCreated);
-    }, [intl, onRunCreated, theme]);
+        goToStartARun(playbook, onRunCreated, channelId);
+    }, [onRunCreated, channelId]);
 
     const renderItem = useCallback(({item}: ListRenderItemInfo<Playbook>) => {
         return (
@@ -236,15 +234,18 @@ function SelectPlaybook({
                 color={theme.buttonBg}
                 containerStyle={style.loadingContainer}
                 size='large'
+                testID='selector.loading'
             />
         );
     }, [loading, style.loadingContainer, theme.buttonBg]);
 
     const renderSectionHeader = useCallback(({section}: {section: SectionListData<Playbook, DefaultSectionT>}) => {
         return (
-            <Text style={style.sectionHeader}>{section.title}</Text>
+            <View style={style.sectionHeaderContainer}>
+                <Text style={style.sectionHeader}>{section.title}</Text>
+            </View>
         );
-    }, [style.sectionHeader]);
+    }, [style]);
 
     const sections: Array<SectionListData<Playbook, DefaultSectionT>> = useMemo(() => {
         type PlaybookSections = {
@@ -293,14 +294,8 @@ function SelectPlaybook({
     }
 
     return (
-        <SafeAreaView
-            nativeID={SecurityManager.getShieldScreenId(componentId)}
-            style={style.container}
-        >
-            <View
-                testID='integration_selector.screen'
-                style={style.searchBar}
-            >
+        <View style={style.container}>
+            <View style={style.searchBar}>
                 <SearchBar
                     testID='selector.search_bar'
                     placeholder={intl.formatMessage({id: 'search_bar.search', defaultMessage: 'Search'})}
@@ -318,8 +313,8 @@ function SelectPlaybook({
                     data={shownData}
                     renderItem={renderItem}
                     ListEmptyComponent={renderNoResults}
-                    onEndReached={loadMore}
                     ListFooterComponent={renderLoading}
+                    testID='selector.flat_list'
                 />
             )}
             {!term && (
@@ -330,9 +325,10 @@ function SelectPlaybook({
                     ListEmptyComponent={renderNoResults}
                     onEndReached={loadMore}
                     ListFooterComponent={renderLoading}
+                    testID='selector.section_list'
                 />
             )}
-        </SafeAreaView>
+        </View>
     );
 }
 

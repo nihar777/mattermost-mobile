@@ -1,111 +1,52 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import {FlashList, type ListRenderItem} from '@shopify/flash-list';
 import React, {useCallback, useEffect, useMemo, useState} from 'react';
-import {defineMessages, useIntl} from 'react-intl';
-import {View} from 'react-native';
+import {useIntl} from 'react-intl';
+import {DeviceEventEmitter, View} from 'react-native';
 
-import Loading from '@components/loading';
-import MenuDivider from '@components/menu_divider';
-import SectionNotice from '@components/section_notice';
+import NavigationHeader from '@components/navigation_header';
+import RoundedHeaderContext from '@components/rounded_header_context';
+import {Events, Screens} from '@constants';
 import {useServerUrl} from '@context/server';
-import {useTheme} from '@context/theme';
 import useAndroidHardwareBackHandler from '@hooks/android_back_handler';
-import useTabs, {type TabDefinition} from '@hooks/use_tabs';
-import Tabs from '@hooks/use_tabs/tabs';
+import useDidMount from '@hooks/did_mount';
+import {useDefaultHeaderHeight} from '@hooks/header';
 import {fetchPlaybookRunsPageForParticipant} from '@playbooks/actions/remote/runs';
-import PlaybookScreens from '@playbooks/constants/screens';
+import RunList from '@playbooks/components/run_list';
 import {isRunFinished} from '@playbooks/utils/run';
-import {popTopScreen} from '@screens/navigation';
-import {changeOpacity, makeStyleSheetFromTheme} from '@utils/theme';
-
-import EmptyState from '../playbooks_runs/empty_state';
-import PlaybookCard, {CARD_HEIGHT} from '../playbooks_runs/playbook_card';
+import {navigateBack} from '@screens/navigation';
 
 import type PlaybookRunModel from '@playbooks/types/database/models/playbook_run';
-import type {AvailableScreens} from '@typings/screens/navigation';
 
 type Props = {
     currentUserId: string;
-    componentId: AvailableScreens;
     cachedPlaybookRuns: PlaybookRunModel[];
+    isTabletView?: boolean;
+    currentTeamId: string;
 };
-
-type TabsNames = 'in-progress' | 'finished';
-
-const getStyleFromTheme = makeStyleSheetFromTheme((theme: Theme) => ({
-    container: {
-        padding: 20,
-    },
-    tabContainer: {
-        borderBottomWidth: 1,
-        borderBottomColor: changeOpacity(theme.centerChannelColor, 0.12),
-    },
-    warningText: {
-        color: theme.centerChannelColor,
-        fontSize: 14,
-        lineHeight: 20,
-    },
-    warningContainer: {
-        paddingTop: 8,
-        paddingHorizontal: 16,
-    },
-}));
-
-const messages = defineMessages({
-    cachedWarningTitle: {
-        id: 'playbooks.participant_playbooks.cached_warning_title',
-        defaultMessage: 'Cannot reach the server',
-    },
-    cachedWarningMessage: {
-        id: 'playbooks.participant_playbooks.cached_warning_message',
-        defaultMessage: 'Showing cached data only. Some playbook runs or updates may be missing from this list.',
-    },
-    tabInProgress: {
-        id: 'playbooks.participant_playbooks.tab_in_progress',
-        defaultMessage: 'In Progress',
-    },
-    tabFinished: {
-        id: 'playbooks.participant_playbooks.tab_finished',
-        defaultMessage: 'Finished',
-    },
-});
-
-const tabs: Array<TabDefinition<TabsNames>> = [
-    {
-        id: 'in-progress',
-        name: messages.tabInProgress,
-    },
-    {
-        id: 'finished',
-        name: messages.tabFinished,
-    },
-];
 
 const ParticipantPlaybooks = ({
     currentUserId,
-    componentId,
     cachedPlaybookRuns,
+    isTabletView,
+    currentTeamId,
 }: Props) => {
-    const intl = useIntl();
     const serverUrl = useServerUrl();
-    const theme = useTheme();
-    const styles = getStyleFromTheme(theme);
-
+    const intl = useIntl();
     const [participantRuns, setParticipantRuns] = useState<Array<PlaybookRun | PlaybookRunModel>>([]);
     const [loading, setLoading] = useState(true);
     const [loadingMore, setLoadingMore] = useState(false);
-    const [hasError, setHasError] = useState(false);
     const [hasMore, setHasMore] = useState(false);
     const [currentPage, setCurrentPage] = useState(0);
     const [showCachedWarning, setShowCachedWarning] = useState(false);
+    const defaultHeight = useDefaultHeaderHeight();
 
-    const close = useCallback(() => {
-        popTopScreen(componentId);
-    }, [componentId]);
+    useEffect(() => {
+        DeviceEventEmitter.emit(Events.ACTIVE_SCREEN, Screens.PARTICIPANT_PLAYBOOKS);
+    }, []);
 
-    useAndroidHardwareBackHandler(componentId, close);
+    useAndroidHardwareBackHandler(Screens.PARTICIPANT_PLAYBOOKS, navigateBack);
 
     const fetchData = useCallback(async (page = 0, append = false) => {
         if (!currentUserId) {
@@ -115,30 +56,27 @@ const ParticipantPlaybooks = ({
         if (append) {
             setLoadingMore(true);
         } else {
-            setLoading(true);
-            setHasError(false);
             setShowCachedWarning(false);
+            setLoading(true);
         }
 
-        const result = await fetchPlaybookRunsPageForParticipant(serverUrl, currentUserId, page);
+        const {runs = [], hasMore: hasMoreFromResult = false, error} = await fetchPlaybookRunsPageForParticipant(serverUrl, currentUserId, currentTeamId, page);
 
-        if (result.error) {
+        if (error) {
             // Fallback to database cache only for the first page
             if (page === 0 && cachedPlaybookRuns.length > 0) {
                 setParticipantRuns(cachedPlaybookRuns);
                 setHasMore(false);
                 setShowCachedWarning(true);
-            } else {
-                setHasError(true);
             }
         } else {
-            const newRuns = result.runs || [];
+            const newRuns = runs;
             if (append) {
                 setParticipantRuns((prev) => [...prev, ...newRuns]);
             } else {
                 setParticipantRuns(newRuns);
             }
-            setHasMore(result.hasMore || false);
+            setHasMore(hasMoreFromResult);
             setCurrentPage(page);
         }
 
@@ -147,7 +85,7 @@ const ParticipantPlaybooks = ({
         } else {
             setLoading(false);
         }
-    }, [currentUserId, serverUrl, cachedPlaybookRuns]);
+    }, [currentUserId, currentTeamId, serverUrl, cachedPlaybookRuns]);
 
     const loadMore = useCallback(() => {
         if (!loadingMore && hasMore) {
@@ -155,12 +93,22 @@ const ParticipantPlaybooks = ({
         }
     }, [loadingMore, hasMore, currentPage, fetchData]);
 
-    useEffect(() => {
+    useDidMount(() => {
         fetchData();
+    });
 
-        // Only fetch the data on mount
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+    const showMoreButton = useCallback(() => {
+        return hasMore;
+    }, [hasMore]);
+
+    const contextStyle = useMemo(() => ({
+        top: defaultHeight,
+    }), [defaultHeight]);
+
+    const containerStyle = useMemo(() => {
+        const marginTop = defaultHeight;
+        return {marginTop};
+    }, [defaultHeight]);
 
     const [inProgressRuns, finishedRuns] = useMemo(() => {
         const inProgress: Array<PlaybookRun | PlaybookRunModel> = [];
@@ -177,58 +125,32 @@ const ParticipantPlaybooks = ({
         return [inProgress, finished] as const;
     }, [participantRuns]);
 
-    const [activeTab, tabsProps] = useTabs<TabsNames>('in-progress', tabs);
-
-    const data = activeTab === 'in-progress' ? inProgressRuns : finishedRuns;
-    const isEmpty = data.length === 0;
-
-    const renderItem: ListRenderItem<PlaybookRun> = useCallback(({item}) => {
-        return (
-            <PlaybookCard
-                run={item}
-                location={PlaybookScreens.PARTICIPANT_PLAYBOOKS}
-            />
-        );
-    }, []);
-
-    let content;
-    if (loading) {
-        content = <Loading testID='loading'/>;
-    } else if (hasError || isEmpty) {
-        content = (<EmptyState tab={activeTab}/>);
-    } else {
-        content = (
-            <FlashList
-                data={data}
-                renderItem={renderItem}
-                contentContainerStyle={styles.container}
-                ItemSeparatorComponent={MenuDivider}
-                estimatedItemSize={CARD_HEIGHT}
-                onEndReached={loadMore}
-                onEndReachedThreshold={0.1}
-                ListFooterComponent={loadingMore ? <Loading testID='loading.more'/> : undefined}
-                testID={'runs.list'}
-            />
-        );
-    }
-
     return (
-        <>
-            <View style={styles.tabContainer}>
-                <Tabs {...tabsProps}/>
-            </View>
-            {showCachedWarning && (
-                <View style={styles.warningContainer}>
-                    <SectionNotice
-                        title={intl.formatMessage(messages.cachedWarningTitle)}
-                        location={PlaybookScreens.PARTICIPANT_PLAYBOOKS}
-                        text={intl.formatMessage(messages.cachedWarningMessage)}
-                        type='warning'
-                    />
+        <View style={{flex: 1}}>
+            {isTabletView &&
+            <>
+                <NavigationHeader
+                    showBackButton={false}
+                    isLargeTitle={false}
+                    title={intl.formatMessage({id: 'playbooks.participant_playbooks.title', defaultMessage: 'Playbook checklists'})}
+                />
+                <View style={contextStyle}>
+                    <RoundedHeaderContext/>
                 </View>
-            )}
-            {content}
-        </>
+                <View style={containerStyle}/>
+            </>
+            }
+            <RunList
+                location={Screens.PARTICIPANT_PLAYBOOKS}
+                inProgressRuns={inProgressRuns}
+                finishedRuns={finishedRuns}
+                fetchMoreRuns={loadMore}
+                showMoreButton={showMoreButton}
+                fetching={loadingMore}
+                loading={loading}
+                showCachedWarning={showCachedWarning}
+            />
+        </View>
     );
 };
 

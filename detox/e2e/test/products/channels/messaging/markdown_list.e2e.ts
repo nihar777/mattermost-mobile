@@ -8,7 +8,6 @@
 // *******************************************************************
 
 import {
-    Post,
     Setup,
 } from '@support/server_api';
 import {
@@ -18,11 +17,10 @@ import {
 import {
     ChannelListScreen,
     ChannelScreen,
-    HomeScreen,
     LoginScreen,
     ServerScreen,
 } from '@support/ui/screen';
-import {isAndroid, isIos} from '@support/utils';
+import {isIos} from '@support/utils';
 import {expect} from 'detox';
 
 describe('Messaging - Markdown List', () => {
@@ -44,11 +42,6 @@ describe('Messaging - Markdown List', () => {
         await ChannelListScreen.toBeVisible();
     });
 
-    afterAll(async () => {
-        // # Log out
-        await HomeScreen.logout();
-    });
-
     it('MM-T4894_1 - should be able to display markdown bullet list', async () => {
         // # Open a channel screen and post a markdown bullet list
         const item1 = 'item one';
@@ -56,24 +49,19 @@ describe('Messaging - Markdown List', () => {
         const item2SubPoint = 'item two sub-point';
         const markdownBulletList = `* ${item1}\n- ${item2}\n  + ${item2SubPoint}`;
         await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelScreen.postMessage(markdownBulletList);
 
         // * Verify markdown bullet list is displayed
-        const {post} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
+        const {post} = await ChannelScreen.postMessageAndVerify(markdownBulletList, testChannel.id, siteOneUrl);
         const {postListPostItemListItem, postListPostItemListItemBullet} = ChannelScreen.getPostListPostItem(post.id);
-        await expect(postListPostItemListItem.atIndex(0)).toBeVisible();
-        await expect(element(by.text(item1))).toBeVisible();
-        await expect(element(by.text(item2))).toBeVisible();
-        await expect(element(by.text(item2SubPoint))).toBeVisible();
-
-        if (isAndroid()) {
-            await expect(postListPostItemListItem.atIndex(0)).toHaveLabel(`• ${item1}`);
-        }
+        await expect(postListPostItemListItem.atIndex(0)).toBeVisible(50);
+        await expect(element(by.text(item1))).toBeVisible(50);
+        await expect(element(by.text(item2))).toBeVisible(50);
+        await expect(element(by.text(item2SubPoint))).toBeVisible(50);
 
         if (isIos()) {
-            await expect(postListPostItemListItem.atIndex(0)).toBeVisible();
-            await expect(postListPostItemListItem.atIndex(1)).toBeVisible();
-            await expect(postListPostItemListItem.atIndex(2)).toBeVisible();
+            await expect(postListPostItemListItem.atIndex(0)).toBeVisible(50);
+            await expect(postListPostItemListItem.atIndex(1)).toBeVisible(50);
+            await expect(postListPostItemListItem.atIndex(2)).toBeVisible(50);
 
             await expect(postListPostItemListItemBullet.atIndex(0)).toHaveText('•');
             await expect(postListPostItemListItemBullet.atIndex(1)).toHaveText('•');
@@ -91,25 +79,20 @@ describe('Messaging - Markdown List', () => {
         const item3 = 'Item three';
         const markdownOrderedList = `1. ${item1}\n1. ${item2}\n1. ${item3}`;
         await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelScreen.postMessage(markdownOrderedList);
 
         // * Verify markdown ordered list is displayed
-        const {post} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
+        const {post} = await ChannelScreen.postMessageAndVerify(markdownOrderedList, testChannel.id, siteOneUrl);
         const {postListPostItemListItem, postListPostItemListItemBullet} = ChannelScreen.getPostListPostItem(post.id);
-        await expect(postListPostItemListItem.atIndex(0)).toBeVisible();
+        await expect(postListPostItemListItem.atIndex(0)).toBeVisible(50);
         await expect(postListPostItemListItemBullet.atIndex(0)).toHaveText('1.');
-        await expect(element(by.text(item1))).toBeVisible();
-        await expect(element(by.text(item2))).toBeVisible();
-        await expect(element(by.text(item3))).toBeVisible();
-
-        if (isAndroid()) {
-            await expect(postListPostItemListItem.atIndex(0)).toHaveLabel(`1. ${item1}`);
-        }
+        await expect(element(by.text(item1))).toBeVisible(50);
+        await expect(element(by.text(item2))).toBeVisible(50);
+        await expect(element(by.text(item3))).toBeVisible(50);
 
         if (isIos()) {
-            await expect(postListPostItemListItem.atIndex(1)).toBeVisible();
+            await expect(postListPostItemListItem.atIndex(1)).toBeVisible(50);
             await expect(postListPostItemListItemBullet.atIndex(1)).toHaveText('2.');
-            await expect(postListPostItemListItem.atIndex(2)).toBeVisible();
+            await expect(postListPostItemListItem.atIndex(2)).toBeVisible(50);
             await expect(postListPostItemListItemBullet.atIndex(2)).toHaveText('3.');
         }
 

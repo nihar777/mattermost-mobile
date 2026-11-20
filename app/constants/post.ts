@@ -29,12 +29,18 @@ export const PostTypes = {
     REMOVE_FROM_TEAM: 'system_remove_from_team',
 
     COMBINED_USER_ACTIVITY: 'system_combined_user_activity',
+    SHARED_CHANNEL_STATE: 'system_shared_chan_state',
     ME: 'me',
     ADD_BOT_TEAMS_CHANNELS: 'add_bot_teams_channels',
 
     SYSTEM_AUTO_RESPONDER: 'system_auto_responder',
     CUSTOM_CALLS: 'custom_calls',
     CUSTOM_CALLS_RECORDING: 'custom_calls_recording',
+
+    CUSTOM_LLMBOT: 'custom_llmbot',
+    CUSTOM_LLM_POSTBACK: 'custom_llm_postback',
+
+    BURN_ON_READ: 'burn_on_read',
 } as const;
 
 export const PostPriorityColors = {
@@ -49,6 +55,10 @@ export enum PostPriorityType {
 }
 
 export const POST_TIME_TO_FAIL = toMilliseconds({seconds: 10});
+
+export const BOR_POST_CLEANUP_MIN_RUN_INTERVAL = toMilliseconds({minutes: 15});
+
+export const AUTO_CACHE_CLEANUP_PROTECTION_BUFFER = 20;
 
 export default {
     POST_COLLAPSE_TIMEOUT: toMilliseconds({minutes: 5}),

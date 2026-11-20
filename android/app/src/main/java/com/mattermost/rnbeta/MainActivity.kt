@@ -3,16 +3,18 @@ package com.mattermost.rnbeta
 import android.content.res.Configuration
 import android.os.Bundle
 import android.view.KeyEvent
+import androidx.activity.OnBackPressedCallback
 import androidx.core.view.WindowCompat
+import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate
 import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint
 import com.facebook.react.defaults.DefaultReactActivityDelegate
 import com.mattermost.hardware.keyboard.MattermostHardwareKeyboardImpl
 import com.mattermost.rnutils.helpers.FoldableObserver
-import com.reactnativenavigation.NavigationActivity
+import com.swmansion.rnscreens.fragment.restoration.RNScreensFragmentFactory;
 import expo.modules.ReactActivityDelegateWrapper
 
-class MainActivity : NavigationActivity() {
+class MainActivity : ReactActivity() {
     private var HWKeyboardConnected = false
     private val foldableObserver = FoldableObserver.getInstance(this)
     private var lastOrientation: Int = Configuration.ORIENTATION_UNDEFINED
@@ -33,8 +35,9 @@ class MainActivity : NavigationActivity() {
 
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(null)
-        setContentView(R.layout.launch_screen)
+        supportFragmentManager.fragmentFactory = RNScreensFragmentFactory()
+        super.onCreate(savedInstanceState)
+
         setHWKeyboardConnected()
         lastOrientation = this.resources.configuration.orientation
         foldableObserver.onCreate()
@@ -72,7 +75,6 @@ class MainActivity : NavigationActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        reactGateway.onWindowFocusChanged(hasFocus)
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -83,6 +85,24 @@ class MainActivity : NavigationActivity() {
             }
         }
         return super.dispatchKeyEvent(event)
+    }
+
+    // Prebuilt react-android leaves ReactActivity's back callback disabled after
+    // invokeDefaultOnBackPressed(). Re-enable it so back handling works after resume.
+    // Remove when upgrading to React Native 0.84.0 or later.
+    override fun invokeDefaultOnBackPressed() {
+        super.invokeDefaultOnBackPressed()
+        reactBackPressedCallback?.isEnabled = true
+    }
+
+    private val reactBackPressedCallback: OnBackPressedCallback? by lazy {
+        try {
+            val field = ReactActivity::class.java.getDeclaredField("mBackPressedCallback")
+            field.isAccessible = true
+            field.get(this) as? OnBackPressedCallback
+        } catch (_: ReflectiveOperationException) {
+            null
+        }
     }
 
     private fun setHWKeyboardConnected() {

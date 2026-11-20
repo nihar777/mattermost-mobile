@@ -5,12 +5,17 @@ import {DeviceEventEmitter} from 'react-native';
 
 import {fetchUsersByIds} from '@actions/remote/user';
 import {leaveCall, muteMyself, unraiseHand} from '@calls/actions';
-import {createCallAndAddToIds} from '@calls/actions/calls';
+import {showPhoneCallOutcome} from '@calls/alerts';
+import {createCallAndAddToIds, toCallPhone} from '@calls/convert_call';
 import {hostRemovedErr} from '@calls/errors';
+import {endNativeCall, getNativeCallMapping, getNativeCallUUIDForCall, setNativeCallMapping} from '@calls/native_call';
 import {
     callEnded,
     callStarted,
+    getCallsState,
+    getChannelIdFromCallId,
     getCurrentCall,
+    isLiveKitCurrentCall,
     receivedCaption,
     removeIncomingCall,
     setCallForChannel,
@@ -31,8 +36,9 @@ import {WebsocketEvents} from '@constants';
 import Calls from '@constants/calls';
 import DatabaseManager from '@database/manager';
 import {getCurrentUserId} from '@queries/servers/system';
+import {logDebug} from '@utils/log';
 
-import type {HostControlsLowerHandMsgData, HostControlsMsgData} from '@calls/types/calls';
+import type {HostControlsLowerHandMsgData, HostControlsMsgData, PhoneCallFields} from '@calls/types/calls';
 import type {
     CallHostChangedData,
     CallJobStateData,
@@ -51,14 +57,48 @@ import type {
     UserVoiceOnOffData,
 } from '@mattermost/calls/lib/types';
 
-export const handleCallUserJoined = (serverUrl: string, msg: WebSocketMessage<UserJoinedData>) => {
-    // Load user model async (if needed).
-    fetchUsersByIds(serverUrl, [msg.data.user_id]);
+export const handleCallUserJoined = (serverUrl: string, msg: WebSocketMessage<UserJoinedData & {is_sip_participant?: boolean}>) => {
+    if (msg.data.is_sip_participant) {
+        logDebug('calls: handleCallUserJoined skipped, SIP participants are not part of the roster');
+        return;
+    }
 
-    userJoinedCall(serverUrl, msg.broadcast.channel_id, msg.data.user_id, msg.data.session_id);
+    const channelId = msg.broadcast.channel_id;
+    const userId = msg.data.user_id;
+    const sessionId = msg.data.session_id;
+
+    // A LiveKit room owns the roster of the call we're in.
+    if (!isLiveKitCurrentCall(serverUrl, channelId)) {
+        // Load user model async (if needed).
+        fetchUsersByIds(serverUrl, [userId]);
+        userJoinedCall(serverUrl, channelId, userId, sessionId);
+    }
+
+    // Answered-elsewhere: same user joined this call on another session
+    // (different device), and we still have a native ring/registered overlay
+    // for it. Tear it down with the matching CallKit reason.
+    const myUserId = getCallsState(serverUrl).myUserId;
+    if (userId !== myUserId) {
+        return;
+    }
+    if (!getNativeCallUUIDForCall(serverUrl, channelId)) {
+        return;
+    }
+
+    // In or joining this call here, the native call is ours: our own join can land before we know our session.
+    const currentCall = getCurrentCall();
+    if (currentCall?.serverUrl === serverUrl && currentCall.channelId === channelId) {
+        return;
+    }
+    endNativeCall(serverUrl, channelId, 'answeredElsewhere');
 };
 
 export const handleCallUserLeft = (serverUrl: string, msg: WebSocketMessage<UserLeftData>) => {
+    if (isLiveKitCurrentCall(serverUrl, msg.broadcast.channel_id)) {
+        logDebug('calls: handleCallUserLeft skipped, the LiveKit room owns the roster');
+        return;
+    }
+
     userLeftCall(serverUrl, msg.broadcast.channel_id, msg.data.session_id);
 };
 
@@ -89,15 +129,36 @@ export const handleCallStarted = (serverUrl: string, msg: WebSocketMessage<CallS
         ownerId: msg.data.owner_id,
         hostId: msg.data.host_id,
         dismissed: {},
+        phone: toCallPhone(msg.data as CallStartData & PhoneCallFields),
     });
+
+    // Backfill the callId into the native mapping created by the VoIP push.
+    // Until this fires, endNativeCall treats the mapping as unconfirmed and
+    // ignores any call_end events that arrive with a callId.
+    const uuid = getNativeCallUUIDForCall(serverUrl, msg.data.channelID);
+    if (uuid) {
+        const existing = getNativeCallMapping(uuid);
+        if (existing) {
+            setNativeCallMapping(uuid, {...existing, callId: msg.data.id});
+        }
+    }
 };
 
-export const handleCallEnded = (serverUrl: string, msg: WebSocketMessage<EmptyData>) => {
-    DeviceEventEmitter.emit(WebsocketEvents.CALLS_CALL_END, {
-        channelId: msg.broadcast.channel_id,
-    });
+export const handleCallEnded = (serverUrl: string, msg: WebSocketMessage<{call_id?: string; reason?: string}>) => {
+    const channelId = msg.broadcast.channel_id;
+    DeviceEventEmitter.emit(WebsocketEvents.CALLS_CALL_END, {channelId});
 
-    callEnded(serverUrl, msg.broadcast.channel_id);
+    // Read callId before callEnded() removes the call from state. Passing it
+    // to endNativeCall lets the stale-replay guard reject events for a prior
+    // call whose call_end was buffered and replayed during a new call's ring.
+    const callId = getCallsState(serverUrl).calls[channelId]?.id;
+
+    callEnded(serverUrl, channelId);
+
+    endNativeCall(serverUrl, channelId, 'remoteEnded', callId);
+
+    // The payload's ID, not the state read: our own user_left can empty the roster and drop the call first.
+    showPhoneCallOutcome(serverUrl, msg.data.call_id, msg.data.reason);
 };
 
 export const handleCallChannelEnabled = (serverUrl: string, msg: WebSocketMessage<EmptyData>) => {
@@ -156,6 +217,15 @@ export const handleUserDismissedNotification = async (serverUrl: string, msg: We
     }
 
     removeIncomingCall(serverUrl, msg.data.callID);
+
+    // The plugin emits this event only to the dismissing user, so it means
+    // some session of mine dismissed the ring. If it was this device's local
+    // decline, the UUID is already cleared and endNativeCall is a no-op.
+    // Otherwise, tear down the native ring overlay with the decline reason.
+    const channelId = getChannelIdFromCallId(serverUrl, msg.data.callID);
+    if (channelId) {
+        endNativeCall(serverUrl, channelId, 'declinedElsewhere');
+    }
 };
 
 export const handleCallCaption = (serverUrl: string, msg: WebSocketMessage<LiveCaptionData>) => {

@@ -20,5 +20,8 @@ export default tableSchema({
         {name: 'scheduled_at', type: 'number'},
         {name: 'processed_at', type: 'number'},
         {name: 'error_code', type: 'string'},
+        {name: 'type', type: 'string', isOptional: true},
+        {name: 'repeat_type', type: 'string'},
+        {name: 'repeat_timezone', type: 'string'},
     ],
 });

@@ -1,13 +1,16 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import {FlatList} from '@stream-io/flat-list-mvcp';
 import React, {type ReactElement, useCallback, useEffect, useMemo, useRef, useState} from 'react';
-import {DeviceEventEmitter, type ListRenderItemInfo, Platform, type StyleProp, StyleSheet, type ViewStyle, type NativeSyntheticEvent, type NativeScrollEvent} from 'react-native';
-import Animated, {type AnimatedStyle} from 'react-native-reanimated';
+import {DeviceEventEmitter, type ListRenderItemInfo, Platform, type StyleProp, StyleSheet, type ViewStyle, type NativeSyntheticEvent, type NativeScrollEvent, type ViewToken} from 'react-native';
+import {Gesture, GestureDetector} from 'react-native-gesture-handler';
+import {KeyboardState, useAnimatedKeyboard} from 'react-native-keyboard-controller';
+import Animated, {scrollTo, useAnimatedProps, useAnimatedReaction, useAnimatedStyle, type AnimatedStyle} from 'react-native-reanimated';
+import {useSafeAreaInsets} from 'react-native-safe-area-context';
+import {scheduleOnRN, scheduleOnUI} from 'react-native-worklets';
 
 import {removePost} from '@actions/local/post';
-import {fetchPosts, fetchPostThread} from '@actions/remote/post';
+import {fetchPostThread, refreshPostsForChannel} from '@actions/remote/post';
 import CombinedUserActivity from '@components/post_list/combined_user_activity';
 import DateSeparator from '@components/post_list/date_separator';
 import NewMessagesLine from '@components/post_list/new_message_line';
@@ -15,9 +18,17 @@ import Post from '@components/post_list/post';
 import ThreadOverview from '@components/post_list/thread_overview';
 import {Events, Screens} from '@constants';
 import {PostTypes} from '@constants/post';
+import {useKeyboardState} from '@context/keyboard_state';
+import {PostConfigProvider} from '@context/post_config';
 import {useServerUrl} from '@context/server';
 import {useTheme} from '@context/theme';
+import {useDefaultHeaderHeight} from '@hooks/header';
+import {useClearViewableItemsOnUnmount} from '@hooks/in_viewport';
+import {useInputAccessoryViewGesture} from '@hooks/use_input_accessory_view_gesture';
+import PostListPerformance from '@utils/performance/post_list_performance';
 import {getDateForDateLine, preparePostList} from '@utils/post_list';
+import {emitPostsInViewport} from '@utils/post_list/viewport';
+import {getTimezone} from '@utils/user';
 
 import {INITIAL_BATCH_TO_RENDER, SCROLL_POSITION_CONFIG, VIEWABILITY_CONFIG} from './config';
 import MoreMessages from './more_messages';
@@ -25,15 +36,15 @@ import ScrollToEndView from './scroll_to_end_view';
 
 import type {PostListItem, PostListOtherItem, ViewableItemsChanged, ViewableItemsChangedListenerEvent} from '@typings/components/post_list';
 import type PostModel from '@typings/database/models/servers/post';
+import type UserModel from '@typings/database/models/servers/user';
 import type {AvailableScreens} from '@typings/screens/navigation';
 
 type Props = {
     appsEnabled: boolean;
+    mmBlocksEnabled: boolean;
     channelId: string;
     contentContainerStyle?: StyleProp<AnimatedStyle<ViewStyle>>;
-    currentTimezone: string | null;
-    currentUserId: string;
-    currentUsername: string;
+    currentUser: UserModel;
     customEmojiNames: string[];
     disablePullToRefresh?: boolean;
     highlightedId?: PostModel['id'];
@@ -42,8 +53,8 @@ type Props = {
     isPostAcknowledgementEnabled?: boolean;
     lastViewedAt: number;
     location: AvailableScreens;
-    nativeID: string;
     onEndReached?: () => void;
+    onViewableItemsChanged?: (viewableItems: ViewToken[]) => void;
     posts: PostModel[];
     rootId?: string;
     shouldRenderReplyButton?: boolean;
@@ -55,6 +66,7 @@ type Props = {
     testID: string;
     currentCallBarVisible?: boolean;
     savedPostIds: Set<string>;
+    isChannelAutotranslated: boolean;
 }
 
 type onScrollEndIndexListenerEvent = (endIndex: number) => void;
@@ -66,9 +78,10 @@ type ScrollIndexFailed = {
 };
 
 const CONTENT_OFFSET_THRESHOLD = 160;
-const SCROLL_EVENT_THROTTLE = Platform.select({android: 17, default: 60});
 
-const keyExtractor = (item: PostListItem | PostListOtherItem) => (item.type === 'post' ? item.value.currentPost.id : item.value);
+const isAndroid = Platform.OS === 'android';
+
+export const keyExtractor = (item: PostListItem | PostListOtherItem) => (item.type === 'post' ? item.value.currentPost.id : item.value);
 
 const styles = StyleSheet.create({
     flex: {
@@ -81,11 +94,9 @@ const styles = StyleSheet.create({
 
 const PostList = ({
     appsEnabled,
+    mmBlocksEnabled,
     channelId,
-    contentContainerStyle,
-    currentTimezone,
-    currentUserId,
-    currentUsername,
+    currentUser,
     customEmojiNames,
     disablePullToRefresh,
     footer,
@@ -96,8 +107,8 @@ const PostList = ({
     isPostAcknowledgementEnabled,
     lastViewedAt,
     location,
-    nativeID,
     onEndReached,
+    onViewableItemsChanged: onViewableItemsChangedProp,
     posts,
     rootId,
     shouldRenderReplyButton = true,
@@ -106,39 +117,129 @@ const PostList = ({
     showNewMessageLine = true,
     testID,
     savedPostIds,
+    isChannelAutotranslated,
 }: Props) => {
     const firstIdInPosts = posts[0]?.id;
+    const {panGesture: emojiPickerGesture} = useInputAccessoryViewGesture();
+    const insets = useSafeAreaInsets();
+    const defaultHeaderHeight = useDefaultHeaderHeight();
 
-    const listRef = useRef<FlatList<string | PostModel>>(null);
-    const onScrollEndIndexListener = useRef<onScrollEndIndexListenerEvent>();
-    const onViewableItemsChangedListener = useRef<ViewableItemsChangedListenerEvent>();
+    // Derive values from currentUser
+    const currentUserId = currentUser.id;
+    const currentUsername = currentUser.username;
+    const currentTimezone = useMemo(() => getTimezone(currentUser.timezone), [currentUser.timezone]);
+
+    // CRITICAL: Destructure to avoid passing entire context (which contains refs) to worklets
+    const {stateContext, onScroll: onScrollProp, postInputContainerHeight, listRef, isEmojiSearchFocused} = useKeyboardState();
+    const {
+        scrollOffset: scrollOffsetShared,
+        scrollPosition: scrollPositionShared,
+        postInputTranslateY,
+        postInputContainerHeight: postInputContainerHeightShared,
+    } = stateContext;
+
+    useAnimatedReaction(
+        () => ({
+            scrollOffset: scrollOffsetShared.value,
+            scrollPosition: scrollPositionShared.value,
+            isReconcilerPaused: stateContext.isReconcilerPaused.value,
+        }),
+        (current, previous) => {
+            'worklet';
+
+            // Skip scroll compensation if reconciler is paused
+            // This allows exit actions to manually adjust scrollPosition without interference
+            if (current.isReconcilerPaused || !listRef) {
+                return;
+            }
+
+            // Trigger scroll compensation if EITHER scrollOffset or scrollPosition changed
+            // This ensures we continuously adjust scroll as contentInset changes during keyboard animation
+            const offsetChanged = previous === null || Math.abs(current.scrollOffset - (previous?.scrollOffset || 0)) > 0.5;
+
+            if (!offsetChanged) {
+                return;
+            }
+
+            // scrollTo runs on the UI thread — avoids scheduleOnRN latency which causes
+            // the scroll compensation to land after the animation completes on New Architecture.
+            scrollTo(listRef, 0, -current.scrollOffset + current.scrollPosition, false);
+        },
+        [listRef],
+    );
+
+    const onScrollEndIndexListener = useRef<onScrollEndIndexListenerEvent | undefined>(undefined);
+    const onViewableItemsChangedListener = useRef<ViewableItemsChangedListenerEvent | undefined>(undefined);
     const scrolledToHighlighted = useRef(false);
+    const initialRenderTracked = useRef(false);
+    const viewableItemsDebounceTimer = useRef<NodeJS.Timeout | null>(null);
+    const viewportFrame = useRef<number | null>(null);
     const [refreshing, setRefreshing] = useState(false);
     const [showScrollToEndBtn, setShowScrollToEndBtn] = useState(false);
     const [lastPostId, setLastPostId] = useState<string | undefined>(firstIdInPosts);
-    const theme = useTheme();
-    const serverUrl = useServerUrl();
-    const orderedPosts = useMemo(() => {
-        return preparePostList(posts, lastViewedAt, showNewMessageLine, currentUserId, currentUsername, shouldShowJoinLeaveMessages, currentTimezone, location === Screens.THREAD, savedPostIds);
-    }, [posts, lastViewedAt, showNewMessageLine, currentUserId, currentUsername, shouldShowJoinLeaveMessages, currentTimezone, location, savedPostIds]);
 
-    const initialIndex = useMemo(() => {
-        return orderedPosts.findIndex((i) => i.type === 'start-of-new-messages');
-    }, [orderedPosts]);
+    const [progressViewOffset, setProgressViewOffset] = useState(postInputContainerHeight);
+    const theme = useTheme();
+
+    // Cancel a pending viewport write so it can't re-add the entry the hook below clears on unmount
+    useEffect(() => () => {
+        if (viewportFrame.current !== null) {
+            cancelAnimationFrame(viewportFrame.current);
+        }
+    }, []);
+    useClearViewableItemsOnUnmount(location);
+    const serverUrl = useServerUrl();
+    const {state} = useAnimatedKeyboard();
+
+    useAnimatedReaction(
+        () => {
+            return {
+                state: state.value,
+            };
+        },
+        ({state: kbState}) => {
+            if (!isAndroid && (kbState === KeyboardState.CLOSED || kbState === KeyboardState.OPEN)) {
+                const translateY = postInputTranslateY.value;
+                const containerHeight = postInputContainerHeightShared.value;
+                const offset = containerHeight + translateY;
+                scheduleOnRN(setProgressViewOffset, offset);
+            }
+        },
+        [],
+    );
+
+    // Progressive loading: start with 10 items, then add the rest after initial render
+    // The remaining posts are loaded in trackInitialRenderMetrics when viewable items are detected
+    const [showAllPosts, setShowAllPosts] = useState(false);
+
+    const {orderedPosts, initialIndex} = useMemo(() => {
+        const result = preparePostList(posts, lastViewedAt, showNewMessageLine, currentUserId, currentUsername, shouldShowJoinLeaveMessages, currentTimezone, location === Screens.THREAD, savedPostIds);
+        const unreadIndex = result.findIndex((i) => i.type === 'start-of-new-messages');
+
+        let postsToShow = result;
+        if (!showAllPosts) {
+            postsToShow = result.slice(0, INITIAL_BATCH_TO_RENDER);
+        }
+
+        return {
+            orderedPosts: postsToShow,
+            initialIndex: unreadIndex,
+        };
+    }, [posts, lastViewedAt, showNewMessageLine, currentUserId, currentUsername, shouldShowJoinLeaveMessages, currentTimezone, location, savedPostIds, showAllPosts]);
 
     const isNewMessage = lastPostId ? firstIdInPosts !== lastPostId : false;
 
     const scrollToEnd = useCallback(() => {
-        listRef.current?.scrollToOffset({offset: 0, animated: true});
-    }, []);
+        if (listRef) {
+            scheduleOnUI(() => {
+                scrollTo(listRef, 0, -postInputTranslateY.value, true);
+            });
+        }
+        setShowScrollToEndBtn(false);
 
-    useEffect(() => {
-        const t = setTimeout(() => {
-            scrollToEnd();
-        }, 300);
-
-        return () => clearTimeout(t);
-    }, [channelId, rootId, scrollToEnd]);
+        // PasteInputTranslateY is a SharedValue
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [listRef]);
 
     useEffect(() => {
         const scrollToBottom = (screen: string) => {
@@ -157,13 +258,32 @@ const PostList = ({
         };
     }, [location, scrollToEnd]);
 
+    // Performance tracking: Start ONLY when channel/thread changes (not on post updates)
+    useEffect(() => {
+        // Start tracking for this NEW channel/thread
+        PostListPerformance.startInitialRender(channelId, rootId, posts.length);
+        initialRenderTracked.current = false;
+
+        // Reset showAllPosts when channel/thread changes to enable progressive loading for new channel
+        setShowAllPosts(false);
+
+        return () => {
+            // Print summary when switching away from this channel/thread
+            PostListPerformance.printSummary(channelId, rootId);
+            PostListPerformance.clearMetrics(channelId, rootId);
+        };
+
+        // ONLY channelId and rootId - NOT posts.length!
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [channelId, rootId]);
+
     const onRefresh = useCallback(async () => {
         if (disablePullToRefresh) {
             return;
         }
         setRefreshing(true);
         if (location === Screens.CHANNEL && channelId) {
-            await fetchPosts(serverUrl, channelId);
+            await refreshPostsForChannel(serverUrl, channelId, orderedPosts.length === 0);
         } else if (location === Screens.THREAD && rootId) {
             const options: FetchPaginatedThreadOptions = {};
             const lastPost = posts[0];
@@ -179,18 +299,22 @@ const PostList = ({
             map((post) => removePost(serverUrl, post));
         await Promise.all(removalPromises);
         setRefreshing(false);
-    }, [disablePullToRefresh, location, channelId, rootId, posts, serverUrl]);
+    }, [disablePullToRefresh, location, channelId, rootId, posts, serverUrl, orderedPosts.length]);
 
     const scrollToIndex = useCallback((index: number, animated = true, applyOffset = true) => {
-        listRef.current?.scrollToIndex({
+        if (index < 0 || !listRef?.current) {
+            return;
+        }
+
+        listRef.current.scrollToIndex({
             animated,
             index,
-            viewOffset: applyOffset ? Platform.select({ios: -45, default: 0}) : 0,
+            viewOffset: applyOffset ? -(insets.top + defaultHeaderHeight) : 0,
             viewPosition: 1, // 0 is at bottom
         });
-    }, []);
+    }, [defaultHeaderHeight, insets.top, listRef]);
 
-    const onScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const internalOnScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
         const {y} = event.nativeEvent.contentOffset;
         const isThresholdReached = y > CONTENT_OFFSET_THRESHOLD;
 
@@ -214,24 +338,66 @@ const PostList = ({
         }
     }, [highlightedId, scrollToIndex]);
 
+    const trackInitialRenderMetrics = useCallback((viewableItems: ViewToken[]) => {
+        if (initialRenderTracked.current) {
+            return; // Already tracked
+        }
+
+        // Count posts that are viewable in viewport (excludes date separators, etc.)
+        const viewablePostCount = viewableItems.filter((viewToken) => {
+            const item = viewToken.item as PostListItem | PostListOtherItem;
+            return item.type === 'post' || item.type === 'user-activity';
+        }).length;
+
+        // Only track when we actually have viewable posts
+        if (viewablePostCount > 0 || viewableItems.length === 0) {
+            initialRenderTracked.current = true;
+
+            // initialNumToRender is how many items FlatList actually renders initially
+            const initialNumRendered = INITIAL_BATCH_TO_RENDER; // 10 items as per config
+
+            PostListPerformance.endInitialRender(channelId, rootId, initialNumRendered, viewablePostCount);
+
+            // Progressive loading: Now that initial render is complete and tracked, load remaining posts
+            if (!showAllPosts) {
+                setShowAllPosts(true);
+            }
+        }
+    }, [channelId, rootId, showAllPosts]);
+
     const onViewableItemsChanged = useCallback(({viewableItems}: ViewableItemsChanged) => {
+        // Performance tracking: End initial render when posts become viewable
+        // Debounce to wait for viewable items to stabilize (FlatList renders in batches)
+        if (!initialRenderTracked.current && viewableItems.length > 0) {
+            // Clear any existing timer
+            if (viewableItemsDebounceTimer.current) {
+                clearTimeout(viewableItemsDebounceTimer.current);
+            }
+
+            // Set a timer to track metrics after viewable items stabilize
+            viewableItemsDebounceTimer.current = setTimeout(() => {
+                trackInitialRenderMetrics(viewableItems);
+            }, 250); // 250ms debounce
+        }
+
         if (!viewableItems.length) {
             return;
         }
 
-        const viewableItemsMap = viewableItems.reduce((acc: Record<string, boolean>, {item, isViewable}) => {
-            if (isViewable && item.type === 'post') {
-                acc[`${location}-${item.value.currentPost.id}`] = true;
-            }
-            return acc;
-        }, {});
+        if (viewportFrame.current !== null) {
+            cancelAnimationFrame(viewportFrame.current);
+        }
+        viewportFrame.current = requestAnimationFrame(() => {
+            viewportFrame.current = null;
+            emitPostsInViewport(location, viewableItems);
+        });
 
-        DeviceEventEmitter.emit(Events.ITEM_IN_VIEWPORT, viewableItemsMap);
+        onViewableItemsChangedProp?.(viewableItems);
 
         if (onViewableItemsChangedListener.current) {
             onViewableItemsChangedListener.current(viewableItems);
         }
-    }, [location]);
+    }, [location, onViewableItemsChangedProp, trackInitialRenderMetrics]);
 
     const registerScrollEndIndexListener = useCallback((listener: onScrollEndIndexListenerEvent) => {
         onScrollEndIndexListener.current = listener;
@@ -297,9 +463,11 @@ const PostList = ({
             default: {
                 const post = item.value.currentPost;
                 const {isSaved, nextPost, previousPost} = item.value;
-                const skipSaveddHeader = (location === Screens.THREAD && post.id === rootId);
+                const skipSavedHeader = (location === Screens.THREAD && post.id === rootId);
                 const postProps = {
                     appsEnabled,
+                    mmBlocksEnabled,
+                    currentUser,
                     customEmojiNames,
                     isCRTEnabled,
                     isPostAcknowledgementEnabled,
@@ -312,8 +480,9 @@ const PostList = ({
                     previousPost,
                     rootId,
                     shouldRenderReplyButton,
-                    skipSaveddHeader,
+                    skipSavedHeader,
                     testID: `${testID}.post`,
+                    isChannelAutotranslated,
                 };
 
                 return (
@@ -324,7 +493,7 @@ const PostList = ({
                 );
             }
         }
-    }, [appsEnabled, currentTimezone, currentUsername, customEmojiNames, highlightPinnedOrSaved, highlightedId, isCRTEnabled, isPostAcknowledgementEnabled, location, rootId, shouldRenderReplyButton, shouldShowJoinLeaveMessages, testID, theme]);
+    }, [appsEnabled, mmBlocksEnabled, currentTimezone, currentUser, currentUsername, customEmojiNames, highlightPinnedOrSaved, highlightedId, isCRTEnabled, isChannelAutotranslated, isPostAcknowledgementEnabled, location, rootId, shouldRenderReplyButton, shouldShowJoinLeaveMessages, testID, theme]);
 
     useEffect(() => {
         const t = setTimeout(() => {
@@ -332,7 +501,7 @@ const PostList = ({
                 scrolledToHighlighted.current = true;
                 // eslint-disable-next-line max-nested-callbacks
                 const index = orderedPosts.findIndex((p) => p.type === 'post' && p.value.currentPost.id === highlightedId);
-                if (index >= 0 && listRef.current) {
+                if (index >= 0 && listRef?.current) {
                     listRef.current?.scrollToIndex({
                         animated: true,
                         index,
@@ -344,38 +513,81 @@ const PostList = ({
         }, 500);
 
         return () => clearTimeout(t);
+
+    // - listRef is a ref (stable reference, doesn't need to be in deps)
+    // - scrolledToHighlighted is a ref (stable reference, doesn't need to be in deps)
+    // - We only need to re-run when the posts list changes or the highlighted post changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [orderedPosts, highlightedId]);
+
+    const contentContainerStyleWithMargin = useMemo(() => ({
+        marginTop: location === Screens.PERMALINK ? 0 : postInputContainerHeight,
+    }), [location, postInputContainerHeight]);
+
+    const animatedProps = useAnimatedProps(
+        () => {
+            return {
+                contentInset: {
+                    top: Math.max(postInputTranslateY.value, 0),
+                },
+            };
+        },
+        [],
+    );
+
+    const androidExtra = useAnimatedStyle(() => {
+        if (isAndroid) {
+            return {
+                marginBottom: Math.max(postInputTranslateY.value, 0),
+            };
+        }
+        return {};
+    });
+
+    const nativeGesture = Gesture.Native();
+    const composedGesture = emojiPickerGesture ? Gesture.Simultaneous(nativeGesture, emojiPickerGesture) : nativeGesture;
 
     return (
         <>
-            <Animated.FlatList
-                contentContainerStyle={contentContainerStyle}
-                data={orderedPosts}
-                keyboardDismissMode='interactive'
-                keyboardShouldPersistTaps='handled'
-                keyExtractor={keyExtractor}
-                initialNumToRender={INITIAL_BATCH_TO_RENDER + 5}
-                ListHeaderComponent={header}
-                ListFooterComponent={footer}
-                maintainVisibleContentPosition={SCROLL_POSITION_CONFIG}
-                maxToRenderPerBatch={10}
-                nativeID={nativeID}
-                onEndReached={onEndReached}
-                onEndReachedThreshold={0.9}
-                onScroll={onScroll}
-                onScrollToIndexFailed={onScrollToIndexFailed}
-                onViewableItemsChanged={onViewableItemsChanged}
-                ref={listRef}
-                removeClippedSubviews={true}
-                renderItem={renderItem}
-                scrollEventThrottle={SCROLL_EVENT_THROTTLE}
-                style={styles.flex}
-                viewabilityConfig={VIEWABILITY_CONFIG}
-                testID={`${testID}.flat_list`}
-                inverted={true}
-                refreshing={refreshing}
-                onRefresh={onRefresh}
-            />
+            <PostConfigProvider>
+                <Animated.View style={[styles.flex, androidExtra]}>
+                    <GestureDetector gesture={composedGesture}>
+                        <Animated.FlatList
+                            animatedProps={animatedProps}
+                            automaticallyAdjustContentInsets={false}
+                            contentInsetAdjustmentBehavior='never'
+                            contentContainerStyle={contentContainerStyleWithMargin}
+                            data={orderedPosts}
+                            keyboardDismissMode={isEmojiSearchFocused ? 'none' : 'interactive'}
+                            keyboardShouldPersistTaps='handled'
+                            keyExtractor={keyExtractor}
+                            initialNumToRender={INITIAL_BATCH_TO_RENDER}
+                            maxToRenderPerBatch={5}
+                            updateCellsBatchingPeriod={100}
+                            ListHeaderComponent={header}
+                            ListFooterComponent={footer}
+                            onEndReached={onEndReached}
+                            onEndReachedThreshold={0.9}
+                            onMomentumScrollEnd={internalOnScroll}
+                            onScroll={onScrollProp}
+                            onScrollToIndexFailed={onScrollToIndexFailed}
+                            onViewableItemsChanged={onViewableItemsChanged}
+                            viewabilityConfig={VIEWABILITY_CONFIG}
+                            progressViewOffset={progressViewOffset}
+                            ref={listRef}
+                            renderItem={renderItem}
+                            testID={`${testID}.flat_list`}
+                            inverted={true}
+                            refreshing={refreshing}
+                            onRefresh={onRefresh}
+                            maintainVisibleContentPosition={SCROLL_POSITION_CONFIG}
+                            removeClippedSubviews={true}
+                            style={styles.flex}
+                            windowSize={10}
+                        />
+                    </GestureDetector>
+                </Animated.View>
+            </PostConfigProvider>
             {location !== Screens.PERMALINK &&
             <ScrollToEndView
                 onPress={scrollToEnd}

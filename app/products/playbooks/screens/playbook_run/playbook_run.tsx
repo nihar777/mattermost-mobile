@@ -1,38 +1,46 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import React, {useCallback, useMemo} from 'react';
+import React, {useCallback, useMemo, useState} from 'react';
 import {defineMessages, useIntl} from 'react-intl';
-import {View, Text, ScrollView, Alert} from 'react-native';
+import {View, Text, ScrollView, Alert, TouchableOpacity, Pressable, type PressableStateCallbackType} from 'react-native';
 import {useSafeAreaInsets} from 'react-native-safe-area-context';
 
 import Button from '@components/button';
 import UserChip from '@components/chips/user_chip';
+import CompassIcon from '@components/compass_icon';
 import Markdown from '@components/markdown';
 import Tag from '@components/tag';
 import UserAvatarsStack from '@components/user_avatars_stack';
+import {Screens} from '@constants';
 import {useServerUrl} from '@context/server';
 import {useTheme} from '@context/theme';
 import useAndroidHardwareBackHandler from '@hooks/android_back_handler';
+import useDidMount from '@hooks/did_mount';
+import {usePreventDoubleTap} from '@hooks/utils';
 import {finishRun, setOwner} from '@playbooks/actions/remote/runs';
+import {PLAYBOOK_RUN_TYPES} from '@playbooks/constants/playbook_run';
 import {getRunScheduledTimestamp, isRunFinished} from '@playbooks/utils/run';
-import {openUserProfileModal, popTopScreen} from '@screens/navigation';
-import {getMarkdownBlockStyles, getMarkdownTextStyles} from '@utils/markdown';
+import {areDefaultTaskFilters, DEFAULT_TASK_FILTERS, type TaskFilters} from '@playbooks/utils/task_filters';
+import {bottomSheet, navigateBack} from '@screens/navigation';
+import EphemeralStore from '@store/ephemeral_store';
+import {openUserProfile} from '@utils/navigation';
 import {showPlaybookErrorSnackbar} from '@utils/snack_bar';
 import {makeStyleSheetFromTheme, changeOpacity} from '@utils/theme';
 import {typography} from '@utils/typography';
 
-import {goToSelectUser} from '../navigation';
+import {goToEditPlaybookRun, goToSelectUser} from '../navigation';
 
 import ChecklistList from './checklist_list';
+import {PropertyFieldsList} from './components';
 import ErrorState from './error_state';
 import OutOfDateHeader from './out_of_date_header';
 import StatusUpdateIndicator from './status_update_indicator';
+import TaskFilter, {TASK_FILTER_SNAP_POINT} from './task_filter';
 
 import type PlaybookChecklistModel from '@playbooks/types/database/models/playbook_checklist';
 import type PlaybookRunModel from '@playbooks/types/database/models/playbook_run';
 import type UserModel from '@typings/database/models/servers/user';
-import type {AvailableScreens} from '@typings/screens/navigation';
 
 const messages = defineMessages({
     owner: {
@@ -47,17 +55,29 @@ const messages = defineMessages({
         id: 'playbooks.playbook_run.tasks',
         defaultMessage: 'Tasks',
     },
+    collapseAll: {
+        id: 'playbooks.playbook_run.collapse_all',
+        defaultMessage: 'Collapse all checklists',
+    },
+    expandAll: {
+        id: 'playbooks.playbook_run.expand_all',
+        defaultMessage: 'Expand all checklists',
+    },
+    filterTasks: {
+        id: 'playbooks.playbook_run.filter_tasks',
+        defaultMessage: 'Filter tasks',
+    },
     statusUpdateDue: {
         id: 'playbooks.playbook_run.status_update_due',
         defaultMessage: 'Status update due in {time}',
     },
     participantsTitle: {
         id: 'playbooks.playbook_run.participants_title',
-        defaultMessage: 'Run Participants',
+        defaultMessage: 'Participants',
     },
     runDetails: {
         id: 'playbooks.playbook_run.run_details',
-        defaultMessage: 'Run details',
+        defaultMessage: 'Checklist details',
     },
     overdue: {
         id: 'playbooks.playbook_run.overdue',
@@ -69,11 +89,15 @@ const messages = defineMessages({
     },
     finishRunDialogTitle: {
         id: 'playbooks.playbook_run.finish_run_dialog_title',
-        defaultMessage: 'Finish Run',
+        defaultMessage: 'Finish',
     },
-    finishRunDialogDescription: {
-        id: 'playbooks.playbook_run.finish_run_dialog_description',
-        defaultMessage: 'There are {pendingCount} {pendingCount, plural, =1 {task} other {tasks}} pending.\n\nAre you sure you want to finish the run for all participants?',
+    finishRunDialogPendingTasks: {
+        id: 'playbooks.playbook_run.finish_run_dialog_pending_tasks',
+        defaultMessage: 'There are {pendingCount} {pendingCount, plural, =1 {task} other {tasks}} pending.',
+    },
+    finishRunDialogConfirmation: {
+        id: 'playbooks.playbook_run.finish_run_dialog_confirmation',
+        defaultMessage: 'Are you sure you want to finish the checklist for all participants?',
     },
     finishRunDialogCancel: {
         id: 'playbooks.playbook_run.finish_run_dialog_cancel',
@@ -85,9 +109,11 @@ const messages = defineMessages({
     },
     finishRunButton: {
         id: 'playbooks.playbook_run.finish_run_button',
-        defaultMessage: 'Finish Run',
+        defaultMessage: 'Finish',
     },
 });
+
+const HIT_SLOP = {top: 8, bottom: 8, left: 8, right: 8};
 
 const getStyleSheet = makeStyleSheetFromTheme((theme) => ({
     container: {
@@ -101,9 +127,20 @@ const getStyleSheet = makeStyleSheetFromTheme((theme) => ({
         gap: 10,
         alignItems: 'flex-start',
     },
+    titleRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+    },
     title: {
         ...typography('Heading', 400, 'SemiBold'),
         color: theme.centerChannelColor,
+        flex: 1,
+    },
+    editIcon: {
+        fontSize: 18,
+        color: changeOpacity(theme.centerChannelColor, 0.56),
+        paddingHorizontal: 4,
     },
     infoText: {
         ...typography('Body', 100, 'Regular'),
@@ -136,6 +173,29 @@ const getStyleSheet = makeStyleSheetFromTheme((theme) => ({
         ...typography('Heading', 200, 'SemiBold'),
         color: theme.centerChannelColor,
     },
+    tasksHeaderActions: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 4,
+        marginLeft: 'auto',
+    },
+    tasksHeaderButton: {
+        padding: 6,
+        borderRadius: 4,
+    },
+    tasksHeaderButtonActive: {
+        backgroundColor: changeOpacity(theme.buttonBg, 0.08),
+    },
+    tasksHeaderIcon: {
+        fontSize: 18,
+        color: changeOpacity(theme.centerChannelColor, 0.56),
+    },
+    tasksHeaderIconActive: {
+        color: theme.buttonBg,
+    },
+    pressed: {
+        opacity: 0.72,
+    },
     scrollView: {
         paddingHorizontal: 20,
         paddingVertical: 32,
@@ -147,27 +207,29 @@ const getStyleSheet = makeStyleSheetFromTheme((theme) => ({
 }));
 
 type Props = {
+    playbookRunId: string;
     playbookRun?: PlaybookRunModel | PlaybookRun;
     owner?: UserModel;
     participants: UserModel[];
-    componentId: AvailableScreens;
     checklists: Array<PlaybookChecklistModel | PlaybookChecklist>;
     overdueCount: number;
     pendingCount: number;
     currentUserId: string;
     teammateNameDisplay: string;
+    canEditSummary: boolean;
 }
 
 export default function PlaybookRun({
+    playbookRunId,
     playbookRun,
     owner,
     participants,
     checklists,
     overdueCount,
     pendingCount,
-    componentId,
     currentUserId,
     teammateNameDisplay,
+    canEditSummary,
 }: Props) {
     const theme = useTheme();
     const styles = getStyleSheet(theme);
@@ -176,17 +238,90 @@ export default function PlaybookRun({
     const insets = useSafeAreaInsets();
     const lastSyncAt = playbookRun && 'lastSyncAt' in playbookRun ? playbookRun.lastSyncAt : 0;
 
+    const [filters, setFilters] = useState<TaskFilters>(DEFAULT_TASK_FILTERS);
+    const [expandedById, setExpandedById] = useState<Record<string, boolean>>({});
+
+    const filtersActive = !areDefaultTaskFilters(filters);
+
+    // Derive the header icon from actual checklist state so a press after manual
+    // per-checklist toggles never becomes a no-op (dead press).
+    const anyChecklistExpanded = checklists.some((checklist) => expandedById[checklist.id] !== false);
+
+    const toggleCollapseAll = useCallback(() => {
+        const nextExpanded = !anyChecklistExpanded;
+        setExpandedById((prev) => {
+            const next = {...prev};
+            for (const checklist of checklists) {
+                next[checklist.id] = nextExpanded;
+            }
+            return next;
+        });
+    }, [anyChecklistExpanded, checklists]);
+
+    const toggleChecklistExpanded = useCallback((checklistId: string) => {
+        setExpandedById((prev) => ({
+            ...prev,
+            [checklistId]: !(prev[checklistId] ?? true),
+        }));
+    }, []);
+
+    const clearFilters = useCallback(() => {
+        setFilters(DEFAULT_TASK_FILTERS);
+    }, []);
+
+    const openTaskFilter = usePreventDoubleTap(useCallback(() => {
+        bottomSheet(
+            () => (
+                <TaskFilter
+                    filters={filters}
+                    onFiltersChanged={setFilters}
+                />
+            ),
+            [1, TASK_FILTER_SNAP_POINT],
+        );
+    }, [filters]));
+
+    const collapseAllButtonStyle = useCallback(({pressed}: PressableStateCallbackType) => [
+        styles.tasksHeaderButton,
+        pressed && styles.pressed,
+    ], [styles.tasksHeaderButton, styles.pressed]);
+
+    const filterButtonStyle = useCallback(({pressed}: PressableStateCallbackType) => [
+        styles.tasksHeaderButton,
+        filtersActive && styles.tasksHeaderButtonActive,
+        pressed && styles.pressed,
+    ], [styles.tasksHeaderButton, styles.tasksHeaderButtonActive, styles.pressed, filtersActive]);
+
+    const filterIconStyle = useMemo(() => [
+        styles.tasksHeaderIcon,
+        filtersActive && styles.tasksHeaderIconActive,
+    ], [styles.tasksHeaderIcon, styles.tasksHeaderIconActive, filtersActive]);
+
     const channelId = playbookRun && 'channelId' in playbookRun ? playbookRun.channelId : (playbookRun?.channel_id || '');
 
-    useAndroidHardwareBackHandler(componentId, () => {
-        popTopScreen();
-        return true;
+    useAndroidHardwareBackHandler(Screens.PLAYBOOK_RUN, navigateBack);
+
+    useDidMount(() => {
+        const previousPlaybookRunId = EphemeralStore.getCurrentPlaybookRunId();
+        EphemeralStore.setCurrentPlaybookRunId(playbookRunId);
+        return () => EphemeralStore.setCurrentPlaybookRunId(previousPlaybookRunId);
     });
 
     const isParticipant = participants.some((p) => p.id === currentUserId) || owner?.id === currentUserId;
 
     const isFinished = isRunFinished(playbookRun);
     const readOnly = isFinished || !isParticipant;
+
+    const playbookRunType = useMemo(() => {
+        if (!playbookRun) {
+            return PLAYBOOK_RUN_TYPES.PlaybookType;
+        }
+        if (playbookRun.type) {
+            return playbookRun.type;
+        }
+        const playbookId = 'playbookId' in playbookRun ? playbookRun.playbookId : (playbookRun.playbook_id || '');
+        return playbookId ? PLAYBOOK_RUN_TYPES.PlaybookType : PLAYBOOK_RUN_TYPES.ChannelChecklistType;
+    }, [playbookRun]);
 
     const containerStyle = useMemo(() => {
         return [
@@ -200,12 +335,12 @@ export default function PlaybookRun({
             return;
         }
 
-        openUserProfileModal(intl, theme, {
+        openUserProfile({
             userId: owner.id,
             channelId,
-            location: componentId,
+            location: Screens.PLAYBOOK_RUN,
         });
-    }, [owner, intl, theme, channelId, componentId]);
+    }, [owner, channelId]);
 
     const handleSelectOwner = useCallback(async (selected: UserProfile) => {
         if (!playbookRun) {
@@ -224,23 +359,35 @@ export default function PlaybookRun({
         }
 
         goToSelectUser(
-            theme,
             playbookRun?.name || '',
             intl.formatMessage(messages.owner),
             [...participants.map((p) => p.id), owner?.id || ''],
             owner?.id,
             handleSelectOwner,
         );
-    }, [handleSelectOwner, intl, owner, participants, playbookRun?.name, theme]);
+    }, [handleSelectOwner, intl, owner, participants, playbookRun?.name]);
+
+    const handleEditPress = useCallback(() => {
+        if (!playbookRun) {
+            return;
+        }
+
+        goToEditPlaybookRun(playbookRun.name, playbookRun.summary, playbookRun.id, {canEditSummary});
+    }, [playbookRun, canEditSummary]);
 
     const handleFinishRun = useCallback(() => {
         if (!playbookRun) {
             return;
         }
 
+        let message = intl.formatMessage(messages.finishRunDialogConfirmation);
+        if (pendingCount > 0) {
+            message = `${intl.formatMessage(messages.finishRunDialogPendingTasks, {pendingCount})}\n\n${message}`;
+        }
+
         Alert.alert(
             intl.formatMessage(messages.finishRunDialogTitle),
-            intl.formatMessage(messages.finishRunDialogDescription, {pendingCount}),
+            message,
             [
                 {
                     text: intl.formatMessage(messages.finishRunDialogCancel),
@@ -281,7 +428,20 @@ export default function PlaybookRun({
                 <ScrollView contentContainerStyle={styles.scrollView}>
                     <View style={styles.intro}>
                         <View style={styles.titleAndDescription}>
-                            <Text style={styles.title}>{playbookRun.name}</Text>
+                            <View style={styles.titleRow}>
+                                <Text style={styles.title}>{playbookRun.name}</Text>
+                                {!readOnly && (
+                                    <TouchableOpacity
+                                        onPress={handleEditPress}
+                                        testID='playbook-run.edit-icon'
+                                    >
+                                        <CompassIcon
+                                            name='pencil-outline'
+                                            style={styles.editIcon}
+                                        />
+                                    </TouchableOpacity>
+                                )}
+                            </View>
                             {isFinished && (
                                 <Tag
                                     message={messages.finished}
@@ -293,10 +453,8 @@ export default function PlaybookRun({
                                 <Markdown
                                     value={playbookRun.summary}
                                     theme={theme}
-                                    location={componentId}
+                                    location={Screens.PLAYBOOK_RUN}
                                     baseTextStyle={styles.infoText}
-                                    blockStyles={getMarkdownBlockStyles(theme)}
-                                    textStyles={getMarkdownTextStyles(theme)}
                                 />
                             </View>
                         </View>
@@ -327,20 +485,27 @@ export default function PlaybookRun({
                                         </Text>
                                         <UserAvatarsStack
                                             users={participants}
-                                            location={componentId}
+                                            location={Screens.PLAYBOOK_RUN}
                                             bottomSheetTitle={messages.participantsTitle}
                                         />
                                     </View>
                                 )}
                             </View>
                         )}
-                        <StatusUpdateIndicator
-                            isFinished={isFinished}
-                            timestamp={getRunScheduledTimestamp(playbookRun)}
-                            isParticipant={isParticipant}
-                            playbookRunId={playbookRun.id}
-                        />
+                        {playbookRunType !== PLAYBOOK_RUN_TYPES.ChannelChecklistType && (
+                            <StatusUpdateIndicator
+                                isFinished={isFinished}
+                                timestamp={getRunScheduledTimestamp(playbookRun)}
+                                isParticipant={isParticipant}
+                                playbookRunId={playbookRun.id}
+                            />
+                        )}
                     </View>
+                    <PropertyFieldsList
+                        serverUrl={serverUrl}
+                        runId={playbookRun.id}
+                        isReadOnly={readOnly}
+                    />
                     <View style={styles.tasksContainer}>
                         <View style={styles.tasksHeaderContainer}>
                             <Text style={styles.tasksHeader}>
@@ -352,13 +517,50 @@ export default function PlaybookRun({
                                     type='danger'
                                 />
                             )}
+                            <View style={styles.tasksHeaderActions}>
+                                <Pressable
+                                    onPress={toggleCollapseAll}
+                                    style={collapseAllButtonStyle}
+                                    hitSlop={HIT_SLOP}
+                                    accessibilityRole='button'
+                                    accessibilityLabel={intl.formatMessage(anyChecklistExpanded ? messages.collapseAll : messages.expandAll)}
+                                    testID='playbook-run.collapse-all-button'
+                                >
+                                    <CompassIcon
+                                        name={anyChecklistExpanded ? 'arrow-collapse' : 'arrow-expand'}
+                                        style={styles.tasksHeaderIcon}
+                                    />
+                                </Pressable>
+                                <Pressable
+                                    onPress={openTaskFilter}
+                                    style={filterButtonStyle}
+                                    hitSlop={HIT_SLOP}
+                                    accessibilityRole='button'
+                                    accessibilityLabel={intl.formatMessage(messages.filterTasks)}
+                                    testID='playbook-run.filter-tasks-button'
+                                >
+                                    <CompassIcon
+                                        name='filter-variant'
+                                        style={filterIconStyle}
+                                    />
+                                </Pressable>
+                            </View>
                         </View>
                         <ChecklistList
                             checklists={checklists}
+
+                            // A persisted run's rows observe the events themselves.
+                            timelineEvents={'timelineEvents' in playbookRun ? undefined : playbookRun.timeline_events ?? undefined}
                             channelId={channelId}
                             playbookRunId={playbookRun.id}
+                            playbookRunName={playbookRun.name}
                             isFinished={isRunFinished(playbookRun)}
                             isParticipant={isParticipant}
+                            filters={filters}
+                            currentUserId={currentUserId}
+                            expandedById={expandedById}
+                            onToggleChecklistExpanded={toggleChecklistExpanded}
+                            onClearFilters={clearFilters}
                         />
                     </View>
                     {!readOnly && (

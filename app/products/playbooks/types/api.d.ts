@@ -20,6 +20,12 @@ type TaskAction = {
     actions: TriggerAction[];
 }
 
+type TaskRequirement = {
+    id: string;
+    label: string;
+    value: string;
+}
+
 type PlaybookChecklistItem = {
     id: string;
     title: string;
@@ -32,10 +38,21 @@ type PlaybookChecklistItem = {
     command_last_run: number;
     due_date: number;
     task_actions?: TaskAction[];
+    requirements?: TaskRequirement[];
     condition_action?: ConditionAction;
     condition_reason?: string;
     completed_at: number;
     update_at: number;
+}
+
+type PlaybooksGlobalSettings = {
+    enable_experimental_features: boolean;
+    enable_task_requirements: boolean;
+}
+
+type ChecklistItemInput = {
+    title: string;
+    description?: string;
 }
 
 type PlaybookChecklist = {
@@ -61,6 +78,9 @@ type TimelineEvent = {
     id: string;
     playbook_run_id: string;
     create_at: number;
+
+    // The server does not send soft deletes; filtered out only as a precaution.
+    delete_at?: number;
     event_at: number;
     event_type: string;
     summary: string;
@@ -72,7 +92,7 @@ type TimelineEvent = {
 
 type PlaybookRunStatusType = typeof PlaybookRunStatus[keyof typeof PlaybookRunStatus];
 
-type PlaybookRunAttribute = {
+type PlaybookRunPropertyField = {
     id: string;
     group_id: string;
     name: string;
@@ -82,15 +102,23 @@ type PlaybookRunAttribute = {
     create_at: number;
     update_at: number;
     delete_at: number;
-    attrs?: string;
+    attrs?: string | {
+        options?: Array<{id: string; name: string}>;
+        parent_id?: string;
+        sort_order?: number;
+        value_type?: string;
+    };
 }
 
-type PlaybookRunAttributeValue = {
+type PlaybookRunPropertyValue = {
     id: string;
-    attribute_id: string;
-    run_id: string;
+    field_id: string;
+    target_id: string;
+    update_at: number;
     value: string;
 }
+
+type PlaybookRunType = typeof PLAYBOOK_RUN_TYPES[keyof typeof PLAYBOOK_RUN_TYPES];
 
 type PlaybookRun = {
     id: string;
@@ -108,7 +136,8 @@ type PlaybookRun = {
     create_at: number;
     end_at: number;
     post_id?: string;
-    playbook_id: string;
+    playbook_id?: string;
+    type?: PlaybookRunType;
     current_status: PlaybookRunStatusType;
     last_status_update_at: number;
     reminder_post_id?: string;
@@ -126,7 +155,9 @@ type PlaybookRun = {
     remove_channel_member_on_removed_participant: boolean;
     invited_user_ids: string[];
     invited_group_ids: string[];
-    timeline_events: TimelineEvent[];
+
+    // null, not [], when the run has no events: the server sends a Go nil slice.
+    timeline_events: TimelineEvent[] | null;
     participant_ids: string[];
     broadcast_channel_ids: string[];
     webhook_on_creation_urls: string[];
@@ -134,6 +165,8 @@ type PlaybookRun = {
     status_posts: StatusPost[];
     checklists: PlaybookChecklist[];
     metrics_data: RunMetricData[];
+    property_fields?: PlaybookRunPropertyField[];
+    property_values?: PlaybookRunPropertyValue[];
     update_at: number;
     items_order: string[];
     status_update_broadcast_channels_enabled: boolean;

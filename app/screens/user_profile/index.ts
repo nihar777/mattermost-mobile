@@ -9,21 +9,41 @@ import {General, Permissions, Preferences} from '@constants';
 import {getDisplayNamePreferenceAsBool} from '@helpers/api/preference';
 import {observeChannel} from '@queries/servers/channel';
 import {observeCustomProfileAttributesByUserId, observeCustomProfileFields} from '@queries/servers/custom_profile';
+import {observeCustomProfileAttributesEnabled} from '@queries/servers/features';
 import {queryDisplayNamePreferences} from '@queries/servers/preference';
 import {observeCanManageChannelMembers, observePermissionForChannel} from '@queries/servers/role';
 import {observeConfigBooleanValue, observeCurrentTeamId, observeCurrentUserId} from '@queries/servers/system';
 import {observeTeammateNameDisplay, observeCurrentUser, observeUser, observeUserIsChannelAdmin, observeUserIsTeamAdmin} from '@queries/servers/user';
 import {isDefaultChannel} from '@utils/channel';
-import {isSystemAdmin, sortCustomProfileAttributes, convertToAttributesMap, convertProfileAttributesToCustomAttributes} from '@utils/user';
+import {isSystemAdmin, sortCustomProfileAttributes, convertToAttributesMap, convertProfileAttributesToCustomAttributes, getUserIdFromChannelName} from '@utils/user';
 
 import UserProfile from './user_profile';
 
 import type {CustomAttribute} from '@typings/api/custom_profile_attributes';
 import type {WithDatabaseArgs} from '@typings/database/database';
+import type {AvailableScreens} from '@typings/screens/navigation';
 
-type EnhancedProps = WithDatabaseArgs & {
+export type UserProfileProps = {
     userId: string;
     channelId?: string;
+    location?: AvailableScreens;
+    userIconOverride?: string;
+    usernameOverride?: string;
+}
+type EnhancedProps = UserProfileProps & WithDatabaseArgs
+
+type DMChannelInfo = {
+    name: string;
+    type: string;
+};
+
+export function isDirectMessageWithViewedUser(channel: DMChannelInfo|undefined, currentUserId: string, viewedUserId: string|undefined): boolean {
+    if (!channel || channel.type !== General.DM_CHANNEL || !viewedUserId) {
+        return false;
+    }
+
+    const dmUserId = getUserIdFromChannelName(currentUserId, channel.name);
+    return Boolean(dmUserId) && dmUserId === viewedUserId;
 }
 
 const enhanced = withObservables([], ({channelId, database, userId}: EnhancedProps) => {
@@ -36,9 +56,9 @@ const enhanced = withObservables([], ({channelId, database, userId}: EnhancedPro
     const isDC = channel ? channel.pipe(
         switchMap((c) => of$(isDefaultChannel(c))),
     ) : of$(false);
-    const isDirectMessage = channelId ? channel.pipe(
-        switchMap((c) => of$(c?.type === General.DM_CHANNEL)),
-    ) : of$(false);
+    const isDirectMessageWithUser = combineLatest([channel, currentUserId, user]).pipe(
+        map(([c, currentId, viewedUser]) => isDirectMessageWithViewedUser(c, currentId, viewedUser?.id)),
+    );
     const teamId = channel.pipe(switchMap((c) => (c?.teamId ? of$(c.teamId) : observeCurrentTeamId(database))));
     const isTeamAdmin = teamId.pipe(switchMap((id) => observeUserIsTeamAdmin(database, userId, id)));
     const systemAdmin = user.pipe(switchMap((u) => of$(u?.roles ? isSystemAdmin(u.roles) : false)));
@@ -48,7 +68,7 @@ const enhanced = withObservables([], ({channelId, database, userId}: EnhancedPro
         observeWithColumns(['value']);
     const isMilitaryTime = preferences.pipe(map((prefs) => getDisplayNamePreferenceAsBool(prefs, Preferences.USE_MILITARY_TIME)));
     const isCustomStatusEnabled = observeConfigBooleanValue(database, 'EnableCustomUserStatuses');
-    const enableCustomAttributes = observeConfigBooleanValue(database, 'FeatureFlagCustomProfileAttributes');
+    const enableCustomAttributes = observeCustomProfileAttributesEnabled(database);
 
     // Custom profile attributes
     const rawCustomAttributes = observeCustomProfileAttributesByUserId(database, userId);
@@ -81,7 +101,7 @@ const enhanced = withObservables([], ({channelId, database, userId}: EnhancedPro
         isChannelAdmin,
         isCustomStatusEnabled,
         isDefaultChannel: isDC,
-        isDirectMessage,
+        isDirectMessageWithUser,
         isMilitaryTime,
         isSystemAdmin: systemAdmin,
         isTeamAdmin,

@@ -1,17 +1,21 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-// Check if calls is enabled. If it is, then run fn; if it isn't, show an alert and set
-// msgPostfix to ' (Not Available)'.
-import {useCallback, useEffect, useState} from 'react';
+import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {useIntl} from 'react-intl';
 import {Alert, Platform} from 'react-native';
 import Permissions from 'react-native-permissions';
+import {cancelAnimation, Easing, useAnimatedStyle, useSharedValue, withRepeat, withTiming} from 'react-native-reanimated';
 
-import {initializeVoiceTrack} from '@calls/actions/calls';
+import {initializeVoiceTrack, openOutgoingCallScreen} from '@calls/actions/calls';
+import {leaveAndJoinWithAlert, showLimitRestrictedAlert} from '@calls/alerts';
+import {showUserCallOptions} from '@calls/components/user_call_options';
+import {observeIsCallLimitRestricted, type LimitRestrictedInfo} from '@calls/observers';
 import {
+    cancelOutgoingCall,
     getCallsConfig,
     getCurrentCall,
+    isPhoneDialingAvailable,
     setMicPermissionsGranted,
     useCallsState,
     useChannelsWithCalls,
@@ -20,7 +24,7 @@ import {
     useIncomingCalls,
 } from '@calls/state';
 import {type CallSession} from '@calls/types/calls';
-import {errorAlert, isHostControlsAllowed} from '@calls/utils';
+import {errorAlert, isHostControlsAllowed, NO_PHONES} from '@calls/utils';
 import {Screens} from '@constants';
 import {
     CALL_ERROR_BAR_HEIGHT,
@@ -29,23 +33,37 @@ import {
     JOIN_CALL_BAR_HEIGHT,
 } from '@constants/view';
 import {useServerUrl} from '@context/server';
-import {useTheme} from '@context/theme';
 import DatabaseManager from '@database/manager';
 import {useAppState} from '@hooks/device';
+import {usePreventDoubleTap} from '@hooks/utils';
 import NetworkManager from '@managers/network_manager';
 import {queryAllActiveServers} from '@queries/app/servers';
 import {getCurrentUser} from '@queries/servers/user';
-import {openAsBottomSheet, openUserProfileModal} from '@screens/navigation';
+import {navigateToScreen} from '@screens/navigation';
+import {isDMChannel} from '@utils/channel';
 import {getFullErrorMessage} from '@utils/errors';
+import {logError} from '@utils/log';
+import {openUserProfile} from '@utils/navigation';
 import {isSystemAdmin} from '@utils/user';
 
 import type {Client} from '@client/rest';
+import type {NavigationButtonProps} from '@components/navigation_button';
 
-export const useTryCallsFunction = (fn: () => void) => {
+const DEFAULT_LIMIT_RESTRICTED_INFO: LimitRestrictedInfo = {
+    limitRestricted: false,
+    maxParticipants: 0,
+    isCloudStarter: false,
+};
+
+// Runs fn if calls is enabled on the server, otherwise alerts and sets msgPostfix to
+// ' (Not Available)'. tryFn resolves to whether fn was reached, so callers that acted before the
+// check (e.g. by opening the call screen) can undo that when it wasn't.
+export const useTryCallsFunction = (fn: () => void): [() => Promise<boolean>, string, boolean] => {
     const intl = useIntl();
     const serverUrl = useServerUrl();
     const [msgPostfix, setMsgPostfix] = useState('');
     const [clientError, setClientError] = useState('');
+    const [isLoading, setIsLoading] = useState(false);
 
     let client: Client | undefined;
     if (!clientError) {
@@ -57,22 +75,25 @@ export const useTryCallsFunction = (fn: () => void) => {
     }
     const tryFn = useCallback(async () => {
         let enabled;
+        setIsLoading(true);
         try {
             enabled = await client?.getEnabled();
         } catch (error) {
             errorAlert(getFullErrorMessage(error), intl);
-            return;
+            return false;
+        } finally {
+            setIsLoading(false);
         }
 
         if (enabled) {
             setMsgPostfix('');
             fn();
-            return;
+            return true;
         }
 
         if (clientError) {
             errorAlert(clientError, intl);
-            return;
+            return false;
         }
 
         const title = intl.formatMessage({
@@ -103,9 +124,10 @@ export const useTryCallsFunction = (fn: () => void) => {
             ],
         );
         setMsgPostfix(` ${notAvailable}`);
+        return false;
     }, [client, fn, clientError, intl]);
 
-    return [tryFn, msgPostfix] as [() => Promise<void>, string];
+    return [tryFn, msgPostfix, isLoading];
 };
 
 const micPermission = Platform.select({
@@ -131,9 +153,42 @@ export const usePermissionsChecker = (micPermissionsGranted: boolean) => {
         if (!micPermissionsGranted) {
             asyncFn();
         }
-    }, [appState]);
+    }, [appState, micPermissionsGranted]);
 
     return hasPermission;
+};
+
+const CALLING_PULSE_ANIMATION_MIN_OPACITY = 0.4;
+const CALLING_PULSE_ANIMATION_DURATION = 800;
+const CALLING_PULSE_ANIMATION_EASEOUT_DURATION = 200;
+const CALLING_PULSE_ANIMATION_EASING_FUNCTION = Easing.inOut(Easing.ease);
+export const useCallingPulseAnimationStyle = (active: boolean) => {
+    const opacity = useSharedValue(1);
+    const animatedStyle = useAnimatedStyle(() => ({opacity: opacity.value}));
+
+    useEffect(() => {
+        if (active) {
+            opacity.value = withRepeat(
+                withTiming(CALLING_PULSE_ANIMATION_MIN_OPACITY,
+                    {
+                        duration: CALLING_PULSE_ANIMATION_DURATION,
+                        easing: CALLING_PULSE_ANIMATION_EASING_FUNCTION,
+                    }),
+                -1,
+                true,
+            );
+        } else {
+            opacity.value = withTiming(1, {
+                duration: CALLING_PULSE_ANIMATION_EASEOUT_DURATION,
+            });
+        }
+
+        return () => {
+            cancelAnimation(opacity);
+        };
+    }, [active, opacity]);
+
+    return animatedStyle;
 };
 
 export const useCallsAdjustment = (serverUrl: string, channelId: string): number => {
@@ -195,37 +250,163 @@ export const useHostControlsAvailable = () => {
 };
 
 export const useHostMenus = () => {
-    const intl = useIntl();
-    const theme = useTheme();
     const currentCall = useCurrentCall();
     const hostControlsAvailable = useHostControlsAvailable();
     const isHost = currentCall?.hostId === currentCall?.myUserId;
 
-    const openHostControl = useCallback(async (session: CallSession) => {
-        const screen = Screens.CALL_HOST_CONTROLS;
-        const title = intl.formatMessage({id: 'mobile.calls_host_controls', defaultMessage: 'Host controls'});
-        const closeHostControls = 'close-host-controls';
-        const props = {closeButtonId: closeHostControls, session};
+    const openHostControl = useCallback(async (sessionId: string) => {
+        navigateToScreen(Screens.CALL_HOST_CONTROLS, {sessionId});
+    }, []);
 
-        openAsBottomSheet({screen, title, theme, closeButtonId: closeHostControls, props});
-    }, [intl, theme]);
-
-    const openUserProfile = useCallback(async (session: CallSession) => {
-        openUserProfileModal(intl, theme, {
+    const openProfile = useCallback(async (session: CallSession) => {
+        openUserProfile({
             userId: session.userId,
         });
-    }, [intl, theme]);
+    }, []);
 
     const onPress = useCallback((session: CallSession) => () => {
         // Show host controls when allowed and I'm host or admin,
         // but don't show if this is me and I'm the host already.
         const isYou = session.userId === currentCall?.myUserId;
         if (hostControlsAvailable && !(isYou && isHost)) {
-            openHostControl(session);
+            openHostControl(session.sessionId);
         } else {
-            openUserProfile(session);
+            openProfile(session);
         }
-    }, [currentCall?.myUserId, hostControlsAvailable, isHost, openHostControl, openUserProfile]);
+    }, [currentCall?.myUserId, hostControlsAvailable, isHost, openHostControl, openProfile]);
 
-    return {hostControlsAvailable, onPress, openUserProfile};
+    return {hostControlsAvailable, onPress, openProfile};
+};
+
+/**
+ * Hook to observe whether a call in the given channel has reached the participant limit.
+ */
+export const useCallLimitRestrictedInfo = (serverUrl: string, channelId: string): LimitRestrictedInfo => {
+    const [limitRestrictedInfo, setLimitRestrictedInfo] = useState(DEFAULT_LIMIT_RESTRICTED_INFO);
+
+    useEffect(() => {
+        // Without this the old value survives until the new observer emits
+        setLimitRestrictedInfo(DEFAULT_LIMIT_RESTRICTED_INFO);
+
+        const database = DatabaseManager.serverDatabases[serverUrl]?.database;
+        if (!database) {
+            return undefined;
+        }
+
+        const subscription = observeIsCallLimitRestricted(database, serverUrl, channelId).subscribe(setLimitRestrictedInfo);
+
+        return () => subscription.unsubscribe();
+    }, [serverUrl, channelId]);
+
+    return limitRestrictedInfo;
+};
+
+/**
+ * Hook to display the call button in the navigation header for DM channels only.
+ */
+export const useNavigationHeaderCallButtonForDM = (
+    channelId: Channel['id'],
+    channelType: Channel['type'],
+    dmPhoneUserId?: string,
+    dmUserPhones = NO_PHONES,
+): NavigationButtonProps | undefined => {
+    const intl = useIntl();
+    const serverUrl = useServerUrl();
+    const channelsWithCalls = useChannelsWithCalls(serverUrl);
+    const currentCall = useCurrentCall();
+    const isDM = isDMChannel(channelType);
+    const limitRestrictedInfo = useCallLimitRestrictedInfo(serverUrl, channelId);
+
+    const [isJoiningOrStarting, setIsJoiningOrStarting] = useState(false);
+
+    const wasCallScreenOpenedBefore = useRef(false);
+
+    const isCallInChannel = Boolean(channelsWithCalls[channelId]);
+    const alreadyInCall = currentCall?.channelId === channelId;
+
+    const joinOrStart = useCallback(async () => {
+        setIsJoiningOrStarting(true);
+        try {
+            const joined = await leaveAndJoinWithAlert(intl, serverUrl, channelId);
+            if (joined) {
+                if (!wasCallScreenOpenedBefore.current) {
+                    navigateToScreen(Screens.CALL);
+                }
+            } else {
+                await cancelOutgoingCall(serverUrl, channelId);
+            }
+        } catch (error) {
+            logError('error on useNavigationHeaderCallButtonForDM.joinOrStart', getFullErrorMessage(error));
+            await cancelOutgoingCall(serverUrl, channelId);
+        } finally {
+            setIsJoiningOrStarting(false);
+        }
+    }, [intl, serverUrl, channelId]);
+    const [tryJoinOrStart, , isLoadingTryCallsFunction] = useTryCallsFunction(joinOrStart);
+
+    const startDMCall = useCallback(async () => {
+        if (alreadyInCall) {
+            navigateToScreen(Screens.CALL);
+            return;
+        }
+
+        if (limitRestrictedInfo.limitRestricted) {
+            showLimitRestrictedAlert(limitRestrictedInfo, intl);
+            return;
+        }
+
+        // Starting a call opens the call view on this tap, before anything is connected.
+        const openNow = !isCallInChannel && !currentCall;
+        wasCallScreenOpenedBefore.current = openNow;
+        if (openNow) {
+            openOutgoingCallScreen(serverUrl, channelId);
+        }
+
+        // A false here means we never got as far as joinOrStart, so nothing else will close the
+        // call view we just opened.
+        const startedJoining = await tryJoinOrStart();
+        if (openNow && !startedJoining) {
+            await cancelOutgoingCall(serverUrl, channelId);
+        }
+    }, [alreadyInCall, limitRestrictedInfo, intl, isCallInChannel, currentCall, serverUrl, channelId, tryJoinOrStart]);
+
+    const handleOnPress = useCallback(async () => {
+        if (dmPhoneUserId && dmUserPhones.length && !isCallInChannel && isPhoneDialingAvailable(serverUrl)) {
+            showUserCallOptions(intl, serverUrl, dmPhoneUserId, dmUserPhones, startDMCall);
+            return;
+        }
+
+        await startDMCall();
+    }, [dmPhoneUserId, dmUserPhones, isCallInChannel, serverUrl, intl, startDMCall]);
+
+    const onPress = usePreventDoubleTap(handleOnPress);
+
+    const isLoading = isJoiningOrStarting || isLoadingTryCallsFunction;
+
+    const navigationHeaderCallButton = useMemo<NavigationButtonProps>(() => {
+        let accessibilityLabel = intl.formatMessage({id: 'mobile.calls_start_call', defaultMessage: 'Start call'});
+        if (alreadyInCall) {
+            accessibilityLabel = intl.formatMessage({id: 'mobile.calls_return_to_call', defaultMessage: 'Return to call'});
+        } else if (isCallInChannel) {
+            accessibilityLabel = intl.formatMessage({id: 'mobile.calls_join_call', defaultMessage: 'Join call'});
+        }
+
+        const iconName = isCallInChannel || alreadyInCall ? 'phone-in-talk' : 'phone';
+
+        return {
+            id: 'calls',
+            iconName,
+            isLoading,
+            onPress,
+            disabled: isLoading,
+            accessibilityLabel,
+            testID: 'channel_header.quick_call.button',
+        };
+    }, [alreadyInCall, isCallInChannel, onPress, isLoading, intl]);
+
+    if (!isDM) {
+        return undefined;
+    }
+
+    return navigationHeaderCallButton;
 };

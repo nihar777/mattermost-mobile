@@ -1,35 +1,44 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
+import {useNavigation} from 'expo-router';
 import moment, {type Moment} from 'moment-timezone';
-import React, {useCallback, useRef, useState} from 'react';
+import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {useIntl} from 'react-intl';
-import {Keyboard, SafeAreaView, StyleSheet, View} from 'react-native';
+import {Keyboard, StyleSheet, View} from 'react-native';
+import {SafeAreaView, type Edge} from 'react-native-safe-area-context';
 
-import {updateScheduledPost} from '@actions/remote/scheduled_post';
-import DateTimeSelector from '@components/data_time_selector';
+import {updateScheduledPost, type UpdateSchedulingInfo} from '@actions/remote/scheduled_post';
+import DateTimeSelector from '@components/date_time_selector';
 import Loading from '@components/loading';
+import NavigationButton from '@components/navigation_button';
+import {Screens} from '@constants';
 import {MESSAGE_TYPE, SNACK_BAR_TYPE} from '@constants/snack_bar';
 import {useServerUrl} from '@context/server';
 import {useTheme} from '@context/theme';
 import useAndroidHardwareBackHandler from '@hooks/android_back_handler';
-import useNavButtonPressed from '@hooks/navigation_button_pressed';
 import {usePreventDoubleTap} from '@hooks/utils';
-import {buildNavigationButton, dismissModal, setButtons} from '@screens/navigation';
+import {navigateBack} from '@screens/navigation';
+import PickerOption from '@screens/post_priority_picker/components/picker_option';
 import {logDebug} from '@utils/log';
+import {getScheduledPostRecurrence, isRecurringScheduledPost, repeatWeeklyLabel} from '@utils/scheduled_post';
 import {showSnackBar} from '@utils/snack_bar';
-import {changeOpacity} from '@utils/theme';
 import {getTimezone} from '@utils/user';
 
 import type ScheduledPostModel from '@typings/database/models/servers/scheduled_post';
-import type {AvailableScreens} from '@typings/screens/navigation';
 
 type Props = {
     currentUserTimezone?: UserTimezone | null;
-    componentId: AvailableScreens;
-    closeButtonId: string;
     draft: ScheduledPostModel;
+    isRecurringEnabled: boolean;
 }
+
+const safeAreaEdges: Edge[] = ['bottom', 'left', 'right'];
+
+const TOGGLE_OPTION_MARGIN_TOP = 16;
+
+// Matches the horizontal gutter DateTimeSelector gives its own rows so the toggle lines up with them.
+const TOGGLE_OPTION_HORIZONTAL_PADDING = 15;
 
 const styles = StyleSheet.create({
     container: {
@@ -43,39 +52,37 @@ const styles = StyleSheet.create({
     optionsContainer: {
         paddingTop: 12,
     },
+    toggleOptionContainer: {
+        marginTop: TOGGLE_OPTION_MARGIN_TOP,
+        paddingHorizontal: TOGGLE_OPTION_HORIZONTAL_PADDING,
+    },
 });
-
-const RIGHT_BUTTON = buildNavigationButton('reschedule-draft', 'reschedule_draft.save.button');
 
 const RescheduledDraft: React.FC<Props> = ({
     currentUserTimezone,
-    componentId,
-    closeButtonId,
     draft,
+    isRecurringEnabled,
 }) => {
+    const navigation = useNavigation();
     const theme = useTheme();
     const intl = useIntl();
     const serverUrl = useServerUrl();
+    const [canSave, setCanSave] = useState(false);
     const [isUpdating, setIsUpdating] = useState(false);
     const selectedTime = useRef<string | null>(null);
     const userTimezone = getTimezone(currentUserTimezone);
+    const wasRepeatingWeekly = isRecurringScheduledPost(draft);
+    const [repeatWeekly, setRepeatWeekly] = useState(wasRepeatingWeekly);
 
-    const toggleSaveButton = useCallback((enabled = false) => {
-        setButtons(componentId, {
-            rightButtons: [{
-                ...RIGHT_BUTTON,
-                color: theme.sidebarHeaderTextColor,
-                disabledColor: changeOpacity(theme.sidebarHeaderTextColor, 0.32),
-                text: intl.formatMessage({id: 'edit_post.save', defaultMessage: 'Save'}),
-                enabled,
-            }],
-        });
-    }, [componentId, intl, theme]);
+    // The server refuses to make a post with attachments recurring, since a file belongs to the first
+    // post it is sent with. An existing weekly post therefore never has files, so this only stops a
+    // one-time post with attachments from being turned into a series.
+    const offerRepeatWeekly = isRecurringEnabled && draft.files.length === 0;
 
     const onClose = useCallback(() => {
         Keyboard.dismiss();
-        dismissModal({componentId});
-    }, [componentId]);
+        navigateBack();
+    }, []);
 
     const handleUIUpdates = useCallback((res: {error?: unknown}) => {
         if (res.error) {
@@ -93,7 +100,7 @@ const RescheduledDraft: React.FC<Props> = ({
 
     const onSavePostMessage = usePreventDoubleTap(useCallback(async () => {
         setIsUpdating(true);
-        toggleSaveButton(false);
+        setCanSave(false);
         if (!selectedTime.current) {
             logDebug('ScheduledPostOptions', 'No time selected');
             setIsUpdating(false);
@@ -106,19 +113,49 @@ const RescheduledDraft: React.FC<Props> = ({
             return;
         }
 
-        const res = await updateScheduledPost(serverUrl, draft, parseInt(selectedTime.current, 10));
-        handleUIUpdates(res);
-    }, [draft, handleUIUpdates, intl, selectedTime, serverUrl, toggleSaveButton]));
+        // When the toggle was never offered, omit the recurrence so the post keeps whatever it has.
+        let schedulingInfo: UpdateSchedulingInfo = {scheduled_at: parseInt(selectedTime.current, 10)};
+        if (offerRepeatWeekly) {
+            schedulingInfo = {...schedulingInfo, ...getScheduledPostRecurrence(repeatWeekly, currentUserTimezone)};
+        }
 
-    useNavButtonPressed(closeButtonId, componentId, onClose, []);
-    useNavButtonPressed(RIGHT_BUTTON.id, componentId, onSavePostMessage, []);
-    useAndroidHardwareBackHandler(componentId, onClose);
+        const res = await updateScheduledPost(serverUrl, draft, schedulingInfo);
+        handleUIUpdates(res);
+    }, [currentUserTimezone, draft, handleUIUpdates, intl, offerRepeatWeekly, repeatWeekly, selectedTime, serverUrl]));
+
+    useEffect(() => {
+        navigation.setOptions({
+            headerRight: () => (
+                <NavigationButton
+                    disabled={!canSave}
+                    onPress={onSavePostMessage}
+                    testID='reschedule_draft.save.button'
+                    text={intl.formatMessage({id: 'edit_post.save', defaultMessage: 'Save'})}
+                />
+            ),
+        });
+    }, [canSave, intl, navigation, onSavePostMessage, theme.sidebarHeaderTextColor]);
+
+    useAndroidHardwareBackHandler(Screens.RESCHEDULE_DRAFT, onClose);
+
+    const updateCanSave = useCallback((time: string, weekly: boolean) => {
+        setCanSave(parseInt(time, 10) !== draft.scheduledAt || weekly !== wasRepeatingWeekly);
+    }, [draft.scheduledAt, wasRepeatingWeekly]);
 
     const handleCustomTimeChange = useCallback((updatedSelectedTime: Moment) => {
         const newSelecteTime = updatedSelectedTime.valueOf().toString();
         selectedTime.current = newSelecteTime;
-        toggleSaveButton(parseInt(newSelecteTime, 10) !== draft.scheduledAt);
-    }, [draft.scheduledAt, toggleSaveButton]);
+        updateCanSave(newSelecteTime, repeatWeekly);
+    }, [repeatWeekly, updateCanSave]);
+
+    const onToggleRepeatWeekly = useCallback((value: boolean) => {
+        setRepeatWeekly(value);
+
+        // Changing only the recurrence leaves the time picker untouched, so keep the post's own time.
+        const time = selectedTime.current ?? draft.scheduledAt.toString();
+        selectedTime.current = time;
+        updateCanSave(time, value);
+    }, [draft.scheduledAt, updateCanSave]);
 
     if (isUpdating) {
         return (
@@ -130,6 +167,7 @@ const RescheduledDraft: React.FC<Props> = ({
 
     return (
         <SafeAreaView
+            edges={safeAreaEdges}
             testID='edit_post.screen'
             style={styles.container}
         >
@@ -141,6 +179,18 @@ const RescheduledDraft: React.FC<Props> = ({
                     showInitially='date'
                     initialDate={moment(draft.scheduledAt)}
                 />
+                {offerRepeatWeekly && (
+                    <View style={styles.toggleOptionContainer}>
+                        <PickerOption
+                            action={onToggleRepeatWeekly}
+                            label={intl.formatMessage(repeatWeeklyLabel)}
+                            selected={repeatWeekly}
+                            testID='reschedule_draft.repeat_weekly'
+                            type='toggle'
+                            value='repeat_weekly'
+                        />
+                    </View>
+                )}
             </View>
         </SafeAreaView>
     );

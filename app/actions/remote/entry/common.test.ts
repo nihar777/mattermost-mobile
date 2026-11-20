@@ -4,20 +4,24 @@
 import {nativeApplicationVersion} from 'expo-application';
 import {RESULTS} from 'react-native-permissions';
 
-import {handleKickFromChannel, fetchMyChannelsForTeam} from '@actions/remote/channel';
+import {handleKickFromChannel, fetchChannelById, fetchMyChannelsForTeam} from '@actions/remote/channel';
 import {fetchMyPreferences} from '@actions/remote/preference';
+import {fetchRoles} from '@actions/remote/role';
 import {fetchConfigAndLicense} from '@actions/remote/systems';
 import {fetchMyTeams, handleKickFromTeam} from '@actions/remote/team';
 import {fetchMe} from '@actions/remote/user';
-import {Screens} from '@constants';
+import {Events, Screens, ServerErrors} from '@constants';
 import {SYSTEM_IDENTIFIERS} from '@constants/database';
 import {PUSH_PROXY_STATUS_VERIFIED} from '@constants/push_proxy';
 import DatabaseManager from '@database/manager';
 import NetworkManager from '@managers/network_manager';
 import {getDeviceToken} from '@queries/app/global';
+import {getChannelById} from '@queries/servers/channel';
 import {prepareEntryModels} from '@queries/servers/entry';
+import {isChannelAccessEnforced} from '@queries/servers/render_permissions';
 import {getCurrentChannelId, getCurrentTeamId, setCurrentTeamAndChannelId} from '@queries/servers/system';
-import NavigationStore from '@store/navigation_store';
+import {NavigationStore} from '@store/navigation_store';
+import TestHelper from '@test/test_helper';
 import {logDebug} from '@utils/log';
 
 import {entry, setExtraSessionProps, verifyPushProxy, entryInitialChannelId, handleEntryAfterLoadNavigation} from './common';
@@ -25,21 +29,21 @@ import {entry, setExtraSessionProps, verifyPushProxy, entryInitialChannelId, han
 jest.mock('@actions/remote/channel');
 jest.mock('@actions/remote/scheduled_post');
 jest.mock('@actions/remote/preference');
+jest.mock('@actions/remote/role');
 jest.mock('@actions/remote/systems');
 jest.mock('@actions/remote/team');
 jest.mock('@actions/remote/user');
 jest.mock('@actions/remote/post');
 jest.mock('@actions/remote/groups');
 jest.mock('@actions/remote/thread');
-jest.mock('@queries/app/global', () => {
-    const {of: mockOf} = require('rxjs');
-    return {
-        getDeviceToken: jest.fn(),
-        observeLowConnectivityMonitor: jest.fn(() => mockOf(true)),
-    };
-});
+jest.mock('@queries/app/global');
 jest.mock('@queries/servers/system');
 jest.mock('@queries/servers/entry');
+jest.mock('@queries/servers/render_permissions');
+jest.mock('@queries/servers/channel', () => ({
+    ...jest.requireActual('@queries/servers/channel'),
+    getChannelById: jest.fn(),
+}));
 jest.mock('@queries/servers/system', () => {
     const original = jest.requireActual('@queries/servers/system');
     return {
@@ -124,6 +128,7 @@ describe('actions/remote/entry/common', () => {
             (fetchMyChannelsForTeam as jest.Mock).mockResolvedValue(mockChannels);
 
             (prepareEntryModels as jest.Mock).mockResolvedValue([]);
+            jest.mocked(fetchRoles).mockResolvedValue({roles: []});
 
             const result = await entry(serverUrl, 'team1');
 
@@ -135,6 +140,7 @@ describe('actions/remote/entry/common', () => {
                 meData: mockUser,
                 isCRTEnabled: false,
             });
+            expect(fetchRoles).toHaveBeenCalled();
 
             expect(result).toEqual(expect.objectContaining({
                 initialChannelId: '',
@@ -146,6 +152,22 @@ describe('actions/remote/entry/common', () => {
                 meData: mockUser,
                 gmConverted: false,
             }));
+        });
+
+        it('should complete the entry when fetching roles fails', async () => {
+            (fetchConfigAndLicense as jest.Mock).mockResolvedValue({error: false, config: {Version: '7.8.0'}, license: {}});
+            (fetchMyPreferences as jest.Mock).mockResolvedValue({preferences: []});
+            (fetchMyTeams as jest.Mock).mockResolvedValue({teams: [], memberships: []});
+            (fetchMe as jest.Mock).mockResolvedValueOnce({user: {id: 'user1', roles: '', username: 'user1'}});
+            (fetchMyChannelsForTeam as jest.Mock).mockResolvedValue({channels: [], memberships: [], categories: []});
+            const preparedModel = {id: 'model1'};
+            (prepareEntryModels as jest.Mock).mockResolvedValue([Promise.resolve([preparedModel])]);
+            jest.mocked(fetchRoles).mockResolvedValue({error: new Error('Roles error')});
+
+            const result = await entry(serverUrl, 'team1');
+
+            expect(result).toEqual(expect.objectContaining({models: [preparedModel]}));
+            expect(logDebug).toHaveBeenCalledWith('entryRest: failed to fetch roles', undefined, 'Roles error');
         });
 
         it('should handle errors in data fetching', async () => {
@@ -215,6 +237,7 @@ describe('actions/remote/entry/common', () => {
                 false,
                 nativeApplicationVersion,
                 undefined,
+                undefined,
             );
         });
 
@@ -231,6 +254,7 @@ describe('actions/remote/entry/common', () => {
                 expect.any(String),
                 false,
                 nativeApplicationVersion,
+                undefined,
                 undefined,
             );
         });
@@ -470,6 +494,35 @@ describe('actions/remote/entry/common', () => {
             );
 
             expect(handleKickFromChannel).toHaveBeenCalled();
+        });
+
+        describe('when the open channel is missing after the sync', () => {
+            const kickOpenChannel = () => handleEntryAfterLoadNavigation(serverUrl, teamMembers, channelMembers, 'team1', 'channel1', 'team1', 'initialChannel1', true);
+
+            beforeEach(() => {
+                jest.spyOn(NavigationStore, 'getScreensInStack').mockReturnValue([Screens.CHANNEL]);
+                jest.mocked(getCurrentTeamId).mockResolvedValueOnce('team1');
+                jest.mocked(getCurrentChannelId).mockResolvedValueOnce('channel1');
+                jest.mocked(getChannelById).mockResolvedValue(TestHelper.fakeChannelModel({id: 'channel1', type: 'O'}));
+                jest.mocked(isChannelAccessEnforced).mockResolvedValue(true);
+            });
+
+            it('should report a read access denial as revoked access', async () => {
+                jest.mocked(fetchChannelById).mockResolvedValue({error: {server_error_id: ServerErrors.CHANNEL_ACCESS_DENIED, status_code: 403}});
+
+                await kickOpenChannel();
+
+                expect(handleKickFromChannel).toHaveBeenCalledWith(serverUrl, 'channel1', Events.CHANNEL_ACCESS_REVOKED);
+            });
+
+            it('should report any other cause as a removal without asking the server while access is not enforced', async () => {
+                jest.mocked(isChannelAccessEnforced).mockResolvedValue(false);
+
+                await kickOpenChannel();
+
+                expect(fetchChannelById).not.toHaveBeenCalled();
+                expect(handleKickFromChannel).toHaveBeenCalledWith(serverUrl, 'channel1', undefined);
+            });
         });
 
         it('should handle error gracefully', async () => {

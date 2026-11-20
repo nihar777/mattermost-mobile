@@ -1,19 +1,17 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import {Image} from 'expo-image';
 import React, {useCallback, type ReactNode} from 'react';
-import {useIntl} from 'react-intl';
-import {Platform, StyleSheet, TouchableOpacity, View} from 'react-native';
+import {Platform, StyleSheet, Pressable, View} from 'react-native';
 
 import {buildAbsoluteUrl} from '@actions/remote/file';
 import CompassIcon from '@components/compass_icon';
+import ExpoImage from '@components/expo_image';
 import ProfilePicture from '@components/profile_picture';
 import {View as ViewConstant} from '@constants';
 import {useServerUrl} from '@context/server';
-import {useTheme} from '@context/theme';
 import {usePreventDoubleTap} from '@hooks/utils';
-import {openUserProfileModal} from '@screens/navigation';
+import {openUserProfile} from '@utils/navigation';
 import {ensureString} from '@utils/types';
 
 import type PostModel from '@typings/database/models/servers/post';
@@ -35,8 +33,6 @@ const style = StyleSheet.create({
 });
 
 const Avatar = ({author, enablePostIconOverride, isAutoReponse, location, post}: AvatarProps) => {
-    const intl = useIntl();
-    const theme = useTheme();
     const serverUrl = useServerUrl();
 
     const fromWebHook = post.props?.from_webhook === 'true';
@@ -55,7 +51,8 @@ const Avatar = ({author, enablePostIconOverride, isAutoReponse, location, post}:
         if (overrideIconUrl) {
             const source = {uri: overrideIconUrl};
             iconComponent = (
-                <Image
+                <ExpoImage
+                    id={`user-override-icon-${post.id}`}
                     source={source}
                     style={{
                         height: pictureSize,
@@ -88,18 +85,18 @@ const Avatar = ({author, enablePostIconOverride, isAutoReponse, location, post}:
         );
     }
 
-    const openUserProfile = usePreventDoubleTap(useCallback(() => {
+    const openProfile = usePreventDoubleTap(useCallback(() => {
         if (!author) {
             return;
         }
-        openUserProfileModal(intl, theme, {
+        openUserProfile({
             location,
             userId: author.id,
             channelId: post.channelId,
             userIconOverride: propsIconUrl,
             usernameOverride: propsUsername,
         });
-    }, [author, intl, location, post.channelId, propsIconUrl, propsUsername, theme]));
+    }, [author, location, post.channelId, propsIconUrl, propsUsername]));
 
     let component = (
         <ProfilePicture
@@ -113,9 +110,12 @@ const Avatar = ({author, enablePostIconOverride, isAutoReponse, location, post}:
 
     if (!fromWebHook) {
         component = (
-            <TouchableOpacity onPress={openUserProfile}>
+            <Pressable
+                style={({pressed}) => [pressed && {opacity: 0.72}]}
+                onPress={openProfile}
+            >
                 {component}
-            </TouchableOpacity>
+            </Pressable>
         );
     }
 

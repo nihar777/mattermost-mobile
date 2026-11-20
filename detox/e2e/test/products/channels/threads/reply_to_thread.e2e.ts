@@ -11,6 +11,7 @@ import {
     Post,
     Setup,
 } from '@support/server_api';
+import {assertServerBaseline} from '@support/server_baseline';
 import {
     serverOneUrl,
     siteOneUrl,
@@ -25,8 +26,8 @@ import {
     ThreadOptionsScreen,
     ThreadScreen,
 } from '@support/ui/screen';
-import {getRandomId} from '@support/utils';
-import {expect} from 'detox';
+import {getRandomId, timeouts} from '@support/utils';
+import {expect, waitFor} from 'detox';
 
 describe('Threads - Reply to Thread', () => {
     const serverOneDisplayName = 'Server 1';
@@ -37,9 +38,18 @@ describe('Threads - Reply to Thread', () => {
         const {channel, user} = await Setup.apiInit(siteOneUrl);
         testChannel = channel;
 
+        // # Assert server baseline (CRT always_on, ThreadAutoFollow) for thread UI.
+        await assertServerBaseline(siteOneUrl, [
+            'ServiceSettings.CollapsedThreads',
+            'ServiceSettings.ThreadAutoFollow',
+        ]);
+
         // # Log in to server
         await ServerScreen.connectToServer(serverOneUrl, serverOneDisplayName);
         await LoginScreen.login(user);
+
+        // Ensure the channel has propagated to the sidebar before any test body runs.
+        await ChannelListScreen.waitForSidebarPublicChannelDisplayNameVisible(testChannel.name);
     });
 
     beforeEach(async () => {
@@ -56,8 +66,11 @@ describe('Threads - Reply to Thread', () => {
         // # Create a thread, go back to channel list screen, and then go to global threads screen
         const parentMessage = `Message ${getRandomId()}`;
         await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelScreen.postMessage(parentMessage);
-        const {post: parentPost} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
+
+        const {post: parentPost} = await ChannelScreen.postMessageAndVerify(parentMessage, testChannel.id, siteOneUrl);
+        const {postListPostItem} = ChannelScreen.getPostListPostItem(parentPost.id, parentMessage);
+        await waitFor(postListPostItem).toBeVisible().withTimeout(timeouts.TEN_SEC);
+
         await ChannelScreen.openReplyThreadFor(parentPost.id, parentMessage);
         const replyMessage = `${parentMessage} reply`;
         await ThreadScreen.postMessage(replyMessage);
@@ -66,7 +79,9 @@ describe('Threads - Reply to Thread', () => {
         await GlobalThreadsScreen.open();
 
         // * Verify thread is displayed
-        await expect(GlobalThreadsScreen.getThreadItem(parentPost.id)).toBeVisible();
+        // Use waitFor to handle iOS CI where the thread item may take a moment to appear
+        // in the global threads list after the initial thread creation.
+        await waitFor(GlobalThreadsScreen.getThreadItem(parentPost.id)).toBeVisible().withTimeout(timeouts.TEN_SEC);
 
         // # Open thread options for thread and tap on reply option
         await GlobalThreadsScreen.openThreadOptionsFor(parentPost.id);
@@ -81,8 +96,8 @@ describe('Threads - Reply to Thread', () => {
 
         // * Verify new reply is posted
         const {post: newReplyPost} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
-        const {postListPostItem} = ThreadScreen.getPostListPostItem(newReplyPost.id, newReplyMessage);
-        await expect(postListPostItem).toBeVisible();
+        const {postListPostItem: newReplyPostItem} = ThreadScreen.getPostListPostItem(newReplyPost.id, newReplyMessage);
+        await expect(newReplyPostItem).toBeVisible();
 
         // # Go back to channel list screen
         await ThreadScreen.back();
@@ -93,17 +108,21 @@ describe('Threads - Reply to Thread', () => {
         // # Create a thread, go back to channel list screen, and then go to global threads screen
         const parentMessage = `Message ${getRandomId()}`;
         await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelScreen.postMessage(parentMessage);
-        const {post: parentPost} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
+        const {post: parentPost} = await ChannelScreen.postMessageAndVerify(parentMessage, testChannel.id, siteOneUrl);
+        const {postListPostItem} = ChannelScreen.getPostListPostItem(parentPost.id, parentMessage);
+        await waitFor(postListPostItem).toBeVisible().withTimeout(timeouts.TEN_SEC);
         await ChannelScreen.openReplyThreadFor(parentPost.id, parentMessage);
         const replyMessage = `${parentMessage} reply`;
         await ThreadScreen.postMessage(replyMessage);
+
         await ThreadScreen.back();
         await ChannelScreen.back();
         await GlobalThreadsScreen.open();
 
         // * Verify thread is displayed
-        await expect(GlobalThreadsScreen.getThreadItem(parentPost.id)).toBeVisible();
+        // Use waitFor to handle iOS CI where the thread item may take a moment to appear
+        // in the global threads list after the initial thread creation.
+        await waitFor(GlobalThreadsScreen.getThreadItem(parentPost.id)).toBeVisible().withTimeout(timeouts.TEN_SEC);
 
         // # Tap on the thread
         await GlobalThreadsScreen.getThreadItem(parentPost.id).tap();
@@ -117,8 +136,8 @@ describe('Threads - Reply to Thread', () => {
 
         // * Verify new reply is posted
         const {post: newReplyPost} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
-        const {postListPostItem} = ThreadScreen.getPostListPostItem(newReplyPost.id, newReplyMessage);
-        await expect(postListPostItem).toBeVisible();
+        const {postListPostItem: newReplyPostItem} = ThreadScreen.getPostListPostItem(newReplyPost.id, newReplyMessage);
+        await expect(newReplyPostItem).toBeVisible();
 
         // # Go back to channel list screen
         await ThreadScreen.back();

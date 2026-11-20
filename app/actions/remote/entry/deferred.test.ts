@@ -3,11 +3,13 @@
 
 /* eslint-disable max-lines */
 
+import RNUtils from '@mattermost/rnutils';
 import {act} from '@testing-library/react-native';
 
 import {fetchMyChannelsForTeam, fetchMissingDirectChannelsInfo, type MyChannelsRequest} from '@actions/remote/channel';
 import {fetchGroupsForMember} from '@actions/remote/groups';
 import {fetchPostsForUnreadChannels} from '@actions/remote/post';
+import {fetchRoles} from '@actions/remote/role';
 import {fetchScheduledPosts} from '@actions/remote/scheduled_post';
 import {fetchTeamsThreads, updateCanJoinTeams, type MyTeamsRequest} from '@actions/remote/team';
 import {autoUpdateTimezone, updateAllUsersSince, type MyUserRequest} from '@actions/remote/user';
@@ -18,6 +20,7 @@ import {processEntryModels, processEntryModelsForDeletion} from '@queries/server
 import {deferredAppEntryActions, restDeferredAppEntryActions, testExports} from './deferred';
 
 jest.mock('@actions/remote/channel');
+jest.mock('@actions/remote/role');
 jest.mock('@actions/remote/scheduled_post');
 jest.mock('@actions/remote/team');
 jest.mock('@actions/remote/user');
@@ -42,6 +45,9 @@ describe('actions/remote/entry/deferred', () => {
 
     beforeEach(async () => {
         jest.clearAllMocks();
+
+        // The automock returns undefined, which the real action never does.
+        jest.mocked(fetchMyChannelsForTeam).mockResolvedValue({channels: [], memberships: []});
 
         DatabaseManager.getServerDatabaseAndOperator = jest.fn().mockReturnValue({
             database: {},
@@ -145,14 +151,63 @@ describe('actions/remote/entry/deferred', () => {
                 initialTeamId,
                 initialChannelId,
             );
+            await new Promise(process.nextTick);
 
             expect(fetchMissingDirectChannelsInfo).toHaveBeenCalled();
             expect(updateAllUsersSince).toHaveBeenCalledWith(serverUrl, since, false, undefined);
             expect(updateCanJoinTeams).toHaveBeenCalledWith(serverUrl);
-            expect(processEntryModelsForDeletion).toHaveBeenCalledWith({serverUrl, operator: mockOperator, teamData: defaultTeamData, chData: defaultChData});
+            expect(processEntryModelsForDeletion).toHaveBeenCalledWith({serverUrl, operator: mockOperator, teamData: defaultTeamData, chData: defaultChData, channelsFetchComplete: true});
             expect(fetchPostsForUnreadChannels).toHaveBeenCalled();
             expect(fetchGroupsForMember).toHaveBeenCalledWith(serverUrl, currentUserId, false, undefined);
             expect(fetchScheduledPosts).toHaveBeenCalledWith(serverUrl, initialTeamId, true, undefined);
+            expect(fetchRoles).toHaveBeenCalledWith(serverUrl, defaultTeamData.memberships, defaultChData.memberships, defaultMeData.user, false, true, undefined);
+            expect(RNUtils.beginDatabaseActivity).toHaveBeenCalledWith(serverUrl, 'restDeferredAppEntryActions');
+            expect(RNUtils.endDatabaseActivity).toHaveBeenCalledWith('token-1');
+        });
+
+        it('should still end the database activity when processing teams fails', async () => {
+            jest.mocked(fetchMyChannelsForTeam).mockRejectedValueOnce(new Error('test'));
+
+            await restDeferredAppEntryActions(
+                serverUrl,
+                since,
+                currentUserId,
+                currentUserLocale,
+                [],
+                defaultConfig,
+                license,
+                defaultTeamData,
+                defaultChData,
+                defaultMeData,
+                initialTeamId,
+                initialChannelId,
+            );
+            await new Promise(process.nextTick);
+
+            expect(RNUtils.beginDatabaseActivity).toHaveBeenCalledWith(serverUrl, 'restDeferredAppEntryActions');
+            expect(RNUtils.endDatabaseActivity).toHaveBeenCalledWith('token-1');
+        });
+
+        it('should not end the database activity when no token was granted', async () => {
+            jest.mocked(RNUtils.beginDatabaseActivity).mockResolvedValueOnce(null);
+
+            await restDeferredAppEntryActions(
+                serverUrl,
+                since,
+                currentUserId,
+                currentUserLocale,
+                [],
+                defaultConfig,
+                license,
+                defaultTeamData,
+                defaultChData,
+                defaultMeData,
+                initialTeamId,
+                initialChannelId,
+            );
+            await new Promise(process.nextTick);
+
+            expect(RNUtils.endDatabaseActivity).not.toHaveBeenCalled();
         });
 
         it('should handle missing data gracefully', async () => {
@@ -335,7 +390,7 @@ describe('actions/remote/entry/deferred', () => {
                 );
             });
 
-            expect(processEntryModels).toHaveBeenCalledWith(
+            expect(processEntryModels).toHaveBeenCalledWith(serverUrl,
                 expect.objectContaining({
                     teamData: expect.objectContaining({
                         teams: expect.arrayContaining([
@@ -345,7 +400,7 @@ describe('actions/remote/entry/deferred', () => {
                 }),
             );
 
-            expect(processEntryModels).toHaveBeenCalledWith(
+            expect(processEntryModels).toHaveBeenCalledWith(serverUrl,
                 expect.objectContaining({
                     teamData: expect.objectContaining({
                         teams: expect.arrayContaining([

@@ -14,24 +14,27 @@ module.exports = {
     },
     moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
     clearMocks: true,
+
+    // Jest's 5s default is shorter than the in-test waits these suites already declare
+    // (a 10s waitFor around a WatermelonDB write can never finish inside it), so a loaded
+    // CI runner kills the test before its own assertion gets a chance to run.
+    testTimeout: 30000,
     setupFilesAfterEnv: ['<rootDir>/test/setup.ts'],
     collectCoverageFrom: ['app/**/*.{js,jsx,ts,tsx}'],
     coverageReporters: ['lcov', 'text-summary', 'json-summary'],
-    testPathIgnorePatterns: ['/node_modules/'],
-    coveragePathIgnorePatterns: ['/node_modules/', '/components/', '/screens/'],
+    testPathIgnorePatterns: ['/node_modules/', '/detox/'],
+    coveragePathIgnorePatterns: ['/node_modules/', '/components/', '/screens/', '/routes/'],
     transformIgnorePatterns: [
         'node_modules/(?!' +
         '(@react-native|react-native)|' +
-        'expo-*|' +
+        'expo(?:-[^/]+)?|@expo|expo-modules-core|@react-navigation/[^/]+|uuid|' +
         '@sentry/react-native|' +
+        'react-intl|@formatjs/[^/]+|intl-messageformat|@messageformat/[^/]+|' +
         'validator|' +
         'hast-util-from-selector|hastscript|property-information|hast-util-parse-selector|space-separated-tokens|comma-separated-tokens|zwitch|' +
-        '@mattermost/calls|@voximplant/react-native-foreground-service|' +
-        '@rneui/base)',
+        '@mattermost/calls|@mattermost/rnutils|@mattermost/hardware-keyboard|@mattermost/rnshare|@mattermost/secure-pdf-viewer|@mattermost/compass-icons|' +
+        '@rneui/base|' +
+        '@shopify/flash-list|' +
+        'ratex-react-native)',
     ],
-    moduleNameMapper: {
-
-        // Force module uuid to resolve with the CJS entry point, because Jest does not support package.json.exports. See https://github.com/uuidjs/uuid/issues/451
-        uuid: require.resolve('uuid'),
-    },
 };

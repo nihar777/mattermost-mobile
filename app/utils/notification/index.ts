@@ -2,15 +2,22 @@
 // See LICENSE.txt for license information.
 
 import moment from 'moment-timezone';
-import {type IntlShape} from 'react-intl';
+import {defineMessages, type IntlShape} from 'react-intl';
 import {Alert, DeviceEventEmitter} from 'react-native';
 
 import {Events} from '@constants';
 import {NOTIFICATION_TYPE} from '@constants/push_notification';
 import {DEFAULT_LOCALE} from '@i18n';
 import PushNotifications from '@init/push_notifications';
-import {popToRoot} from '@screens/navigation';
+import {navigateToRoot} from '@screens/navigation';
 import {getIntlShape} from '@utils/general';
+
+const messages = defineMessages({
+    noChannelAccess: {
+        id: 'notification.no_channel_access',
+        defaultMessage: 'You do not currently have access to the channel this message belongs to.',
+    },
+});
 
 export const convertToNotificationData = (notification: Notification, tapped = true): NotificationWithData => {
     if (!notification.payload) {
@@ -50,7 +57,9 @@ export const convertToNotificationData = (notification: Notification, tapped = t
     return notificationData;
 };
 
-export const notificationError = (intl: IntlShape, type: 'Team' | 'Channel' | 'Connection' | 'Post') => {
+export type NotificationErrorType = 'Team' | 'Channel' | 'ChannelAccess' | 'Connection' | 'Post';
+
+export const notificationError = (intl: IntlShape, type: NotificationErrorType) => {
     const title = intl.formatMessage({id: 'notification.message_not_found', defaultMessage: 'Message not found'});
     let message;
     switch (type) {
@@ -59,6 +68,9 @@ export const notificationError = (intl: IntlShape, type: 'Team' | 'Channel' | 'C
                 id: 'notification.not_channel_member',
                 defaultMessage: 'This message belongs to a channel where you are not a member.',
             });
+            break;
+        case 'ChannelAccess':
+            message = intl.formatMessage(messages.noChannelAccess);
             break;
         case 'Team':
             message = intl.formatMessage({
@@ -81,10 +93,10 @@ export const notificationError = (intl: IntlShape, type: 'Team' | 'Channel' | 'C
     }
 
     Alert.alert(title, message);
-    popToRoot();
+    navigateToRoot();
 };
 
-export const emitNotificationError = (type: 'Team' | 'Channel' | 'Post' | 'Connection') => {
+export const emitNotificationError = (type: NotificationErrorType) => {
     const req = setTimeout(() => {
         DeviceEventEmitter.emit(Events.NOTIFICATION_ERROR, type);
         clearTimeout(req);

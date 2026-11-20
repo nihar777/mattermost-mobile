@@ -6,14 +6,16 @@ import {DeviceEventEmitter, Platform} from 'react-native';
 
 import {CollectNetworkMetrics} from '@assets/config.json';
 import {Events} from '@constants';
-import {setServerCredentials} from '@init/credentials';
+import {setPreauthSecret, setServerCredentials} from '@init/credentials';
 import NetworkPerformanceManager from '@managers/network_performance_manager';
 import PerformanceMetricsManager from '@managers/performance_metrics_manager';
 import {NetworkRequestMetrics} from '@managers/performance_metrics_manager/constant';
-import {isErrorWithStatusCode} from '@utils/errors';
+import {getFullErrorMessage, isErrorWithStatusCode, preauthSecretInvalidMessage} from '@utils/errors';
 import {getFormattedFileSize} from '@utils/file';
-import {logDebug, logInfo} from '@utils/log';
+import {isPreauthRejection} from '@utils/headers';
+import {logDebug, logInfo, logWarning} from '@utils/log';
 import {semverFromServerVersion} from '@utils/server';
+import {cleanUrlForLogging, isSecureUrl} from '@utils/url';
 
 import * as ClientConstants from './constants';
 import ClientError from './error';
@@ -74,16 +76,52 @@ export default class ClientTracking {
     }
 
     setClientCredentials(bearerToken: string, preauthSecret?: string) {
-        this.requestHeaders[ClientConstants.HEADER_AUTH] = `${ClientConstants.HEADER_BEARER} ${bearerToken}`;
+        if (bearerToken) {
+            this.requestHeaders[ClientConstants.HEADER_AUTH] = `${ClientConstants.HEADER_BEARER} ${bearerToken}`;
+        }
 
-        if (preauthSecret) {
+        // Undefined means leave the in-memory header alone (token-only refresh must not drop it).
+        // Clear the header with setPreauthSecretHeader(''); clear storage with removePreauthSecret.
+        // The secret is still persisted below, but it is only sent over TLS.
+        if (preauthSecret && isSecureUrl(this.apiClient.baseUrl)) {
             this.requestHeaders[ClientConstants.HEADER_X_MATTERMOST_PREAUTH_SECRET] = preauthSecret;
+        }
+
+        // Nothing is persisted before there is a session: an unauthenticated ping must not store a
+        // secret the server has not accepted yet. Sequenced so the credential the secret attaches to
+        // already exists in the cache.
+        if (bearerToken) {
+            setServerCredentials(this.apiClient.baseUrl, bearerToken).then(() => {
+                if (preauthSecret) {
+                    return setPreauthSecret(this.apiClient.baseUrl, preauthSecret);
+                }
+
+                return undefined;
+            }).catch((e) => {
+                logWarning('ClientTracking.setClientCredentials: persist failed', getFullErrorMessage(e));
+            });
+        }
+    }
+
+    /**
+     * Updates the pre-auth secret on the live native session. Passing an empty string clears it.
+     * The secret is only sent over TLS, so it is cleared on an insecure base URL.
+     *
+     * Deliberately not implemented by invalidating and recreating the client: tearing down a
+     * URLSession that still has requests in flight aborts the process from CFNetwork with
+     * "Task created in a session that has been invalidated".
+     */
+    setPreauthSecretHeader(preauthSecret: string) {
+        const headerValue = isSecureUrl(this.apiClient.baseUrl) ? preauthSecret : '';
+        if (headerValue) {
+            this.requestHeaders[ClientConstants.HEADER_X_MATTERMOST_PREAUTH_SECRET] = headerValue;
         } else {
-            // Remove shared password header when undefined
             delete this.requestHeaders[ClientConstants.HEADER_X_MATTERMOST_PREAUTH_SECRET];
         }
 
-        setServerCredentials(this.apiClient.baseUrl, bearerToken, preauthSecret);
+        return this.apiClient.addHeaders({
+            [ClientConstants.HEADER_X_MATTERMOST_PREAUTH_SECRET]: headerValue,
+        });
     }
 
     setCSRFToken(csrfToken: string) {
@@ -130,24 +168,6 @@ export default class ClientTracking {
         }
         group.totalSize += metrics?.size ?? 0;
         group.totalCompressedSize += metrics?.compressedSize ?? 0;
-    }
-
-    startNetworkPerformanceTracking(url: string): string | undefined {
-        return NetworkPerformanceManager.startRequestTracking(this.apiClient.baseUrl, url);
-    }
-
-    completeNetworkPerformanceTracking(requestId: string | undefined, url: string, metrics: ClientResponseMetrics | undefined) {
-        if (!requestId || !metrics) {
-            return;
-        }
-        NetworkPerformanceManager.completeRequestTracking(this.apiClient.baseUrl, requestId, metrics);
-    }
-
-    cancelNetworkPerformanceTracking(requestId: string | undefined) {
-        if (!requestId) {
-            return;
-        }
-        NetworkPerformanceManager.cancelRequestTracking(this.apiClient.baseUrl, requestId);
     }
 
     getAverageLatency(groupLabel: RequestGroupLabel): number {
@@ -402,15 +422,16 @@ export default class ClientTracking {
             this.incrementRequestCount(groupLabel);
         }
 
-        const performanceRequestId = this.startNetworkPerformanceTracking(url);
+        const performanceRequestId = NetworkPerformanceManager.startRequestTracking(this.apiClient.baseUrl, url);
 
         let response: ClientResponse;
         try {
             response = await request!(url, this.buildRequestOptions(options));
         } catch (error) {
-            this.cancelNetworkPerformanceTracking(performanceRequestId);
+            NetworkPerformanceManager.cancelRequestTracking(this.apiClient.baseUrl, performanceRequestId);
             const response_error = error as ClientError;
             const status_code = isErrorWithStatusCode(error) ? error.status_code : undefined;
+            logDebug('doFetchWithTracking: request failed', 'method', method, 'status_code', status_code, 'url', cleanUrlForLogging(this.apiClient.baseUrl, url));
             throw new ClientError(this.apiClient.baseUrl, {
                 message: 'Received invalid response from the server.',
                 intl: defineMessage({
@@ -431,7 +452,7 @@ export default class ClientTracking {
         if (groupLabel && CollectNetworkMetrics) {
             this.trackRequest(groupLabel, url, response.metrics);
         }
-        this.completeNetworkPerformanceTracking(performanceRequestId, url, response.metrics);
+        NetworkPerformanceManager.completeRequestTracking(this.apiClient.baseUrl, performanceRequestId, response.metrics);
         const serverVersion = semverFromServerVersion(
             headers[ClientConstants.HEADER_X_VERSION_ID] || headers[ClientConstants.HEADER_X_VERSION_ID.toLowerCase()],
         );
@@ -455,9 +476,11 @@ export default class ClientTracking {
 
         throw new ClientError(this.apiClient.baseUrl, {
             message: response.data?.message as string || `Response with status code ${response.code}`,
+            intl: isPreauthRejection(response.code, headers) ? preauthSecretInvalidMessage : undefined,
             server_error_id: response.data?.id as string,
             status_code: response.code,
             url,
+            headers,
         });
     };
 }

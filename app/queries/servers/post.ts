@@ -2,16 +2,19 @@
 // See LICENSE.txt for license information.
 
 import {Database, Model, Q, Query} from '@nozbe/watermelondb';
-import {of as of$, combineLatestWith} from 'rxjs';
-import {switchMap, distinctUntilChanged} from 'rxjs/operators';
+import {of as of$, combineLatestWith, combineLatest} from 'rxjs';
+import {map, switchMap, distinctUntilChanged} from 'rxjs/operators';
 
 import {MM_TABLES} from '@constants/database';
+import {SKU_SHORT_NAME} from '@constants/license';
+import DatabaseManager from '@database/manager';
+import EphemeralStore from '@store/ephemeral_store';
 import {logDebug, logWarning} from '@utils/log';
 import {updatePermalinkMetadata} from '@utils/permalink_sync';
 
 import {queryGroupsByNames} from './group';
 import {querySavedPostsPreferences} from './preference';
-import {getConfigValue, observeConfigBooleanValue} from './system';
+import {getConfigValue, observeConfigBooleanValue, observeConfigIntValue, observeIsMinimumLicenseTier} from './system';
 import {queryUsersByUsername, observeUser, observeCurrentUser} from './user';
 
 import type PostModel from '@typings/database/models/servers/post';
@@ -19,6 +22,9 @@ import type PostInChannelModel from '@typings/database/models/servers/posts_in_c
 import type PostsInThreadModel from '@typings/database/models/servers/posts_in_thread';
 
 const {SERVER: {POST, POSTS_IN_CHANNEL, POSTS_IN_THREAD}} = MM_TABLES;
+
+const DEFAULT_BURN_ON_READ_DURATION_SECONDS = '600';
+const DEFAULT_BURN_ON_READ_MAXIMUM_TTL_SECONDS = '604800';
 
 export const prepareDeletePost = async (post: PostModel): Promise<Model[]> => {
     const preparedModels: Model[] = [post.prepareDestroyPermanently()];
@@ -87,13 +93,24 @@ export const observePostAuthor = (database: Database, post: PostModel) => {
     return observeUser(database, post.userId);
 };
 
-export const observePostSaved = (database: Database, postId: string) => {
-    return querySavedPostsPreferences(database, postId).
+export const observePostSaved = (database: Database, postId: string, serverUrl?: string) => {
+    const savedPreference$ = querySavedPostsPreferences(database, postId).
         observeWithColumns(['value']).pipe(
             switchMap(
                 (pref) => of$(Boolean(pref[0]?.value === 'true')),
             ),
+            distinctUntilChanged(),
         );
+
+    const resolvedServerUrl = serverUrl || DatabaseManager.getServerUrlForDatabase(database);
+    if (!resolvedServerUrl) {
+        return savedPreference$;
+    }
+
+    return combineLatest([savedPreference$, EphemeralStore.observeRecentlyUnsavedSavedPost(resolvedServerUrl, postId)]).pipe(
+        map(([isSaved, isRecentlyUnsaved]) => (isRecentlyUnsaved ? false : isSaved)),
+        distinctUntilChanged(),
+    );
 };
 
 export const queryPostsInChannel = (database: Database, channelId: string) => {
@@ -122,6 +139,15 @@ export const queryPostReplies = (database: Database, rootId: string, excludeDele
         clauses.push(Q.where('delete_at', Q.eq(0)));
     }
     return database.get<PostModel>(POST).query(...clauses);
+};
+
+export const queryNewestThreadReplies = (database: Database, rootId: string, limit: number) => {
+    return database.get<PostModel>(POST).query(
+        Q.where('root_id', rootId),
+        Q.where('delete_at', Q.eq(0)),
+        Q.sortBy('create_at', Q.desc),
+        Q.take(limit),
+    );
 };
 
 export const getRecentPostsInThread = async (database: Database, rootId: string) => {
@@ -184,7 +210,22 @@ export const getRecentPostsInChannel = async (database: Database, channelId: str
     return [];
 };
 
-export const queryPostsById = (database: Database, postIds: string[], sort?: Q.SortOrder) => {
+/**
+ * The server-known post immediately newer than `createAt` in a channel, so that "posts before it"
+ * starts at the post at `createAt`. Pending posts are skipped: the server does not know their ids.
+ */
+export const getNewerPostInChannel = async (database: Database, channelId: string, createAt: number) => {
+    const posts = await database.get<PostModel>(POST).query(
+        Q.where('channel_id', channelId),
+        Q.where('create_at', Q.gt(createAt)),
+        Q.where('delete_at', Q.eq(0)),
+        Q.sortBy('create_at', Q.asc),
+        Q.take(5),
+    ).fetch();
+    return posts.find((p) => p.pendingPostId !== p.id);
+};
+
+export const queryPostsById =(database: Database, postIds: string[], sort?: Q.SortOrder) => {
     const clauses: Q.Clause[] = [Q.where('id', Q.oneOf(postIds))];
     if (sort) {
         clauses.push(Q.sortBy('create_at', sort));
@@ -224,7 +265,11 @@ export const queryPinnedPostsInChannel = (database: Database, channelId: string)
             Q.where('channel_id', channelId),
             Q.where('is_pinned', Q.eq(true)),
         ),
-        Q.sortBy('create_at', Q.asc),
+
+        // Newest-first, matching queryPostsInChannel. selectOrderedPosts (the
+        // consumer via observePinnedPostsInChannel) walks the array from the end
+        // backwards expecting oldest->newest, so it requires descending input.
+        Q.sortBy('create_at', Q.desc),
     );
 };
 
@@ -232,11 +277,22 @@ export const observePinnedPostsInChannel = (database: Database, channelId: strin
     return queryPinnedPostsInChannel(database, channelId).observe();
 };
 
-export const observeSavedPostsByIds = (database: Database, postIds: string[]) => {
-    return querySavedPostsPreferences(database).extend(
+export const observeSavedPostsByIds = (database: Database, postIds: string[], serverUrl?: string) => {
+    const savedPostIds = querySavedPostsPreferences(database).extend(
         Q.where('name', Q.oneOf(postIds)),
     ).observeWithColumns(['name']).pipe(
         switchMap((prefs) => of$(new Set(prefs.map((p) => p.name)))),
+    );
+
+    const resolvedServerUrl = serverUrl || DatabaseManager.getServerUrlForDatabase(database);
+    if (!resolvedServerUrl) {
+        return savedPostIds;
+    }
+
+    return combineLatest([savedPostIds, EphemeralStore.observeRecentlyUnsavedSavedPosts(resolvedServerUrl)]).pipe(
+        map(([currentSavedPostIds, recentlyUnsavedSavedPosts]) => {
+            return new Set([...currentSavedPostIds].filter((postId) => !recentlyUnsavedSavedPosts.has(postId)));
+        }),
     );
 };
 
@@ -252,6 +308,32 @@ export const getIsPostAcknowledgementsEnabled = async (database: Database) => {
 
 export const observeIsPostPriorityEnabled = (database: Database) => {
     return observeConfigBooleanValue(database, 'PostPriority');
+};
+
+export const observeIsBoREnabled = (database: Database) => {
+    const featureEnabled = observeConfigBooleanValue(database, 'EnableBurnOnRead');
+    const licenseValid = observeIsMinimumLicenseTier(database, SKU_SHORT_NAME.EnterpriseAdvanced);
+
+    return combineLatest([featureEnabled, licenseValid]).pipe(
+        switchMap(([enabled, licensed]) => of$(enabled && licensed)),
+    );
+};
+
+export const observeBoRConfig = (database: Database) => {
+    const borDurationSecondsObservable = observeConfigIntValue(database, 'BurnOnReadDurationSeconds');
+    const maxBoRDurationSecondsStringObservable = observeConfigIntValue(database, 'BurnOnReadMaximumTimeToLiveSeconds');
+
+    // merge all observables and return single observable of object with both values
+    return combineLatest([borDurationSecondsObservable, maxBoRDurationSecondsStringObservable]).pipe(
+        switchMap(([borDurationSeconds, borMaximumTimeToLiveSeconds]) => {
+            const borConfig = {
+                enabled: false,
+                borDurationSeconds: borDurationSeconds || parseInt(DEFAULT_BURN_ON_READ_DURATION_SECONDS, 10),
+                borMaximumTimeToLiveSeconds: borMaximumTimeToLiveSeconds || parseInt(DEFAULT_BURN_ON_READ_MAXIMUM_TTL_SECONDS, 10),
+            };
+            return of$(borConfig);
+        }),
+    );
 };
 
 export const observeIsPostAcknowledgementsEnabled = (database: Database) => {
@@ -368,4 +450,26 @@ export const syncPermalinkPreviewsForEditedPost = async (
         logWarning('Error syncing permalink previews for edited post:', error);
         return [];
     }
+};
+
+// Returns the create_at of the nth post in channelId that is strictly older
+// than anchor (sorted descending). Returns undefined when fewer than n such
+// posts exist
+export const createAtOfNthPostOlderThan = async (
+    database: Database,
+    channelId: string,
+    anchor: number,
+    n: number,
+): Promise<number | undefined> => {
+    const posts = await database.get<PostModel>(POST).query(
+        Q.where('channel_id', Q.eq(channelId)),
+        Q.where('create_at', Q.lt(anchor)),
+        Q.where('delete_at', Q.eq(0)),
+        Q.sortBy('create_at', Q.desc),
+        Q.take(n),
+    ).fetch();
+    if (posts.length < n) {
+        return undefined;
+    }
+    return posts[posts.length - 1].createAt;
 };

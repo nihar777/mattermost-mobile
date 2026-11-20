@@ -4,7 +4,6 @@
 import {useHardwareKeyboardEvents} from '@mattermost/hardware-keyboard';
 import {useIsFocused, useNavigation} from '@react-navigation/native';
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
-import {Freeze} from 'react-freeze';
 import {defineMessage, useIntl} from 'react-intl';
 import {FlatList, type LayoutChangeEvent, Platform, type ViewStyle, KeyboardAvoidingView, Keyboard, StyleSheet} from 'react-native';
 import Animated, {useAnimatedStyle, useDerivedValue, withTiming, type AnimatedStyle} from 'react-native-reanimated';
@@ -18,15 +17,17 @@ import Loading from '@components/loading';
 import NavigationHeader from '@components/navigation_header';
 import RoundedHeaderContext from '@components/rounded_header_context';
 import {Screens} from '@constants';
+import {SCREENS_AS_BOTTOM_SHEET} from '@constants/screens';
 import {ALL_TEAMS_ID} from '@constants/team';
 import {BOTTOM_TAB_HEIGHT} from '@constants/view';
 import {useServerUrl} from '@context/server';
 import {useTheme} from '@context/theme';
+import useAndroidHomeTabBackHandler from '@hooks/android_home_tab_back_handler';
 import {useKeyboardHeight} from '@hooks/device';
 import useDidUpdate from '@hooks/did_update';
 import {useCollapsibleHeader} from '@hooks/header';
 import useTabs from '@hooks/use_tabs';
-import NavigationStore from '@store/navigation_store';
+import {useCurrentScreen} from '@store/navigation_store';
 import {type FileFilter, FileFilters, filterFileExtensions} from '@utils/file';
 import {TabTypes} from '@utils/search';
 
@@ -38,8 +39,7 @@ import type {SearchRef} from '@components/search';
 import type PostModel from '@typings/database/models/servers/post';
 import type TeamModel from '@typings/database/models/servers/team';
 
-const EDGES: Edge[] = ['bottom', 'left', 'right'];
-const AnimatedFlatList = Animated.createAnimatedComponent(FlatList);
+const EDGES: Edge[] = ['left', 'right'];
 
 const emptyFileResults: FileInfo[] = [];
 const emptyPosts: PostModel[] = [];
@@ -104,6 +104,13 @@ const SearchScreen = ({teamId, teams, crossTeamSearchEnabled}: Props) => {
     const theme = useTheme();
     const insets = useSafeAreaInsets();
     const keyboardHeight = useKeyboardHeight();
+    const currentScreen = useCurrentScreen();
+    const isBottomSheetOpen = currentScreen && SCREENS_AS_BOTTOM_SHEET.has(currentScreen);
+
+    const isPemalinkScreen = currentScreen === Screens.PERMALINK;
+    const isGalleryScreen = currentScreen === Screens.GALLERY;
+
+    useAndroidHomeTabBackHandler(Screens.SEARCH);
 
     const stateIndex = nav.getState()?.index;
     const serverUrl = useServerUrl();
@@ -111,6 +118,7 @@ const SearchScreen = ({teamId, teams, crossTeamSearchEnabled}: Props) => {
 
     const clearRef = useRef<boolean>(false);
     const cancelRef = useRef<boolean>(false);
+    const searchRequestRef = useRef<number>(0);
     const searchRef = useRef<SearchRef>(null);
     const processedSearchTermRef = useRef<string>('');
 
@@ -138,7 +146,11 @@ const SearchScreen = ({teamId, teams, crossTeamSearchEnabled}: Props) => {
 
     const onSnap = useCallback((offset: number, animated = true) => {
         scrollRef.current?.scrollToOffset({offset, animated});
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollRef is a ref object, so its reference should not change between renders
+
+    // scrollRef is a ref object, so its reference should not change between renders
+    // Also, adding it to the dependency creates a use before define error, circular
+    // with the useCollapsibleHeader hook call later.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     const onSnapWithTimeout = useCallback((offset: number, animated = true) => {
@@ -160,6 +172,9 @@ const SearchScreen = ({teamId, teams, crossTeamSearchEnabled}: Props) => {
     } = useCollapsibleHeader<FlatList>(true, onSnap);
 
     const resetToInitial = useCallback(() => {
+        // Invalidate any search still in flight so its completion cannot re-open the
+        // results view over the cleared input.
+        searchRequestRef.current += 1;
         setShowResults(false);
         setSearchValue('');
         setLastSearchedValue('');
@@ -209,14 +224,26 @@ const SearchScreen = ({teamId, teams, crossTeamSearchEnabled}: Props) => {
         hideHeader(true);
         handleLoading(true);
         setLastSearchedValue(term);
+        searchRequestRef.current += 1;
+        const requestId = searchRequestRef.current;
 
-        if (newSearchTeamId !== ALL_TEAMS_ID) {
-            addSearchToTeamSearchHistory(serverUrl, newSearchTeamId, term);
-        }
+        const persistHistory = newSearchTeamId === ALL_TEAMS_ID
+            ? undefined
+            : addSearchToTeamSearchHistory(serverUrl, newSearchTeamId, term);
         const [postResults, {files, channels}] = await Promise.all([
             searchPosts(serverUrl, newSearchTeamId, searchParams),
             searchFiles(serverUrl, newSearchTeamId, searchParams),
+            persistHistory,
         ]);
+
+        if (requestId !== searchRequestRef.current) {
+            // The input was cleared or cancelled, or a newer search started, while this one
+            // was in flight. Applying these results would put the results view back over an
+            // empty input and hide the recent searches list.
+            setLoading(false);
+            setResultsLoading(false);
+            return;
+        }
 
         setFileInfos(files?.length ? files : emptyFileResults);
         if (postResults.order) {
@@ -317,6 +344,10 @@ const SearchScreen = ({teamId, teams, crossTeamSearchEnabled}: Props) => {
     ]);
 
     const animated = useAnimatedStyle(() => {
+        if (isBottomSheetOpen || isPemalinkScreen || isGalleryScreen) {
+            return {};
+        }
+
         if (isFocused) {
             return {
                 opacity: withTiming(1, {duration: 150}),
@@ -330,7 +361,7 @@ const SearchScreen = ({teamId, teams, crossTeamSearchEnabled}: Props) => {
             flex: 1,
             transform: [{translateX: withTiming((stateIndex || 0) < searchScreenIndex ? 25 : -25, {duration: 150})}],
         };
-    }, [isFocused, stateIndex]);
+    }, [isFocused, isBottomSheetOpen, isPemalinkScreen, isGalleryScreen, stateIndex]);
 
     const headerTopStyle = useAnimatedStyle(() => ({
         top: lockValue || headerHeight.value,
@@ -367,12 +398,19 @@ const SearchScreen = ({teamId, teams, crossTeamSearchEnabled}: Props) => {
     }, [unlock, onSnapWithTimeout]);
 
     useEffect(() => {
-        if (searchTerm && searchTerm !== processedSearchTermRef.current) {
-            processedSearchTermRef.current = searchTerm;
-            clearInputs();
-            setSearchValue(searchTerm);
-            handleSearch(searchTeamId, searchTerm);
+        if (!searchTerm || searchTerm === processedSearchTermRef.current) {
+            return undefined;
         }
+
+        processedSearchTermRef.current = searchTerm;
+        clearInputs();
+        setSearchValue(searchTerm);
+
+        const raf = requestAnimationFrame(() => {
+            handleSearch(searchTeamId, searchTerm);
+        });
+
+        return () => cancelAnimationFrame(raf);
     }, [handleSearch, clearInputs, searchTeamId, searchTerm]);
 
     useDidUpdate(() => {
@@ -387,6 +425,11 @@ const SearchScreen = ({teamId, teams, crossTeamSearchEnabled}: Props) => {
     }, [isFocused]);
 
     useDidUpdate(() => {
+        if (searchTerm && searchTerm !== lastSearchedValue) {
+            // searchTerm changed (case for hashtag tap) — useEffect handles it; skip to avoid double search
+            return;
+        }
+
         if (isFocused && lastSearchedValue && showResults) {
             // requestAnimationFrame for smooth UI updates
             requestAnimationFrame(() => {
@@ -400,18 +443,17 @@ const SearchScreen = ({teamId, teams, crossTeamSearchEnabled}: Props) => {
     }, [isFocused]);
 
     const handleEnterPressed = useCallback(() => {
-        const topScreen = NavigationStore.getVisibleScreen();
-        if (topScreen === Screens.HOME && isFocused) {
+        if (isFocused && searchValue.trim().length > 0) {
             searchRef.current?.blur();
             onSubmit();
         }
-    }, [isFocused, onSubmit]);
+    }, [isFocused, onSubmit, searchValue]);
 
     const events = useMemo(() => ({onEnterPressed: handleEnterPressed}), [handleEnterPressed]);
     useHardwareKeyboardEvents(events);
 
     return (
-        <Freeze freeze={!isFocused}>
+        <>
             <SafeAreaView
                 style={styles.flex}
                 edges={EDGES}
@@ -458,7 +500,7 @@ const SearchScreen = ({teamId, teams, crossTeamSearchEnabled}: Props) => {
                             }
                         </Animated.View>
                         {!showResults &&
-                        <AnimatedFlatList
+                        <Animated.FlatList
                             onLayout={onFlatLayout}
                             data={dummyData}
                             contentContainerStyle={initialContainerStyle}
@@ -504,7 +546,7 @@ const SearchScreen = ({teamId, teams, crossTeamSearchEnabled}: Props) => {
                 teamId={searchTeamId}
             />
             }
-        </Freeze>
+        </>
     );
 };
 

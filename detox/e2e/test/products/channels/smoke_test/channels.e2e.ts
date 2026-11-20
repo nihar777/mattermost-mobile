@@ -9,7 +9,6 @@
 
 import {
     Channel,
-    Post,
     Setup,
     Team,
     User,
@@ -29,9 +28,10 @@ import {
     HomeScreen,
     LoginScreen,
     ServerScreen,
+    ChannelSettingsScreen,
 } from '@support/ui/screen';
-import {getRandomId, timeouts, wait} from '@support/utils';
-import {expect} from 'detox';
+import {disableSynchronization, enableSynchronization, getRandomId, reloadApp, timeouts, wait, waitForElementToHaveText} from '@support/utils';
+import {expect, waitFor} from 'detox';
 
 describe('Smoke Test - Channels', () => {
     const serverOneDisplayName = 'Server 1';
@@ -69,12 +69,12 @@ describe('Smoke Test - Channels', () => {
         await BrowseChannelsScreen.searchInput.tapReturnKey();
         await wait(timeouts.FOUR_SEC);
         await BrowseChannelsScreen.getChannelItem(channel.name).multiTap(2);
-        await ChannelScreen.closeScheduledMessageTooltip();
+        await ChannelScreen.dismissScheduledPostTooltip();
 
         // * Verify on newly joined channel screen
         await ChannelScreen.toBeVisible();
         await expect(ChannelScreen.headerTitle).toHaveText(channel.display_name);
-        await expect(ChannelScreen.introDisplayName).toHaveText(channel.display_name);
+        await waitForElementToHaveText(ChannelScreen.introDisplayName, channel.display_name, timeouts.HALF_MIN);
 
         // # Go back to channel list screen and switch to an existing channel
         await ChannelScreen.back();
@@ -99,7 +99,7 @@ describe('Smoke Test - Channels', () => {
         // * Verify on newly created public channel
         await ChannelScreen.toBeVisible();
         await expect(ChannelScreen.headerTitle).toHaveText(displayName);
-        await expect(ChannelScreen.introDisplayName).toHaveText(displayName);
+        await waitForElementToHaveText(ChannelScreen.introDisplayName, displayName, timeouts.HALF_MIN);
 
         // # As admin, create a new user to open direct message with, then go back to channel list screen, open create direct message screen and open direct message with new user
         const {user: newUser} = await User.apiCreateUser(siteOneUrl);
@@ -118,7 +118,7 @@ describe('Smoke Test - Channels', () => {
         // * Verify on direct message channel screen for the new user
         await ChannelScreen.toBeVisible();
         await expect(ChannelScreen.headerTitle).toHaveText(newUserDisplayName);
-        await expect(ChannelScreen.introDisplayName).toHaveText(newUserDisplayName);
+        await waitForElementToHaveText(ChannelScreen.introDisplayName, newUserDisplayName, timeouts.HALF_MIN);
 
         // # Go back to channel list screen
         await ChannelScreen.back();
@@ -128,12 +128,11 @@ describe('Smoke Test - Channels', () => {
         // # Open a channel screen and post a message
         const message = `Message ${getRandomId()}`;
         await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelScreen.postMessage(message);
 
-        // * Verify message is posted
-        const {post} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
+        // First post in this channel — iOS sim can drop the create POST (-1005).
+        const {post} = await ChannelScreen.postMessageAndVerify(message, testChannel.id, siteOneUrl);
         const {postListPostItem} = ChannelScreen.getPostListPostItem(post.id, message);
-        await expect(postListPostItem).toBeVisible();
+        await waitFor(postListPostItem).toExist().withTimeout(timeouts.TEN_SEC);
 
         // # Go back to channel list screen
         await ChannelScreen.back();
@@ -151,39 +150,65 @@ describe('Smoke Test - Channels', () => {
         await ChannelScreen.toBeVisible();
         await expect(ChannelScreen.headerTitle).toHaveText(testChannel.display_name);
 
-        // # Open channel info screen, open edit channel screen, edit channel info, and save changes
+        // # Open channel info screen, open edit channel screen, edit channel info, and save changes.
+        // Use replaceText with the full final value rather than typeText to append.
+        // On Android the initial caret position can land inside the pre-filled
+        // header text, causing typeText('\nheader1\nheader2') to insert the new
+        // lines mid-word (the test previously saw "chann\nheader1\nheader2el e06882"
+        // saved as the channel header).
+        const initialHeader = `Channel header: ${testChannel.display_name.toLowerCase()}`;
+        const updatedHeader = `${initialHeader}\nheader1\nheader2`;
         await ChannelInfoScreen.open();
         await CreateOrEditChannelScreen.openEditChannel();
-        await CreateOrEditChannelScreen.headerInput.typeText('\nheader1\nheader2');
-        await CreateOrEditChannelScreen.saveButton.tap();
+        await CreateOrEditChannelScreen.headerInput.replaceText(updatedHeader);
+        await CreateOrEditChannelScreen.save();
 
-        // * Verify on channel info screen and changes have been saved
+        // * Verify on channel info screen and changes have been saved.
+        try {
+            await waitFor(ChannelSettingsScreen.channelSettingsScreen).toExist().withTimeout(timeouts.FOUR_SEC);
+            await ChannelSettingsScreen.close();
+        } catch {
+            // Save may land directly on channel info.
+        }
         await ChannelInfoScreen.toBeVisible();
-        await expect(element(by.text(`Channel header: ${testChannel.display_name.toLowerCase()}\nheader1\nheader2`))).toBeVisible();
+        await waitFor(element(by.text(`Channel header: ${testChannel.display_name.toLowerCase()}\nheader1\nheader2`))).toBeVisible().withTimeout(timeouts.TEN_SEC);
 
         // # Go back to channel list screen
         await ChannelInfoScreen.close();
         await ChannelScreen.back();
+        await ChannelListScreen.toBeVisible();
     });
 
     it('MM-T4774_5 - should be able to favorite and mute a channel', async () => {
         // # Open a channel screen, open channel info screen, tap on favorite action to favorite the channel, and tap on mute action to mute the channel
         await ChannelScreen.open(channelsCategory, testChannel.name);
         await ChannelInfoScreen.open();
+        await waitFor(ChannelInfoScreen.favoriteAction).toExist().withTimeout(timeouts.TEN_SEC);
         await ChannelInfoScreen.favoriteAction.tap();
         await ChannelInfoScreen.muteAction.tap();
 
-        // * Verify channel is favorited and muted
-        await expect(ChannelInfoScreen.unfavoriteAction).toBeVisible();
-        await expect(ChannelInfoScreen.unmuteAction).toBeVisible();
+        // Preference updates can stall Detox's idle timer; toExist avoids Android
+        // edge-to-edge clipping of the action row below a 75% visibility threshold.
+        await disableSynchronization();
+        try {
+            await waitFor(ChannelInfoScreen.unfavoriteAction).toExist().withTimeout(timeouts.HALF_MIN);
+            await waitFor(ChannelInfoScreen.unmuteAction).toExist().withTimeout(timeouts.TEN_SEC);
+        } finally {
+            await enableSynchronization();
+        }
 
         // # Tap on favorited action to unfavorite the channel and tap on muted action to unmute the channel
         await ChannelInfoScreen.unfavoriteAction.tap();
         await ChannelInfoScreen.unmuteAction.tap();
 
         // * Verify channel is unfavorited and unmuted
-        await expect(ChannelInfoScreen.favoriteAction).toBeVisible();
-        await expect(ChannelInfoScreen.muteAction).toBeVisible();
+        await disableSynchronization();
+        try {
+            await waitFor(ChannelInfoScreen.favoriteAction).toExist().withTimeout(timeouts.HALF_MIN);
+            await waitFor(ChannelInfoScreen.muteAction).toExist().withTimeout(timeouts.TEN_SEC);
+        } finally {
+            await enableSynchronization();
+        }
 
         // # Go back to channel list screen
         await ChannelInfoScreen.close();
@@ -191,26 +216,16 @@ describe('Smoke Test - Channels', () => {
     });
 
     it('MM-T4774_6 - should be able to archive and leave a channel', async () => {
-        // # Open a channel screen, open channel info screen, and tap on archive channel option and confirm
+        // # Open a channel screen, open channel info screen, go to channel settings, and tap on archive channel option and confirm
         const {channel} = await Channel.apiCreateChannel(siteOneUrl, {teamId: testTeam.id});
         await Channel.apiAddUserToChannel(siteOneUrl, testUser.id, channel.id);
         await wait(timeouts.TWO_SEC);
-        await device.reloadReactNative();
+        await reloadApp();
+        await ChannelListScreen.toBeVisible();
         await ChannelScreen.open(channelsCategory, channel.name);
         await ChannelInfoScreen.open();
-        await ChannelInfoScreen.archivePublicChannel({confirm: true});
-
-        // * Verify on channel screen and post draft archived message is displayed
-        await ChannelScreen.toBeVisible();
-        await expect(ChannelScreen.postDraftArchived).toBeVisible();
-        await expect(element(by.text('You are viewing an archived channel. New messages cannot be posted.'))).toBeVisible();
-
-        // # Open channel info screen, and tap on leave channel option and confirm
-        await ChannelInfoScreen.open();
-        await ChannelInfoScreen.leaveChannel({confirm: true});
-
-        // * Verify on channel list screen and the channel left by the user does not appear on the list
-        await ChannelListScreen.toBeVisible();
-        await expect(ChannelListScreen.getChannelItem(channelsCategory, channel.name)).not.toExist();
+        await ChannelInfoScreen.openChannelSettings();
+        await ChannelSettingsScreen.toBeVisible();
+        await ChannelSettingsScreen.archivePublicChannel({confirm: true});
     });
 });

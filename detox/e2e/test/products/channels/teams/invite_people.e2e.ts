@@ -19,8 +19,8 @@ import {
     LoginScreen,
     ServerScreen,
 } from '@support/ui/screen';
-import {timeouts} from '@support/utils';
-import {expect} from 'detox';
+import {timeouts, wait} from '@support/utils';
+import {expect, waitFor} from 'detox';
 
 describe('Teams - Invite', () => {
     const serverOneDisplayName = 'Server 1';
@@ -36,8 +36,14 @@ describe('Teams - Invite', () => {
         testTeam = team;
         testUser = user;
         const {user: user1} = await User.apiCreateUser(siteOneUrl, {prefix: 'i'});
+        if (!user1?.id) {
+            throw new Error('[beforeAll] Failed to create testUser1');
+        }
         testUser1 = user1;
         const {user: user2} = await User.apiCreateUser(siteOneUrl);
+        if (!user2?.id) {
+            throw new Error('[beforeAll] Failed to create testUser2');
+        }
         testUser2 = user2;
         await Team.apiAddUserToTeam(siteOneUrl, testUser2.id, testTeam.id);
 
@@ -47,26 +53,30 @@ describe('Teams - Invite', () => {
     });
 
     beforeEach(async () => {
-        await device.reloadReactNative();
-
-        // * Verify on channel list screen
+        // Avoid device.reloadReactNative() — CI 59ec6ae iOS: T5360 passed then
+        // reload disconnected Detox and killed T5361–T5365.
         await ChannelListScreen.toBeVisible();
+        await wait(timeouts.TWO_SEC);
 
         // # Open invite screen
         await Invite.open();
     });
 
-    afterAll(async () => {
-        // # Close invite screen
-        await Invite.close();
+    afterEach(async () => {
+        // # Close any leftover Invite modal so next test's beforeEach doesn't compound.
+        try {
+            await waitFor(Invite.inviteScreen).toBeVisible().withTimeout(timeouts.ONE_SEC);
+            await Invite.close();
+        } catch { /* not on invite — nothing to clean up */ }
+    });
 
-        // # Log out
+    afterAll(async () => {
         await HomeScreen.logout();
     });
 
     it('MM-T5360 - should open the invite screen', async () => {
-        // * Verify invite screen Header buttons
-        await expect(Invite.closeButton).toBeVisible();
+        // * Verify invite screen Header buttons.
+        await waitFor(Invite.closeButton).toBeVisible().withTimeout(timeouts.TEN_SEC);
         await expect(Invite.sendButton).toBeVisible();
 
         // * Verify Team data
@@ -114,10 +124,14 @@ describe('Teams - Invite', () => {
 
         // # Send invitation
         await Invite.sendButton.tap();
+        await wait(timeouts.TWO_SEC);
 
         // * Validate summary report sent
         await waitFor(Invite.screenSummary).toBeVisible().withTimeout(timeouts.TEN_SEC);
-        await expect(Invite.getSummaryReportSent()).toBeVisible();
+
+        // Threshold 40: the summary panel is only partly on screen on iOS, so the default
+        // 75 can never be met
+        await expect(Invite.getSummaryReportSent()).toBeVisible(40);
         await expect(Invite.getSummaryReportNotSent()).not.toExist();
         await expect(Invite.getSummaryReportTextItem(noUserEmailFormat)).toBeVisible();
         await expect(Invite.getSummaryReportTextItemText(noUserEmailFormat)).toHaveText(noUserEmailFormat);
@@ -127,8 +141,8 @@ describe('Teams - Invite', () => {
         // # Search for an existent user
         await Invite.searchBarInput.replaceText(testUser1.username);
 
-        // * Validate user item in search list
-        await waitFor(Invite.getSearchListUserItem(testUser1.id)).toBeVisible().withTimeout(timeouts.TWO_SEC);
+        // * Validate user item in search list.
+        await waitFor(Invite.getSearchListUserItem(testUser1.id)).toBeVisible().withTimeout(timeouts.TEN_SEC);
         await expect(Invite.getSearchListUserItemText(testUser1.id)).toHaveText(testUser1.username);
 
         // # Select user item
@@ -141,10 +155,14 @@ describe('Teams - Invite', () => {
 
         // # Send invitation
         await Invite.sendButton.tap();
+        await wait(timeouts.TWO_SEC);
 
         // * Validate summary report sent
         await waitFor(Invite.screenSummary).toBeVisible().withTimeout(timeouts.TEN_SEC);
-        await expect(Invite.getSummaryReportSent()).toBeVisible();
+
+        // Threshold 40: the summary panel is only partly on screen on iOS, so the default
+        // 75 can never be met
+        await expect(Invite.getSummaryReportSent()).toBeVisible(40);
         await expect(Invite.getSummaryReportNotSent()).not.toExist();
         await expect(Invite.getSummaryReportUserItem(testUser1.id)).toBeVisible();
         await expect(Invite.getSummaryReportUserItemText(testUser1.id)).toHaveText(testUser1.username);
@@ -166,6 +184,7 @@ describe('Teams - Invite', () => {
 
         // # Send invitation
         await Invite.sendButton.tap();
+        await wait(timeouts.TWO_SEC);
 
         // * Validate summary report not sent
         await expect(Invite.screenSummary).toBeVisible();
@@ -195,26 +214,27 @@ describe('Teams - Invite', () => {
         // # Search for a existent user already in team
         await Invite.searchBarInput.replaceText(testUser.username);
 
-        // # Wait for user item in search list
-        await waitFor(Invite.getSearchListUserItem(testUser.id)).toExist().withTimeout(timeouts.TWO_SEC);
+        // # Wait for user item in search list — 10s for invite search (see MM-T5363).
+        await waitFor(Invite.getSearchListUserItem(testUser.id)).toExist().withTimeout(timeouts.TEN_SEC);
 
-        // # Select user item
-        await Invite.getSearchListUserItem(testUser.id).tap();
+        // # Select user item.
+        await Invite.getSearchListUserItem(testUser.id).tap({x: 1, y: 1});
 
         // # Send invitation
         await Invite.sendButton.tap();
+        await wait(timeouts.TWO_SEC);
 
-        // * Validate summary
-        waitFor(Invite.screenSummary).toBeVisible();
+        // * Validate summary.
+        await waitFor(Invite.screenSummary).toBeVisible(40).withTimeout(timeouts.TEN_SEC);
 
         // * Validate summary report not sent
-        await expect(Invite.getSummaryReportNotSent()).toBeVisible();
-        await expect(Invite.getSummaryReportUserItem(testUser.id)).toBeVisible();
-        await expect(Invite.getSummaryReportUserItemText(testUser.id)).toBeVisible(testUser.username1);
+        await expect(Invite.getSummaryReportNotSent()).toBeVisible(40);
+        await expect(Invite.getSummaryReportUserItem(testUser.id)).toBeVisible(40);
+        await expect(Invite.getSummaryReportUserItemText(testUser.id)).toHaveText(`${testUser.username}\u00a0(you)`);
 
         // * Validate summary report sent
-        waitFor(Invite.getSummaryReportSent()).toBeVisible();
-        await expect(Invite.getSummaryReportUserItem(testUser3.id)).toBeVisible();
-        await expect(Invite.getSummaryReportUserItemText(testUser3.id)).toBeVisible(testUser3.username1);
+        await waitFor(Invite.getSummaryReportSent()).toBeVisible(40).withTimeout(timeouts.TEN_SEC);
+        await expect(Invite.getSummaryReportUserItem(testUser3.id)).toBeVisible(40);
+        await expect(Invite.getSummaryReportUserItemText(testUser3.id)).toHaveText(testUser3.username);
     });
 });

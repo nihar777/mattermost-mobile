@@ -38,11 +38,21 @@ describe('ClientChannels', () => {
     test('createChannel', async () => {
         const channel = {id: 'channel1', name: 'testchannel'} as Channel;
         const expectedUrl = client.getChannelsRoute();
-        const expectedOptions = {method: 'post', body: channel};
 
+        // Backward compatibility: no property_values key at all when the caller
+        // supplies none, or an empty list. Asserted with toHaveBeenLastCalledWith,
+        // not toHaveBeenCalledWith: the latter matches any prior call, so it would
+        // still pass even if a later call wrongly carried an empty property_values
+        // key, as long as an earlier call in this same test happened not to.
         await client.createChannel(channel);
+        expect(client.doFetch).toHaveBeenLastCalledWith(expectedUrl, {method: 'post', body: channel});
 
-        expect(client.doFetch).toHaveBeenCalledWith(expectedUrl, expectedOptions);
+        await client.createChannel(channel, []);
+        expect(client.doFetch).toHaveBeenLastCalledWith(expectedUrl, {method: 'post', body: channel});
+
+        const propertyValues = [{field_id: 'field1', value: 'value1'}];
+        await client.createChannel(channel, propertyValues);
+        expect(client.doFetch).toHaveBeenLastCalledWith(expectedUrl, {method: 'post', body: {...channel, property_values: propertyValues}});
     });
 
     test('createDirectChannel', async () => {
@@ -137,6 +147,33 @@ describe('ClientChannels', () => {
         expect(client.doFetch).toHaveBeenCalledWith(expectedUrl, expectedOptions);
     });
 
+    test('setChannelAutotranslation', async () => {
+        const channelId = 'channel1';
+        const enabled = true;
+        const expectedUrl = `${client.getChannelRoute(channelId)}/patch`;
+        const expectedOptions = {method: 'put', body: {autotranslation: enabled}};
+        jest.mocked(client.doFetch).mockResolvedValue({id: channelId, autotranslation: enabled});
+
+        const result = await client.setChannelAutotranslation(channelId, enabled);
+
+        expect(client.doFetch).toHaveBeenCalledWith(expectedUrl, expectedOptions);
+        expect(result.autotranslation).toBe(enabled);
+    });
+
+    test('setMyChannelAutotranslation', async () => {
+        const channelId = 'channel1';
+        const enabled = false;
+        const expectedUrl = `${client.getChannelMemberRoute(channelId, 'me')}/autotranslation`;
+        const expectedOptions = {method: 'put', body: {autotranslation_disabled: !enabled}};
+        const mockMembership = {id: 'me-channel1', channel_id: channelId, user_id: 'me', autotranslation_disabled: !enabled};
+        jest.mocked(client.doFetch).mockResolvedValue(mockMembership);
+
+        const result = await client.setMyChannelAutotranslation(channelId, enabled);
+
+        expect(client.doFetch).toHaveBeenCalledWith(expectedUrl, expectedOptions);
+        expect(result).toEqual(mockMembership);
+    });
+
     test('getChannel', async () => {
         const channelId = 'channel1';
         const expectedUrl = client.getChannelRoute(channelId);
@@ -195,6 +232,16 @@ describe('ClientChannels', () => {
         expect(client.doFetch).toHaveBeenCalledWith(`${client.getTeamRoute(teamId)}/channels?page=0&per_page=${PER_PAGE_DEFAULT}`, expectedOptions);
     });
 
+    test('getManagedCategories', async () => {
+        const teamId = 'team1';
+        const expectedUrl = `${client.getTeamRoute(teamId)}/channels/managed_categories`;
+        const expectedOptions = {method: 'get'};
+
+        await client.getManagedCategories(teamId);
+
+        expect(client.doFetch).toHaveBeenCalledWith(expectedUrl, expectedOptions);
+    });
+
     test('getArchivedChannels', async () => {
         const teamId = 'team1';
         const page = 1;
@@ -225,6 +272,59 @@ describe('ClientChannels', () => {
         // Test with default values
         await client.getSharedChannels(teamId);
         expect(client.doFetch).toHaveBeenCalledWith(`${client.getSharedChannelsRoute()}/${teamId}?page=0&per_page=${PER_PAGE_DEFAULT}`, expectedOptions);
+    });
+
+    test('getRemoteClusters', async () => {
+        const options = {excludePlugins: true, onlyConfirmed: true};
+        const expectedUrl = `${client.getRemoteClustersRoute()}?exclude_plugins=true&only_confirmed=true`;
+        const expectedOptions = {method: 'get'};
+
+        await client.getRemoteClusters(options);
+
+        expect(client.doFetch).toHaveBeenCalledWith(expectedUrl, expectedOptions);
+
+        // Test with notInChannel
+        await client.getRemoteClusters({...options, notInChannel: 'channel1'});
+        expect(client.doFetch).toHaveBeenCalledWith(
+            `${client.getRemoteClustersRoute()}?exclude_plugins=true&not_in_channel=channel1&only_confirmed=true`,
+            expectedOptions,
+        );
+
+        // Test with empty options
+        await client.getRemoteClusters({});
+        expect(client.doFetch).toHaveBeenCalledWith(client.getRemoteClustersRoute(), expectedOptions);
+    });
+
+    test('getChannelSharedRemotes', async () => {
+        const channelId = 'channel1';
+        const expectedUrl = client.getChannelRemotesRoute(channelId);
+        const expectedOptions = {method: 'get'};
+
+        await client.getChannelSharedRemotes(channelId);
+
+        expect(client.doFetch).toHaveBeenCalledWith(expectedUrl, expectedOptions);
+    });
+
+    test('shareChannelWithRemote', async () => {
+        const channelId = 'channel1';
+        const remoteId = 'remote1';
+        const expectedUrl = `${client.getRemoteClusterChannelRoute(remoteId, channelId)}/invite`;
+        const expectedOptions = {method: 'post'};
+
+        await client.shareChannelWithRemote(channelId, remoteId);
+
+        expect(client.doFetch).toHaveBeenCalledWith(expectedUrl, expectedOptions);
+    });
+
+    test('unshareChannelFromRemote', async () => {
+        const channelId = 'channel1';
+        const remoteId = 'remote1';
+        const expectedUrl = `${client.getRemoteClusterChannelRoute(remoteId, channelId)}/uninvite`;
+        const expectedOptions = {method: 'post'};
+
+        await client.unshareChannelFromRemote(channelId, remoteId);
+
+        expect(client.doFetch).toHaveBeenCalledWith(expectedUrl, expectedOptions);
     });
 
     test('getMyChannels', async () => {

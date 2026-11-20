@@ -8,9 +8,9 @@
 // *******************************************************************
 
 import {
-    Post,
     Setup,
 } from '@support/server_api';
+import {assertServerBaseline} from '@support/server_baseline';
 import {
     serverOneUrl,
     siteOneUrl,
@@ -27,7 +27,7 @@ import {
     ThreadScreen,
 } from '@support/ui/screen';
 import {getRandomId, timeouts, wait} from '@support/utils';
-import {expect} from 'detox';
+import {expect, waitFor} from 'detox';
 
 describe('Threads - Open Thread in Channel', () => {
     const serverOneDisplayName = 'Server 1';
@@ -37,6 +37,12 @@ describe('Threads - Open Thread in Channel', () => {
     beforeAll(async () => {
         const {channel, user} = await Setup.apiInit(siteOneUrl);
         testChannel = channel;
+
+        // # Assert server baseline (CRT always_on, ThreadAutoFollow) for thread UI.
+        await assertServerBaseline(siteOneUrl, [
+            'ServiceSettings.CollapsedThreads',
+            'ServiceSettings.ThreadAutoFollow',
+        ]);
 
         // # Log in to server
         await ServerScreen.connectToServer(serverOneUrl, serverOneDisplayName);
@@ -57,8 +63,11 @@ describe('Threads - Open Thread in Channel', () => {
         // # Create a thread, go back to channel list screen, and then go to global threads screen
         const parentMessage = `Message ${getRandomId()}`;
         await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelScreen.postMessage(parentMessage);
-        const {post: parentPost} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
+        const {post: parentPost} = await ChannelScreen.postMessageAndVerify(parentMessage, testChannel.id, siteOneUrl);
+        await ChannelScreen.dismissScheduledPostTooltip();
+        const {postListPostItem} = ChannelScreen.getPostListPostItem(parentPost.id, parentMessage);
+        await waitFor(postListPostItem).toBeVisible().withTimeout(timeouts.FOUR_SEC);
+
         await ChannelScreen.openReplyThreadFor(parentPost.id, parentMessage);
         const replyMessage = `${parentMessage} reply`;
         await ThreadScreen.postMessage(replyMessage);
@@ -67,7 +76,7 @@ describe('Threads - Open Thread in Channel', () => {
         await GlobalThreadsScreen.open();
 
         // * Verify thread is displayed
-        await expect(GlobalThreadsScreen.getThreadItem(parentPost.id)).toBeVisible();
+        await waitFor(GlobalThreadsScreen.getThreadItem(parentPost.id)).toBeVisible().withTimeout(timeouts.HALF_MIN);
 
         // # Open thread options for thread and tap open in channel option
         await GlobalThreadsScreen.openThreadOptionsFor(parentPost.id);
@@ -81,8 +90,9 @@ describe('Threads - Open Thread in Channel', () => {
 
         // * Verify on channel screen and thread is displayed
         await ChannelScreen.toBeVisible();
-        const {postListPostItem} = ChannelScreen.getPostListPostItem(parentPost.id, parentMessage);
-        await expect(postListPostItem).toBeVisible();
+        await ChannelScreen.dismissScheduledPostTooltip();
+        const {postListPostItem: channelPostItem} = ChannelScreen.getPostListPostItem(parentPost.id, parentMessage);
+        await expect(channelPostItem).toBeVisible();
 
         // # Go back to channel list screen
         await ChannelScreen.back();
@@ -93,8 +103,10 @@ describe('Threads - Open Thread in Channel', () => {
         // # Create a thread, go back to channel list screen, and then go to global threads screen
         const parentMessage = `Message ${getRandomId()}`;
         await ChannelScreen.open(channelsCategory, testChannel.name);
-        await ChannelScreen.postMessage(parentMessage);
-        const {post: parentPost} = await Post.apiGetLastPostInChannel(siteOneUrl, testChannel.id);
+        const {post: parentPost} = await ChannelScreen.postMessageAndVerify(parentMessage, testChannel.id, siteOneUrl);
+        const {postListPostItem} = ChannelScreen.getPostListPostItem(parentPost.id, parentMessage);
+        await waitFor(postListPostItem).toBeVisible().withTimeout(timeouts.FOUR_SEC);
+
         await ChannelScreen.openReplyThreadFor(parentPost.id, parentMessage);
         const replyMessage = `${parentMessage} reply`;
         await ThreadScreen.postMessage(replyMessage);
@@ -103,7 +115,7 @@ describe('Threads - Open Thread in Channel', () => {
         await GlobalThreadsScreen.open();
 
         // * Verify thread is displayed
-        await expect(GlobalThreadsScreen.getThreadItem(parentPost.id)).toBeVisible();
+        await waitFor(GlobalThreadsScreen.getThreadItem(parentPost.id)).toBeVisible().withTimeout(timeouts.HALF_MIN);
 
         // # Open thread options for thread, tap on copy link option, go back to channel list screen, go to another channel, post the permalink, and tap on permalink
         const permalinkLabel = `permalink-${getRandomId()}`;
@@ -122,8 +134,14 @@ describe('Threads - Open Thread in Channel', () => {
 
         // * Verify on channel screen and thread is displayed
         await ChannelScreen.toBeVisible();
-        const {postListPostItem} = ChannelScreen.getPostListPostItem(parentPost.id, parentMessage);
-        await expect(postListPostItem).toBeVisible();
+        await ChannelScreen.dismissScheduledPostTooltip();
+        const {postListPostItem: channelPostItem} = ChannelScreen.getPostListPostItem(parentPost.id, parentMessage);
+
+        // Use toExist() rather than toBeVisible(): after jumping from a permalink the
+        // post may be partially clipped by the message input bar or keyboard on iOS 26.x,
+        // failing any visibility-percent threshold. The post being in the view hierarchy
+        // is sufficient to confirm the permalink navigation landed correctly.
+        await expect(channelPostItem).toExist();
 
         // # Go back to channel list screen
         await ChannelScreen.back();

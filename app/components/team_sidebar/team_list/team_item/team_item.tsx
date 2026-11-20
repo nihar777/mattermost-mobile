@@ -32,7 +32,6 @@ const getStyleSheet = makeStyleSheetFromTheme((theme: Theme) => {
             padding: 3,
             borderRadius: 10,
             marginVertical: 3,
-            overflow: 'hidden',
         },
         containerSelected: {
             borderWidth: 3,
@@ -70,7 +69,7 @@ export default function TeamItem({team, hasUnreads, mentionCount, selected}: Pro
 
         PerformanceMetricsManager.startMetric('mobile_team_switch');
         handleTeamChange(serverUrl, team.id);
-    }, [selected, team?.id, serverUrl]);
+    }, [team, selected, serverUrl]);
 
     if (!team) {
         return null;

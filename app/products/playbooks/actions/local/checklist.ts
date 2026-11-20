@@ -1,11 +1,20 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
+import {Screens} from '@constants';
 import DatabaseManager from '@database/manager';
+import {getPlaybookChecklistById} from '@playbooks/database/queries/checklist';
 import {getPlaybookChecklistItemById} from '@playbooks/database/queries/item';
+import {getCurrentTeamId, setCurrentTeamAndChannelId} from '@queries/servers/system';
+import {addChannelToTeamHistory} from '@queries/servers/team';
 import {logError} from '@utils/log';
 
-export async function updateChecklistItem(serverUrl: string, itemId: string, state: ChecklistItemState) {
+export async function updateChecklistItem(
+    serverUrl: string,
+    itemId: string,
+    state: ChecklistItemState,
+    requirements?: TaskRequirement[],
+) {
     try {
         const {database} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
         const item = await getPlaybookChecklistItemById(database, itemId);
@@ -16,6 +25,9 @@ export async function updateChecklistItem(serverUrl: string, itemId: string, sta
         await database.write(async () => {
             item.update((i) => {
                 i.state = state;
+                if (requirements) {
+                    i.requirements = requirements;
+                }
             });
         });
 
@@ -85,6 +97,89 @@ export async function setDueDate(serverUrl: string, itemId: string, date?: numbe
         return {data: true};
     } catch (error) {
         logError('failed to set due date', error);
+        return {error};
+    }
+}
+
+export async function renameChecklist(serverUrl: string, checklistId: string, title: string) {
+    try {
+        const {database} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
+        const checklist = await getPlaybookChecklistById(database, checklistId);
+        if (!checklist) {
+            return {error: `Checklist not found: ${checklistId}`};
+        }
+
+        // Validate title is not empty or whitespace-only
+        if (!title || !title.trim()) {
+            return {error: 'Title cannot be empty or whitespace-only'};
+        }
+
+        await database.write(async () => {
+            checklist.update((c) => {
+                c.title = title.trim();
+            });
+        });
+
+        return {data: true};
+    } catch (error) {
+        logError('failed to rename checklist', error);
+        return {error};
+    }
+}
+
+export async function switchToGlobalPlaybooks(serverUrl: string) {
+    try {
+        const {database, operator} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
+        const teamId = await getCurrentTeamId(database);
+        await setCurrentTeamAndChannelId(operator, teamId, '');
+        await addChannelToTeamHistory(operator, teamId, Screens.PARTICIPANT_PLAYBOOKS);
+    } catch (error) {
+        logError('Failed switchToGlobalPlaybooks', error);
+    }
+}
+
+export async function deleteChecklistItem(serverUrl: string, itemId: string) {
+    try {
+        const {database} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
+        const item = await getPlaybookChecklistItemById(database, itemId);
+        if (!item) {
+            return {error: `Item not found: ${itemId}`};
+        }
+
+        await database.write(async () => {
+            await item.destroyPermanently();
+        });
+
+        return {data: true};
+    } catch (error) {
+        logError('failed to delete checklist item', error);
+        return {error};
+    }
+}
+
+export async function updateChecklistItemTitleAndDescription(serverUrl: string, itemId: string, title: string, description?: string) {
+    try {
+        const {database} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
+        const item = await getPlaybookChecklistItemById(database, itemId);
+        if (!item) {
+            return {error: `Item not found: ${itemId}`};
+        }
+
+        // Validate title is not empty or whitespace-only
+        if (!title || !title.trim()) {
+            return {error: 'Title cannot be empty or whitespace-only'};
+        }
+
+        await database.write(async () => {
+            item.update((i) => {
+                i.title = title.trim();
+                i.description = description?.trim() ?? '';
+            });
+        });
+
+        return {data: true};
+    } catch (error) {
+        logError('failed to update checklist item title and description', error);
         return {error};
     }
 }

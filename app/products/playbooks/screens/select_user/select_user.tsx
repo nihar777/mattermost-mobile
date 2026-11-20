@@ -4,7 +4,7 @@
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {defineMessages, useIntl} from 'react-intl';
 import {View} from 'react-native';
-import {SafeAreaView} from 'react-native-safe-area-context';
+import {SafeAreaView, type Edge} from 'react-native-safe-area-context';
 
 import {fetchProfilesInTeam, searchProfiles} from '@actions/remote/user';
 import Button from '@components/button';
@@ -14,39 +14,35 @@ import {General, Screens} from '@constants';
 import {useServerUrl} from '@context/server';
 import {useTheme} from '@context/theme';
 import useAndroidHardwareBackHandler from '@hooks/android_back_handler';
-import SecurityManager from '@managers/security_manager';
-import {
-    popTopScreen,
-} from '@screens/navigation';
+import useBackNavigation from '@hooks/navigate_back';
+import {navigateBack} from '@screens/navigation';
+import CallbackStore from '@store/callback_store';
 import {changeOpacity, getKeyboardAppearanceFromTheme, makeStyleSheetFromTheme} from '@utils/theme';
 import {typography} from '@utils/typography';
 
-import type {AvailableScreens} from '@typings/screens/navigation';
-
-const close = () => {
-    popTopScreen();
-};
-
 export type Props = {
     currentTeamId: string;
-    currentUserId: string;
+    selected?: string;
+    participantIds: string[];
+}
+
+type Callbacks = {
     handleSelect: (opt: UserProfile) => void;
     handleRemove?: () => void;
-    selected?: string;
-    componentId: AvailableScreens;
-    participantIds: string[];
 }
 
 const messages = defineMessages({
     participants: {
         id: 'playbooks.select_user.participants',
-        defaultMessage: 'RUN PARTICIPANTS',
+        defaultMessage: 'PARTICIPANTS',
     },
     notParticipants: {
         id: 'playbooks.select_user.not_participants',
         defaultMessage: 'NOT PARTICIPATING',
     },
 });
+
+const edges: Edge[] = ['bottom', 'left', 'right'];
 
 const getStyleSheet = makeStyleSheetFromTheme((theme: Theme) => {
     return {
@@ -58,6 +54,7 @@ const getStyleSheet = makeStyleSheetFromTheme((theme: Theme) => {
             height: 38,
             paddingHorizontal: 12,
             flexDirection: 'row',
+            gap: 8,
         },
         searchbarComponentContainer: {
             flex: 1,
@@ -88,13 +85,18 @@ const getStyleSheet = makeStyleSheetFromTheme((theme: Theme) => {
     };
 });
 
+const removeCallbacks = () => {
+    CallbackStore.removeCallback();
+};
+
+const close = () => {
+    removeCallbacks();
+    navigateBack();
+};
+
 function SelectUser({
     selected,
-    handleSelect,
-    handleRemove,
     currentTeamId,
-    currentUserId,
-    componentId,
     participantIds,
 }: Props) {
     const serverUrl = useServerUrl();
@@ -102,6 +104,8 @@ function SelectUser({
     const searchTimeoutId = useRef<NodeJS.Timeout | null>(null);
     const style = getStyleSheet(theme);
     const intl = useIntl();
+
+    const callbacks = useMemo(() => CallbackStore.getCallback<Callbacks>(), []);
 
     // HOOKS
     const [term, setTerm] = useState<string>('');
@@ -119,17 +123,18 @@ function SelectUser({
     }, []);
 
     const handleSelectProfile = useCallback((user: UserProfile): void => {
-        handleSelect(user);
+        callbacks?.handleSelect(user);
         close();
-    }, [handleSelect]);
+    }, [callbacks]);
 
     const handleSelectRemove = useCallback(() => {
-        handleRemove?.();
+        callbacks?.handleRemove?.();
         close();
-    }, [handleRemove]);
+    }, [callbacks]);
 
     // Effects
-    useAndroidHardwareBackHandler(componentId, close);
+    useBackNavigation(removeCallbacks);
+    useAndroidHardwareBackHandler(Screens.PLAYBOOK_SELECT_USER, close);
 
     useEffect(() => {
         return () => {
@@ -223,8 +228,8 @@ function SelectUser({
 
     return (
         <SafeAreaView
-            nativeID={SecurityManager.getShieldScreenId(componentId)}
             style={style.container}
+            edges={edges}
         >
             <View
                 testID='integration_selector.screen'
@@ -241,7 +246,7 @@ function SelectUser({
                     value={term}
                     containerStyle={style.searchbarComponentContainer}
                 />
-                {Boolean(handleRemove) && !term && (
+                {Boolean(callbacks?.handleRemove) && !term && (
                     <Button
                         text={intl.formatMessage({id: 'playbooks.select_user.no_assignee', defaultMessage: 'No Assignee'})}
                         theme={theme}
@@ -251,7 +256,6 @@ function SelectUser({
                 )}
             </View>
             <ServerUserList
-                currentUserId={currentUserId}
                 term={term}
                 tutorialWatched={true}
                 handleSelectProfile={handleSelectProfile}

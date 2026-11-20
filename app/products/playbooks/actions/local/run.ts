@@ -15,7 +15,7 @@ export async function handlePlaybookRuns(serverUrl: string, runs: PlaybookRun[],
         });
         return {data};
     } catch (error) {
-        logError('failed to handle playbook runs', error);
+        logError('failed to handle playbook checklist', error);
         return {error};
     }
 }
@@ -25,7 +25,7 @@ export async function setOwner(serverUrl: string, playbookRunId: string, ownerId
         const {database} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
         const run = await getPlaybookRunById(database, playbookRunId);
         if (!run) {
-            return {error: 'Run not found'};
+            return {error: 'Checklist not found'};
         }
 
         await database.write(async () => {
@@ -37,6 +37,35 @@ export async function setOwner(serverUrl: string, playbookRunId: string, ownerId
         return {data: true};
     } catch (error) {
         logError('failed to set owner', error);
+        return {error};
+    }
+}
+
+export async function updatePlaybookRun(serverUrl: string, playbookRunId: string, name: string, summary?: string) {
+    try {
+        const {database} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
+        const run = await getPlaybookRunById(database, playbookRunId);
+        if (!run) {
+            return {error: `Playbook run not found: ${playbookRunId}`};
+        }
+
+        // Validate name is not empty or whitespace-only
+        if (!name || !name.trim()) {
+            return {error: 'Name cannot be empty or whitespace-only'};
+        }
+
+        await database.write(async () => {
+            run.update((r) => {
+                r.name = name.trim();
+                if (summary !== undefined) {
+                    r.summary = summary.trim();
+                }
+            });
+        });
+
+        return {data: true};
+    } catch (error) {
+        logError('[updatePlaybookRun]', error);
         return {error};
     }
 }

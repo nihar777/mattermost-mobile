@@ -1,7 +1,7 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import React from 'react';
+import React, {useCallback} from 'react';
 import {useIntl} from 'react-intl';
 import {View, StyleSheet, type ListRenderItem} from 'react-native';
 import {FlatList} from 'react-native-gesture-handler';
@@ -15,19 +15,21 @@ type Props = {
     position?: string;
     localTime?: string;
     customAttributes?: CustomAttribute[];
+    callTargetUserId?: string;
 }
 
-const renderAttribute: ListRenderItem<CustomAttribute> = ({item}) => (
-    <UserProfileLabel
-        title={item.name}
-        description={item.value}
-        testID={`custom_attribute.${item.id}`}
-        type={item.type}
-    />
-);
-
-const CustomAttributes = ({nickname, position, localTime, customAttributes}: Props) => {
+const CustomAttributes = ({nickname, position, localTime, customAttributes, callTargetUserId}: Props) => {
     const {formatMessage} = useIntl();
+
+    const renderAttribute: ListRenderItem<CustomAttribute> = useCallback(({item}) => (
+        <UserProfileLabel
+            title={item.name}
+            description={item.value}
+            testID={`custom_attribute.${item.id}`}
+            type={item.type}
+            userId={callTargetUserId}
+        />
+    ), [callTargetUserId]);
 
     // Combine standard and custom attributes
     const mergeAttributes: CustomAttribute[] = [];
@@ -67,6 +69,7 @@ const CustomAttributes = ({nickname, position, localTime, customAttributes}: Pro
                 showsVerticalScrollIndicator={true}
                 scrollEnabled={true}
                 removeClippedSubviews={true}
+                testID='user_profile.custom_attributes.list'
             />
         </View>
     );

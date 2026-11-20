@@ -2,8 +2,6 @@ package com.mattermost.rnutils
 
 import android.app.Activity
 import android.graphics.Color
-import android.os.Build
-import android.view.WindowManager
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.core.view.WindowInsetsControllerCompat
@@ -171,9 +169,19 @@ class RNUtilsModuleImpl(private val reactContext: ReactApplicationContext): Life
         return map
     }
 
-    fun unlockOrientation() {}
+    fun unlockOrientation() {
+        val activity = reactContext.currentActivity ?: return
+        activity.runOnUiThread {
+            activity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
+        }
+    }
 
-    fun lockPortrait() {}
+    fun lockPortrait() {
+        val activity = reactContext.currentActivity ?: return
+        activity.runOnUiThread {
+            activity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+        }
+    }
 
     fun deleteDatabaseDirectory(): WritableMap {
         val map = Arguments.createMap()
@@ -209,34 +217,16 @@ class RNUtilsModuleImpl(private val reactContext: ReactApplicationContext): Life
         serverUrl?.let { Notifications.removeServerNotifications(it) }
     }
 
-    fun setSoftKeyboardToAdjustNothing() {
-        val currentActivity: Activity = reactContext.currentActivity ?: return
-        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q) {
-            return
-        }
-
-        currentActivity.runOnUiThread {
-            currentActivity.window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
-        }
+    fun beginDatabaseActivity(serverUrl: String?, task: String?, promise: Promise?) {
+        promise?.resolve(null)
     }
 
-    fun setSoftKeyboardToAdjustResize() {
-        val currentActivity: Activity = reactContext.currentActivity ?: return
-        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q) {
-            return
-        }
-
-        currentActivity.runOnUiThread {
-            currentActivity.window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-        }
+    fun endDatabaseActivity(token: String?, promise: Promise?) {
+        promise?.resolve(null)
     }
 
     fun setNavigationBarColor(colorHex: String, lightIcons: Boolean) {
         val currentActivity: Activity = reactContext.currentActivity ?: return
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            return
-        }
-
         lastHex = colorHex
         lastLightIcons = lightIcons
 
@@ -250,12 +240,8 @@ class RNUtilsModuleImpl(private val reactContext: ReactApplicationContext): Life
                     val controller = WindowInsetsControllerCompat(w, w.decorView)
                     controller.isAppearanceLightNavigationBars = lightIcons
 
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        w.isNavigationBarContrastEnforced = false
-                    }
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                        w.navigationBarDividerColor = Color.TRANSPARENT
-                    }
+                    w.isNavigationBarContrastEnforced = false
+                    w.navigationBarDividerColor = Color.TRANSPARENT
                 }
             } catch (e: Exception) {
                 android.util.Log.e("RNUtils", "Error setting navigation bar color: $colorHex", e)

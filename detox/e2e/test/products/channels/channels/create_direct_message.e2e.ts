@@ -25,8 +25,8 @@ import {
     LoginScreen,
     ServerScreen,
 } from '@support/ui/screen';
-import {timeouts, wait} from '@support/utils';
-import {expect} from 'detox';
+import {isAndroid, timeouts, wait, waitForElementToHaveText, expectVisible} from '@support/utils';
+import {expect, waitFor} from 'detox';
 
 describe('Channels - Create Direct Message', () => {
     const serverOneDisplayName = 'Server 1';
@@ -60,9 +60,9 @@ describe('Channels - Create Direct Message', () => {
         await CreateDirectMessageScreen.closeTutorial();
 
         // * Verify basic elements on create direct message screen
-        await expect(CreateDirectMessageScreen.closeButton).toBeVisible();
-        await expect(CreateDirectMessageScreen.searchInput).toBeVisible();
-        await expect(CreateDirectMessageScreen.sectionUserList).toBeVisible();
+        await expectVisible(CreateDirectMessageScreen.closeButton);
+        await expectVisible(CreateDirectMessageScreen.searchInput);
+        await expectVisible(CreateDirectMessageScreen.sectionUserList);
 
         // # Go back to channel list screen
         await CreateDirectMessageScreen.close();
@@ -81,8 +81,11 @@ describe('Channels - Create Direct Message', () => {
         await CreateDirectMessageScreen.open();
         await CreateDirectMessageScreen.searchInput.replaceText(newUserDisplayName);
 
-        // * Verify search returns the new user item
-        await expect(CreateDirectMessageScreen.getUserItemDisplayName(newUser.id)).toBeVisible();
+        // * Verify search returns the new user item (search can still be loading — CI
+        // 29935363789 Android MM-T4730_2 failed on bare expect while spinner visible)
+        await waitFor(CreateDirectMessageScreen.getUserItemDisplayName(newUser.id)).
+            toBeVisible().
+            withTimeout(timeouts.HALF_MIN);
 
         // # Tap on the new user item
         await CreateDirectMessageScreen.getUserItem(newUser.id).tap();
@@ -92,13 +95,12 @@ describe('Channels - Create Direct Message', () => {
 
         // # Tap on start button
         await CreateDirectMessageScreen.startButton.tap();
-        await waitFor(ChannelScreen.scheduledPostTooltipCloseButton).toBeVisible().withTimeout(timeouts.TEN_SEC);
-        await ChannelScreen.scheduledPostTooltipCloseButton.tap();
+        await ChannelScreen.dismissScheduledPostTooltip();
 
         // * Verify on direct message channel screen for the new user
         await ChannelScreen.toBeVisible();
         await expect(ChannelScreen.headerTitle).toHaveText(newUserDisplayName);
-        await expect(ChannelScreen.introDisplayName).toHaveText(newUserDisplayName);
+        await waitForElementToHaveText(ChannelScreen.introDisplayName, newUserDisplayName, timeouts.HALF_MIN);
 
         // # Post a message and go back to channel list screen
         await ChannelScreen.postMessage('test');
@@ -128,6 +130,9 @@ describe('Channels - Create Direct Message', () => {
         await CreateDirectMessageScreen.searchInput.replaceText(firstNewUser.username);
         await CreateDirectMessageScreen.searchInput.tapReturnKey();
         await wait(timeouts.ONE_SEC);
+        await waitFor(CreateDirectMessageScreen.getUserItem(firstNewUser.id)).
+            toExist().
+            withTimeout(timeouts.HALF_MIN);
         await CreateDirectMessageScreen.getUserItem(firstNewUser.id).tap();
 
         // * Verify the first new user is selected
@@ -137,6 +142,9 @@ describe('Channels - Create Direct Message', () => {
         await CreateDirectMessageScreen.searchInput.replaceText(secondNewUser.username);
         await CreateDirectMessageScreen.searchInput.tapReturnKey();
         await wait(timeouts.ONE_SEC);
+        await waitFor(CreateDirectMessageScreen.getUserItem(secondNewUser.id)).
+            toExist().
+            withTimeout(timeouts.HALF_MIN);
         await CreateDirectMessageScreen.getUserItem(secondNewUser.id).tap();
 
         // * Verify the second new user is selected
@@ -148,7 +156,7 @@ describe('Channels - Create Direct Message', () => {
         // * Verify on group message channel screen for the other two new users
         await ChannelScreen.toBeVisible();
         await expect(ChannelScreen.headerTitle).toHaveText(groupDisplayName);
-        await expect(ChannelScreen.introDisplayName).toHaveText(groupDisplayName);
+        await waitForElementToHaveText(ChannelScreen.introDisplayName, groupDisplayName, timeouts.HALF_MIN);
 
         // # Post a message and go back to channel list screen
         await ChannelScreen.postMessage('test');
@@ -165,8 +173,15 @@ describe('Channels - Create Direct Message', () => {
         await wait(timeouts.ONE_SEC);
 
         // * Verify empty search state for create direct message
-        await expect(element(by.text(`No matches found for “${searchTerm}”`))).toBeVisible();
-        await expect(element(by.text('Check the spelling or try another search.'))).toBeVisible();
+        // On Android edge-to-edge the empty-state text can render with <50% visible area
+        // due to system bar insets. Use toExist() on Android to bypass the threshold check.
+        if (isAndroid()) {
+            await waitFor(element(by.text(`No matches found for “${searchTerm}”`))).toExist().withTimeout(timeouts.HALF_MIN);
+            await waitFor(element(by.text('Check the spelling or try another search.'))).toExist().withTimeout(timeouts.HALF_MIN);
+        } else {
+            await expect(element(by.text(`No matches found for “${searchTerm}”`))).toBeVisible();
+            await expect(element(by.text('Check the spelling or try another search.'))).toBeVisible();
+        }
 
         // # Go back to channel list screen
         await CreateDirectMessageScreen.close();

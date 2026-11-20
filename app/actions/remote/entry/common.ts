@@ -4,12 +4,14 @@
 import {nativeApplicationVersion} from 'expo-application';
 import {RESULTS, checkNotifications} from 'react-native-permissions';
 
+import {deletePostsForChannel, deletePostsForChannelsWithAutotranslation} from '@actions/local/channel';
 import {fetchChannelById, fetchMyChannelsForTeam, handleKickFromChannel, type MyChannelsRequest} from '@actions/remote/channel';
 import {type MyPreferencesRequest, fetchMyPreferences} from '@actions/remote/preference';
+import {fetchRoles} from '@actions/remote/role';
 import {fetchConfigAndLicense, fetchDataRetentionPolicy} from '@actions/remote/systems';
 import {fetchMyTeams, handleKickFromTeam, type MyTeamsRequest} from '@actions/remote/team';
 import {fetchMe, type MyUserRequest} from '@actions/remote/user';
-import {General, Preferences, Screens} from '@constants';
+import {Events, General, Preferences, Screens, ServerErrors} from '@constants';
 import {SYSTEM_IDENTIFIERS} from '@constants/database';
 import {PUSH_PROXY_RESPONSE_NOT_AVAILABLE, PUSH_PROXY_RESPONSE_UNKNOWN, PUSH_PROXY_STATUS_NOT_AVAILABLE, PUSH_PROXY_STATUS_UNKNOWN, PUSH_PROXY_STATUS_VERIFIED} from '@constants/push_proxy';
 import DatabaseManager from '@database/manager';
@@ -17,15 +19,17 @@ import {getPreferenceValue} from '@helpers/api/preference';
 import {selectDefaultTeam} from '@helpers/api/team';
 import {DEFAULT_LOCALE} from '@i18n';
 import NetworkManager from '@managers/network_manager';
-import {getDeviceToken} from '@queries/app/global';
-import {getChannelById} from '@queries/servers/channel';
+import {getDeviceToken, getVoIPDeviceToken} from '@queries/app/global';
+import {getChannelById, queryChannelsById, queryMyChannelsByChannelIds} from '@queries/servers/channel';
 import {prepareEntryModels, truncateCrtRelatedTables} from '@queries/servers/entry';
 import {getHasCRTChanged} from '@queries/servers/preference';
+import {isChannelAccessEnforced} from '@queries/servers/render_permissions';
 import {getCurrentChannelId, getCurrentTeamId, getIsDataRetentionEnabled, getPushVerificationStatus, getLastFullSync, setCurrentTeamAndChannelId, getConfigValue} from '@queries/servers/system';
 import {getTeamChannelHistory} from '@queries/servers/team';
-import NavigationStore from '@store/navigation_store';
+import {getCurrentUser} from '@queries/servers/user';
+import {NavigationStore} from '@store/navigation_store';
 import {isDefaultChannel, isDMorGM, sortChannelsByDisplayName} from '@utils/channel';
-import {getFullErrorMessage} from '@utils/errors';
+import {getFullErrorMessage, getServerError} from '@utils/errors';
 import {isMinimumServerVersion, isTablet} from '@utils/helpers';
 import {logDebug, logError} from '@utils/log';
 import {processIsCRTEnabled} from '@utils/thread';
@@ -179,16 +183,84 @@ const entryRest = async (serverUrl: string, teamId?: string, channelId?: string,
 
         const dt = Date.now();
 
+        await handleAutotranslationChanges(serverUrl, meData, chData);
+
+        const rolesRequest = fetchRoles(serverUrl, teamData.memberships, chData?.memberships, meData?.user, false, false, groupLabel);
+
         const modelPromises = await prepareEntryModels({operator, teamData: initialTeamData, chData, prefData, meData, isCRTEnabled});
         const models = (await Promise.all(modelPromises)).flat();
-        logDebug('Process models on entry', groupLabel, models.length, `${Date.now() - dt}ms`);
 
+        const {error: rolesError} = await rolesRequest;
+        if (rolesError) {
+            logDebug('entryRest: failed to fetch roles', groupLabel, getFullErrorMessage(rolesError));
+        }
+
+        logDebug('Process models on entry', groupLabel, models.length, `${Date.now() - dt}ms`);
         return {models, initialChannelId, initialTeamId, prefData, teamData, chData, meData, gmConverted};
     } catch (error) {
         logError('entryRest', groupLabel, error);
         return {error};
     }
 };
+
+export async function handleAutotranslationChanges(serverUrl: string, meData: MyUserRequest | undefined, chData: MyChannelsRequest | undefined) {
+    try {
+        const {database, operator} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
+
+        // Config changes already handled in storeConfigAndLicense
+        const enableAutoTranslation = (await getConfigValue(operator.database, 'EnableAutoTranslation')) === 'true';
+        if (!enableAutoTranslation) {
+            return;
+        }
+
+        // If user locale changed, delete all the posts for all channels with autotranslation enabled
+        // so the posts can be refetch with the new translation
+        if (meData) {
+            const currentUser = await getCurrentUser(database);
+            if (currentUser && meData.user?.locale !== currentUser.locale) {
+                await deletePostsForChannelsWithAutotranslation(serverUrl);
+                return;
+            }
+        }
+
+        if (chData) {
+            // If a channel stop being autotranslated by the admin, delete the posts for that channel
+            // so the posts can be refetch without the translation
+            const newChannels = chData.channels || [];
+            const channels = await queryChannelsById(database, newChannels.map((c) => c.id)).fetch();
+            const chMap = new Map(channels.map((c) => [c.id, c]));
+            const promises = [];
+            for (const ch of newChannels) {
+                const channel = chMap.get(ch.id);
+                if (channel && channel.autotranslation && !ch.autotranslation) { // Autotranslation disabled
+                    promises.push(deletePostsForChannel(serverUrl, ch.id, true));
+                }
+            }
+            const chModels = (await Promise.all(promises)).map((m) => m.models).flat();
+            if (chModels.length) {
+                await operator.batchRecords(chModels, 'handleAutotranslationChanges');
+            }
+
+            // If a channel starts or stops being autotranslated by the user, delete the posts for that channel
+            // so the posts can be refetch with or without the translation
+            const newMemberships = chData.memberships || [];
+            const memberships = await queryMyChannelsByChannelIds(database, newMemberships.map((m) => m.channel_id)).fetch();
+            const membershipMap = new Map(memberships.map((m) => [m.id, m]));
+            for (const m of newMemberships) {
+                const membership = membershipMap.get(m.channel_id);
+                if (membership && membership.autotranslationDisabled !== Boolean(m.autotranslation_disabled)) { // Autotranslation modified
+                    promises.push(deletePostsForChannel(serverUrl, m.channel_id, true));
+                }
+            }
+            const membershipModels = (await Promise.all(promises)).map((m) => m.models).flat();
+            if (membershipModels.length) {
+                await operator.batchRecords(membershipModels, 'handleAutotranslationChanges');
+            }
+        }
+    } catch (error) {
+        logError('handleAutotranslationChanges', getFullErrorMessage(error));
+    }
+}
 
 export async function entryInitialChannelId(database: Database, requestedChannelId = '', requestedTeamId = '', initialTeamId: string, locale: string, channels?: Channel[], memberships?: ChannelMember[]) {
     const membershipIds = new Set(memberships?.map((m) => m.channel_id));
@@ -233,6 +305,7 @@ export const setExtraSessionProps = async (serverUrl: string, groupLabel?: Reque
         const {database} = DatabaseManager.getServerDatabaseAndOperator(serverUrl);
         const serverVersion = await getConfigValue(database, 'Version');
         const deviceToken = await getDeviceToken();
+        const voipDeviceToken = await getVoIPDeviceToken();
 
         // For new servers, we want to send all the information.
         // For old servers, we only want to send the information when there
@@ -242,7 +315,7 @@ export const setExtraSessionProps = async (serverUrl: string, groupLabel?: Reque
             const res = await checkNotifications();
             const granted = res.status === RESULTS.GRANTED || res.status === RESULTS.LIMITED;
             const client = NetworkManager.getClient(serverUrl);
-            client.setExtraSessionProps(deviceToken, !granted, nativeApplicationVersion, groupLabel);
+            client.setExtraSessionProps(deviceToken, !granted, nativeApplicationVersion, voipDeviceToken || undefined, groupLabel);
         }
         return {};
     } catch (error) {
@@ -287,6 +360,20 @@ export async function verifyPushProxy(serverUrl: string, groupLabel?: RequestGro
     }
 }
 
+// A sync leaves out a channel the user can no longer read just as it leaves out one they left, so the
+// server is asked why the open channel is gone: a read denial is then reported as such, not as a removal.
+async function kickFromMissingChannel(serverUrl: string, database: Database, channelId: string) {
+    let event: string | undefined;
+    const channel = await getChannelById(database, channelId);
+    if (channel && !isDMorGM(channel) && await isChannelAccessEnforced(database)) {
+        const {error} = await fetchChannelById(serverUrl, channelId);
+        if (getServerError(error) === ServerErrors.CHANNEL_ACCESS_DENIED) {
+            event = Events.CHANNEL_ACCESS_REVOKED;
+        }
+    }
+    await handleKickFromChannel(serverUrl, channelId, event);
+}
+
 export async function handleEntryAfterLoadNavigation(
     serverUrl: string,
     teamMembers: TeamMembership[],
@@ -329,14 +416,14 @@ export async function handleEntryAfterLoadNavigation(
             // Switched channels while loading
             if (!channelMembers.find((m) => m.channel_id === currentChannelIdAfterLoad)) {
                 if (tabletDevice || isChannelScreenMounted || isThreadsMounted) {
-                    await handleKickFromChannel(serverUrl, currentChannelIdAfterLoad);
+                    await kickFromMissingChannel(serverUrl, database, currentChannelIdAfterLoad);
                 } else {
                     await setCurrentTeamAndChannelId(operator, initialTeamId, initialChannelId);
                 }
             }
         } else if (currentChannelIdAfterLoad && currentChannelIdAfterLoad !== initialChannelId) {
             if (tabletDevice || isChannelScreenMounted || isThreadsMounted) {
-                await handleKickFromChannel(serverUrl, currentChannelIdAfterLoad);
+                await kickFromMissingChannel(serverUrl, database, currentChannelIdAfterLoad);
             } else {
                 await setCurrentTeamAndChannelId(operator, initialTeamId, initialChannelId);
             }

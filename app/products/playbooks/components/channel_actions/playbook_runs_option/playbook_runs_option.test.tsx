@@ -19,6 +19,7 @@ jest.mock('@components/slide_up_panel_item');
 jest.mocked(SlideUpPanelItem).mockImplementation((props) => React.createElement('SlideUpPanelItem', {testID: 'slide-up-panel-item', ...props}));
 
 jest.mock('@playbooks/screens/navigation');
+jest.mock('@screens/navigation');
 
 describe('PlaybookRunsOption', () => {
     function getBaseProps(): ComponentProps<typeof PlaybookRunsOption> {
@@ -36,7 +37,7 @@ describe('PlaybookRunsOption', () => {
 
         const optionItem = getByTestId('option-item');
         expect(optionItem).toBeTruthy();
-        expect(optionItem.props.label).toBe('Playbook runs');
+        expect(optionItem.props.label).toBe('Playbook checklists');
         expect(optionItem.props.info).toBe('3');
         expect(optionItem.props.icon).toBe('product-playbooks');
         expect(optionItem.props.type).toBe('arrow');
@@ -49,7 +50,7 @@ describe('PlaybookRunsOption', () => {
 
         const slideUpPanelItem = getByTestId('slide-up-panel-item');
         expect(slideUpPanelItem).toBeTruthy();
-        expect(slideUpPanelItem.props.text).toBe('Playbook runs');
+        expect(slideUpPanelItem.props.text).toBe('Playbook checklists');
         expect(slideUpPanelItem.props.leftIcon).toBe('product-playbooks');
         expect(slideUpPanelItem.props.rightIcon).toBe('chevron-right');
         expect(slideUpPanelItem.props.onPress).toBeDefined();
@@ -77,7 +78,7 @@ describe('PlaybookRunsOption', () => {
 
         await waitFor(() => {
             expect(dismissBottomSheet).toHaveBeenCalled();
-            expect(goToPlaybookRuns).toHaveBeenCalledWith(expect.anything(), 'channel-id', 'channel-name');
+            expect(goToPlaybookRuns).toHaveBeenCalledWith('channel-id', 'channel-name', true);
         });
     });
 });

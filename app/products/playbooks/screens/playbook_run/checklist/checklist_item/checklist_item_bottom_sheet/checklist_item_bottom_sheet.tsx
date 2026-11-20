@@ -3,25 +3,29 @@
 
 import React, {useCallback, useMemo, type ComponentProps} from 'react';
 import {defineMessages, useIntl} from 'react-intl';
-import {View, Text, Platform} from 'react-native';
+import {View, Text, Platform, Pressable, Alert} from 'react-native';
 
 import CompassIcon from '@components/compass_icon';
 import MenuDivider from '@components/menu_divider';
 import OptionBox from '@components/option_box';
 import OptionItem, {ITEM_HEIGHT} from '@components/option_item';
+import {Screens} from '@constants';
 import {useServerUrl} from '@context/server';
 import {useTheme} from '@context/theme';
-import {setAssignee, setChecklistItemCommand, setDueDate} from '@playbooks/actions/remote/checklist';
-import {goToEditCommand, goToSelectDate, goToSelectUser} from '@playbooks/screens/navigation';
+import {setAssignee, setChecklistItemCommand, setDueDate, deleteChecklistItem, updateChecklistItemTitleAndDescription} from '@playbooks/actions/remote/checklist';
+import {goToEditChecklistItem, goToEditCommand, goToSelectDate, goToSelectUser} from '@playbooks/screens/navigation';
 import {getDueDateString} from '@playbooks/utils/time';
-import {dismissBottomSheet, openUserProfileModal} from '@screens/navigation';
+import {dismissBottomSheet} from '@screens/navigation';
+import {openUserProfile} from '@utils/navigation';
 import {showPlaybookErrorSnackbar} from '@utils/snack_bar';
 import {makeStyleSheetFromTheme, changeOpacity} from '@utils/theme';
 import {typography} from '@utils/typography';
 import {getTimezone} from '@utils/user';
 
 import Checkbox from '../checkbox';
+import TaskActivityIndicator from '../task_activity_indicator';
 
+import type {TaskActivity} from '../task_activity';
 import type PlaybookChecklistItemModel from '@playbooks/types/database/models/playbook_checklist_item';
 import type UserModel from '@typings/database/models/servers/user';
 
@@ -74,6 +78,26 @@ const messages = defineMessages({
         id: 'playbooks.checklist_item.task_rendered_conditionally_explanation',
         defaultMessage: 'This task was rendered conditionally based on',
     },
+    deleteTask: {
+        id: 'playbooks.checklist_item.delete_task',
+        defaultMessage: 'Delete task',
+    },
+    deleteTaskTitle: {
+        id: 'playbooks.checklist_item.delete_task_title',
+        defaultMessage: 'Delete task',
+    },
+    deleteTaskConfirmation: {
+        id: 'playbooks.checklist_item.delete_task_confirmation',
+        defaultMessage: 'Are you sure you want to delete this task? This action cannot be undone.',
+    },
+    cancel: {
+        id: 'playbooks.checklist_item.delete_task_cancel',
+        defaultMessage: 'Cancel',
+    },
+    delete: {
+        id: 'playbooks.checklist_item.delete_task_confirm',
+        defaultMessage: 'Delete',
+    },
 });
 
 const ACTION_BUTTON_HEIGHT = 62;
@@ -83,11 +107,17 @@ const SCROLL_CONTENT_GAP = 12;
 const TITLE_LINE_HEIGHT = 24; // From typography 300
 const BODY_LINE_HEIGHT = 24; // From typography 200
 const BODY_LINES_COUNT = 3;
+const MENU_DIVIDER_HEIGHT = 17; // 1px line plus its 8px default vertical margins.
+const ACTIVITY_LINE_HEIGHT = 20; // From typography 100, used by the action label and the actor name.
+const ACTIVITY_DATE_LINE_HEIGHT = 16; // From typography 75, used by the absolute time.
+const ACTIVITY_TEXT_GAP = 2;
+const ACTIVITY_SECTION_HEIGHT = (ACTIVITY_LINE_HEIGHT * 2) + ACTIVITY_DATE_LINE_HEIGHT + (ACTIVITY_TEXT_GAP * 2) + MENU_DIVIDER_HEIGHT + (SCROLL_CONTENT_GAP * 2);
 
 export const BOTTOM_SHEET_HEIGHT = {
     base: (N_OPTIONS * ITEM_HEIGHT) + (OPTIONS_GAP * (N_OPTIONS - 1)) + (SCROLL_CONTENT_GAP * 2) + TITLE_LINE_HEIGHT + (BODY_LINE_HEIGHT * BODY_LINES_COUNT),
     actionButtons: ACTION_BUTTON_HEIGHT + SCROLL_CONTENT_GAP,
     conditionSection: (BODY_LINE_HEIGHT * 2) + SCROLL_CONTENT_GAP + (OPTIONS_GAP * (Platform.OS === 'android' ? 2 : 1)),
+    activitySection: ACTIVITY_SECTION_HEIGHT,
 };
 
 const getStyleSheet = makeStyleSheetFromTheme((theme) => ({
@@ -100,6 +130,20 @@ const getStyleSheet = makeStyleSheetFromTheme((theme) => ({
         flexDirection: 'row',
         alignItems: 'flex-start',
         gap: 12,
+    },
+    titleContainer: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+        flex: 1,
+    },
+    editIcon: {
+        fontSize: 18,
+        color: changeOpacity(theme.centerChannelColor, 0.56),
+        paddingHorizontal: 4,
+    },
+    editIconPressed: {
+        opacity: 0.2,
     },
     taskTitle: {
         ...typography('Body', 300, 'Regular'),
@@ -144,6 +188,17 @@ const getStyleSheet = makeStyleSheetFromTheme((theme) => ({
     conditionIcon: {
         transform: [{rotate: '90deg'}],
     },
+    deleteButton: {
+        marginTop: 8,
+        alignItems: 'center',
+    },
+    deleteButtonText: {
+        ...typography('Body', 200, 'SemiBold'),
+        color: theme.dndIndicator,
+    },
+    deleteButtonPressed: {
+        opacity: 0.2,
+    },
 }));
 
 type Props = {
@@ -154,12 +209,15 @@ type Props = {
     channelId: string;
     item: PlaybookChecklistItemModel | PlaybookChecklistItem;
     assignee?: UserModel;
+    activity?: TaskActivity;
+    activityActor?: UserModel;
     onCheck: () => void;
     onSkip: () => void;
     onRunCommand: () => void;
     teammateNameDisplay: string;
     isDisabled: boolean;
     currentUserTimezone: UserTimezone | null | undefined;
+    isMilitaryTime: boolean;
     participantIds: string[];
     conditionReason: string;
     showConditionIcon: boolean;
@@ -174,12 +232,15 @@ const ChecklistItemBottomSheet = ({
     channelId,
     item,
     assignee,
+    activity,
+    activityActor,
     onCheck,
     onSkip,
     onRunCommand,
     teammateNameDisplay,
     isDisabled,
     currentUserTimezone,
+    isMilitaryTime,
     participantIds,
     conditionReason,
     showConditionIcon,
@@ -244,19 +305,19 @@ const ChecklistItemBottomSheet = ({
     );
 
     const onUserChipPress = useCallback((userId: string) => {
-        openUserProfileModal(intl, theme, {
+        openUserProfile({
             userId,
-            location: 'PlaybookRun',
+            location: Screens.PLAYBOOK_RUN,
         });
-    }, [intl, theme]);
-
+    }, []);
     const updateCommand = useCallback(async (command: string) => {
         await setChecklistItemCommand(serverUrl, runId, item.id, checklistNumber, itemNumber, command);
     }, [checklistNumber, item.id, itemNumber, runId, serverUrl]);
 
-    const openEditCommandModal = useCallback(() => {
-        goToEditCommand(intl, theme, runName, item.command, channelId, updateCommand);
-    }, [intl, theme, runName, item.command, channelId, updateCommand]);
+    const openEditCommandModal = useCallback(async () => {
+        await dismissBottomSheet();
+        goToEditCommand(runName, item.command, channelId, updateCommand);
+    }, [runName, item.command, channelId, updateCommand]);
 
     const assigneeInfo: ComponentProps<typeof OptionItem>['info'] = useMemo(() => {
         if (!assignee) {
@@ -270,11 +331,14 @@ const ChecklistItemBottomSheet = ({
         };
     }, [assignee, intl, onUserChipPress, teammateNameDisplay]);
 
+    // Dismiss first so the next screen isn't pushed under the transparent sheet (Android
+    // headers then lose status-bar insets and draw under the system bar).
     const openEditDateModal = useCallback(async () => {
-        goToSelectDate(intl, theme, runName, (date) => {
+        await dismissBottomSheet();
+        goToSelectDate(runName, (date) => {
             setDueDate(serverUrl, runId, item.id, checklistNumber, itemNumber, date);
         }, dueDate);
-    }, [intl, theme, runName, dueDate, serverUrl, runId, item.id, checklistNumber, itemNumber]);
+    }, [runName, dueDate, serverUrl, runId, item.id, checklistNumber, itemNumber]);
 
     const handleSelect = useCallback(async (selected: UserProfile) => {
         const res = await setAssignee(serverUrl, runId, item.id, checklistNumber, itemNumber, selected.id);
@@ -290,9 +354,9 @@ const ChecklistItemBottomSheet = ({
         }
     }, [checklistNumber, item.id, itemNumber, runId, serverUrl]);
 
-    const openUserSelector = useCallback(() => {
+    const openUserSelector = useCallback(async () => {
+        await dismissBottomSheet();
         goToSelectUser(
-            theme,
             runName,
             intl.formatMessage(messages.assignee),
             participantIds,
@@ -300,7 +364,20 @@ const ChecklistItemBottomSheet = ({
             handleSelect,
             handleRemove,
         );
-    }, [assignee?.id, handleRemove, handleSelect, intl, participantIds, runName, theme]);
+    }, [assignee?.id, handleRemove, handleSelect, intl, participantIds, runName]);
+
+    const handleEditItem = useCallback(async (itemInput: ChecklistItemInput) => {
+        const res = await updateChecklistItemTitleAndDescription(serverUrl, runId, item.id, checklistNumber, itemNumber, itemInput);
+        if (res.error) {
+            showPlaybookErrorSnackbar();
+        }
+    }, [checklistNumber, item.id, itemNumber, runId, serverUrl]);
+
+    const openEditItemModal = useCallback(async () => {
+        await dismissBottomSheet();
+        const itemDescription = ('description' in item && item.description) || undefined;
+        goToEditChecklistItem(runName, item.title, itemDescription, handleEditItem);
+    }, [runName, item, handleEditItem]);
 
     const renderTaskDetails = () => (
         <View style={styles.taskDetailsContainer}>
@@ -367,6 +444,30 @@ const ChecklistItemBottomSheet = ({
         </>
     );
 
+    const handleDelete = useCallback(() => {
+        Alert.alert(
+            intl.formatMessage(messages.deleteTaskTitle),
+            intl.formatMessage(messages.deleteTaskConfirmation),
+            [
+                {
+                    text: intl.formatMessage(messages.cancel),
+                    style: 'cancel',
+                },
+                {
+                    text: intl.formatMessage(messages.delete),
+                    style: 'destructive',
+                    onPress: async () => {
+                        await dismissBottomSheet();
+                        const res = await deleteChecklistItem(serverUrl, runId, item.id, checklistNumber, itemNumber);
+                        if (res.error) {
+                            showPlaybookErrorSnackbar();
+                        }
+                    },
+                },
+            ],
+        );
+    }, [intl, serverUrl, runId, item.id, checklistNumber, itemNumber]);
+
     return (
         <View
             style={styles.container}
@@ -376,21 +477,63 @@ const ChecklistItemBottomSheet = ({
                     checked={isChecked}
                     onPress={handleCheck}
                 />
-                <View style={styles.flex}>
-                    <Text style={styles.taskTitle}>
-                        {item.title}
-                    </Text>
-                    {Boolean(item.description) && (
-                        <Text style={styles.taskDescription}>
-                            {item.description}
+                <View style={styles.titleContainer}>
+                    <View style={styles.flex}>
+                        <Text style={styles.taskTitle}>
+                            {item.title}
                         </Text>
+                        {(item.description) && (
+                            <Text style={styles.taskDescription}>
+                                {item.description}
+                            </Text>
+                        )}
+                    </View>
+                    {!isDisabled && (
+                        <Pressable
+                            onPress={openEditItemModal}
+                            style={({pressed}) => pressed && styles.editIconPressed}
+                            testID='checklist_item.edit_button'
+                        >
+                            <CompassIcon
+                                name='pencil-outline'
+                                style={styles.editIcon}
+                            />
+                        </Pressable>
                     )}
                 </View>
             </View>
             <MenuDivider/>
+            {activity && (
+                <>
+                    <TaskActivityIndicator
+                        activity={activity}
+                        actor={activityActor}
+                        teammateNameDisplay={teammateNameDisplay}
+                        timezone={timezone}
+                        isMilitaryTime={isMilitaryTime}
+                        variant='detail'
+                        onActorPress={onUserChipPress}
+                    />
+                    <MenuDivider/>
+                </>
+            )}
             {!isDisabled && renderActionButtons()}
             {renderTaskDetails()}
             {showConditionIcon && renderConditionSection()}
+            {!isDisabled && (
+                <>
+                    <MenuDivider/>
+                    <Pressable
+                        onPress={handleDelete}
+                        style={({pressed}) => [styles.deleteButton, pressed && styles.deleteButtonPressed]}
+                        testID='checklist_item_bottom_sheet.delete_button'
+                    >
+                        <Text style={styles.deleteButtonText}>
+                            {intl.formatMessage(messages.deleteTask)}
+                        </Text>
+                    </Pressable>
+                </>
+            )}
         </View>
     );
 };

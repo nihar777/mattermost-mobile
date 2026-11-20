@@ -3,7 +3,6 @@
 
 import {createIntl} from 'react-intl';
 import {Alert} from 'react-native';
-import {Navigation} from 'react-native-navigation';
 
 import {joinIfNeededAndSwitchToChannel, makeDirectChannel} from '@actions/remote/channel';
 import {showPermalink} from '@actions/remote/permalink';
@@ -17,15 +16,15 @@ import {fetchIsPlaybooksEnabled} from '@playbooks/database/queries/version';
 import {goToPlaybookRun} from '@playbooks/screens/navigation';
 import {getActiveServerUrl} from '@queries/app/servers';
 import {queryUsersByUsername} from '@queries/servers/user';
-import {dismissAllModalsAndPopToRoot} from '@screens/navigation';
-import NavigationStore from '@store/navigation_store';
+import {navigateToRoot} from '@screens/navigation';
+import {NavigationStore} from '@store/navigation_store';
 import TestHelper from '@test/test_helper';
 import {logError} from '@utils/log';
 import {addNewServer} from '@utils/server';
 
 import {alertErrorWithFallback, errorBadChannel, errorUnkownUser} from '../draft';
 
-import {alertInvalidDeepLink, extractServerUrl, getLaunchPropsFromDeepLink, parseAndHandleDeepLink} from '.';
+import {alertInvalidDeepLink, extractServerUrl, getLaunchPropsFromDeepLink, parseAndHandleDeepLink} from './index';
 
 jest.mock('@actions/remote/user', () => ({
     fetchUsersByUsernames: jest.fn(),
@@ -55,11 +54,15 @@ jest.mock('@managers/websocket_manager', () => ({
 }));
 
 jest.mock('@store/navigation_store', () => ({
-    getVisibleScreen: jest.fn(() => 'HOME'),
-    hasModalsOpened: jest.fn(() => false),
-    waitUntilScreenHasLoaded: jest.fn(),
-    getScreensInStack: jest.fn().mockReturnValue([]),
+    NavigationStore: {
+        getVisibleScreen: jest.fn(),
+        hasModalsOpened: jest.fn(() => false),
+        waitUntilScreenHasLoaded: jest.fn(),
+        getScreensInStack: jest.fn().mockReturnValue([]),
+    },
 }));
+
+jest.mocked(NavigationStore.getVisibleScreen).mockReturnValue(Screens.HOME);
 
 jest.mock('@utils/server', () => ({
     addNewServer: jest.fn(),
@@ -90,6 +93,7 @@ jest.mock('@playbooks/database/queries/version');
 jest.mock('@playbooks/database/queries/run');
 jest.mock('@playbooks/actions/remote/runs');
 jest.mock('@playbooks/screens/navigation');
+jest.mock('@screens/navigation');
 
 describe('extractServerUrl', () => {
     it('should extract the sanitized server url', () => {
@@ -135,20 +139,9 @@ describe('parseAndHandleDeepLink', () => {
         jest.mocked(getActiveServerUrl).mockResolvedValueOnce('https://currentserver.com');
         jest.mocked(DatabaseManager.searchUrl).mockReturnValueOnce('https://existingserver.com');
         const result = await parseAndHandleDeepLink('https://existingserver.com/team/channels/town-square');
-        expect(dismissAllModalsAndPopToRoot).toHaveBeenCalled();
+        expect(navigateToRoot).toHaveBeenCalled();
         expect(DatabaseManager.setActiveServerDatabase).toHaveBeenCalledWith('https://existingserver.com');
         expect(WebsocketManager.initializeClient).toHaveBeenCalledWith('https://existingserver.com', 'DeepLink');
-        expect(result).toEqual({error: false});
-    });
-
-    it('should update the server url in the server url screen', async () => {
-        jest.mocked(getActiveServerUrl).mockResolvedValueOnce('https://currentserver.com');
-        jest.mocked(DatabaseManager.searchUrl).mockReturnValueOnce(undefined);
-
-        jest.mocked(NavigationStore.getVisibleScreen).mockReturnValueOnce(Screens.SERVER);
-        const result = await parseAndHandleDeepLink('https://currentserver.com/team/channels/town-square', undefined, undefined, true);
-        const spyOnUpdateProps = jest.spyOn(Navigation, 'updateProps');
-        expect(spyOnUpdateProps).toHaveBeenCalledWith(Screens.SERVER, {serverUrl: 'currentserver.com'});
         expect(result).toEqual({error: false});
     });
 
@@ -168,6 +161,15 @@ describe('parseAndHandleDeepLink', () => {
         jest.mocked(getActiveServerUrl).mockResolvedValueOnce('https://existingserver.com');
         const result = await parseAndHandleDeepLink('https://existingserver.com/team/channels/town-square', intl);
         expect(joinIfNeededAndSwitchToChannel).toHaveBeenCalledWith('https://existingserver.com', {name: 'town-square'}, {name: 'team'}, errorBadChannel, intl);
+        expect(result).toEqual({error: false});
+    });
+
+    it('should provide the ID for an ID-shaped Channel deep link', async () => {
+        jest.mocked(DatabaseManager.searchUrl).mockReturnValueOnce('https://existingserver.com');
+        jest.mocked(getActiveServerUrl).mockResolvedValueOnce('https://existingserver.com');
+        const channelId = '7b35c77a645e1906e03a2c330f';
+        const result = await parseAndHandleDeepLink(`https://existingserver.com/team/channels/${channelId}`, intl);
+        expect(joinIfNeededAndSwitchToChannel).toHaveBeenCalledWith('https://existingserver.com', {id: channelId, name: channelId}, {name: 'team'}, errorBadChannel, intl);
         expect(result).toEqual({error: false});
     });
 
@@ -233,7 +235,7 @@ describe('parseAndHandleDeepLink', () => {
         await parseAndHandleDeepLink('https://existingserver.com/playbooks/playbooks/7b35c77a645e1906e03a2c330f', intl);
         expect(alertSpy).toHaveBeenCalledWith(
             intl.formatMessage({id: 'playbooks.only_runs_available.title', defaultMessage: 'Playbooks not available'}),
-            intl.formatMessage({id: 'playbooks.only_runs_available.description', defaultMessage: 'Only Playbook Runs are available on mobile. To access the Playbook, please use the desktop or web app.'}),
+            intl.formatMessage({id: 'playbooks.only_runs_available.description', defaultMessage: 'Only Playbook Checklists are available on mobile. To access the Playbook, please use the desktop or web app.'}),
             [{text: intl.formatMessage({id: 'playbooks.only_runs_available.ok', defaultMessage: 'OK'})}],
         );
     });
@@ -244,8 +246,8 @@ describe('parseAndHandleDeepLink', () => {
         jest.mocked(getActiveServerUrl).mockResolvedValueOnce('https://existingserver.com');
         await parseAndHandleDeepLink('https://existingserver.com/playbooks/runs/7b35c77a645e1906e03a2c330f/retrospective', intl);
         expect(alertSpy).toHaveBeenCalledWith(
-            intl.formatMessage({id: 'playbooks.retrospective_not_available.title', defaultMessage: 'Playbooks Run Retrospective not available'}),
-            intl.formatMessage({id: 'playbooks.retrospective_not_available.description', defaultMessage: 'Only Playbook Runs are available on mobile. To fill the Run Retrospective, please use the desktop or web app.'}),
+            intl.formatMessage({id: 'playbooks.retrospective_not_available.title', defaultMessage: 'Playbooks Retrospective not available'}),
+            intl.formatMessage({id: 'playbooks.retrospective_not_available.description', defaultMessage: 'Only Playbook Checklists are available on mobile. To fill the Run Retrospective, please use the desktop or web app.'}),
             [{text: intl.formatMessage({id: 'playbooks.retrospective_not_available.ok', defaultMessage: 'OK'})}],
         );
     });
@@ -259,7 +261,7 @@ describe('parseAndHandleDeepLink', () => {
 
         // Re-import to apply mocks
         await parseAndHandleDeepLink('https://existingserver.com/playbooks/runs/7b35c77a645e1906e03a2c330f', intl);
-        expect(goToPlaybookRun).toHaveBeenCalledWith(intl, '7b35c77a645e1906e03a2c330f');
+        expect(goToPlaybookRun).toHaveBeenCalledWith('7b35c77a645e1906e03a2c330f');
     });
 
     it('should fetch playbook run if not found locally and show error if fetch fails', async () => {
@@ -273,8 +275,8 @@ describe('parseAndHandleDeepLink', () => {
         // Re-import to apply mocks
         await parseAndHandleDeepLink('https://existingserver.com/playbooks/runs/7b35c77a645e1906e03a2c330f', intl);
         expect(alertSpy).toHaveBeenCalledWith(
-            intl.formatMessage({id: 'playbooks.fetch_error.title', defaultMessage: 'Unable to open Run'}),
-            intl.formatMessage({id: 'playbooks.fetch_error.description', defaultMessage: "You don't have permission to view this run, or it may no longer exist."}),
+            intl.formatMessage({id: 'playbooks.fetch_error.title', defaultMessage: 'Unable to open Checklist'}),
+            intl.formatMessage({id: 'playbooks.fetch_error.description', defaultMessage: "You don't have permission to view this, or it may no longer exist."}),
             [{text: intl.formatMessage({id: 'playbooks.fetch_error.OK', defaultMessage: 'Okay'})}],
         );
     });

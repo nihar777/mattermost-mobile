@@ -1,6 +1,7 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
+import {handleAutotranslationChanges} from '@actions/remote/entry/common';
 import {MM_TABLES} from '@constants/database';
 import DatabaseManager from '@database/manager';
 
@@ -35,6 +36,7 @@ type PrepareModelsForDeletionArgs = {
     initialTeamId?: string;
     teamData?: MyTeamsRequest;
     chData?: MyChannelsRequest;
+    channelsFetchComplete?: boolean;
 }
 
 const {
@@ -49,7 +51,7 @@ const {
     MY_CHANNEL,
 } = MM_TABLES.SERVER;
 
-export async function prepareEntryModelsForDeletion({serverUrl, operator, teamData, chData}: PrepareModelsForDeletionArgs): Promise<Array<Promise<Model[]>>> {
+export async function prepareEntryModelsForDeletion({serverUrl, operator, teamData, chData, channelsFetchComplete}: PrepareModelsForDeletionArgs): Promise<Array<Promise<Model[]>>> {
     const modelPromises: Array<Promise<Model[]>> = [];
     const {database} = operator;
     let teamIdsToDelete: Set<string>|undefined;
@@ -66,7 +68,7 @@ export async function prepareEntryModelsForDeletion({serverUrl, operator, teamDa
         });
     }
 
-    if (chData?.channels?.length && chData.memberships?.length) {
+    if (channelsFetchComplete && chData?.channels && chData.memberships) {
         const {channels} = chData;
         const fetchedChannelIds = new Set(channels.map((c) => c.id));
         const channelsQuery = await queryAllChannels(database);
@@ -159,7 +161,7 @@ export async function truncateCrtRelatedTables(serverUrl: string): Promise<{erro
  * @param {boolean} [args.isCRTEnabled] - Whether Collapsed Reply Threads are enabled
  * @returns {Promise<Model[]>} Promise that resolves to an array of processed database models
  */
-export async function processEntryModels({
+export async function processEntryModels(serverUrl: string, {
     operator,
     teamData,
     chData,
@@ -167,11 +169,12 @@ export async function processEntryModels({
     meData,
     isCRTEnabled,
 }: PrepareModelsArgs): Promise<Model[]> {
+    await handleAutotranslationChanges(serverUrl, meData, chData);
     const modelPromises = await prepareEntryModels({operator, teamData, chData, prefData, meData, isCRTEnabled});
 
     const flattenModels = (await Promise.all(modelPromises)).flat();
     if (flattenModels.length) {
-        operator.batchRecords(flattenModels, 'processEntryModels');
+        await operator.batchRecords(flattenModels, 'processEntryModels');
     }
 
     return flattenModels;
@@ -186,6 +189,7 @@ export async function processEntryModels({
  * @param {ServerDataOperator} args.operator - Database operator for the server
  * @param {MyTeamsRequest} [args.teamData] - Team data to determine what teams to keep/delete
  * @param {MyChannelsRequest} [args.chData] - Channel data to determine what channels to keep/delete
+ * @param {boolean} [args.channelsFetchComplete] - Whether every channel fetch behind chData succeeded; channels are only deleted when it did
  * @returns {Promise<void>} Promise that resolves when deletion operations are complete
  */
 export async function processEntryModelsForDeletion({
@@ -193,11 +197,12 @@ export async function processEntryModelsForDeletion({
     operator,
     teamData,
     chData,
+    channelsFetchComplete,
 }: PrepareModelsForDeletionArgs): Promise<void> {
-    const modelsToDeletePromises = await prepareEntryModelsForDeletion({serverUrl, operator, teamData, chData});
+    const modelsToDeletePromises = await prepareEntryModelsForDeletion({serverUrl, operator, teamData, chData, channelsFetchComplete});
 
     const modelsToDelete = (await Promise.all(modelsToDeletePromises)).flat();
     if (modelsToDelete.length) {
-        operator.batchRecords(modelsToDelete, 'processEntryModelsForDeletion');
+        await operator.batchRecords(modelsToDelete, 'processEntryModelsForDeletion');
     }
 }

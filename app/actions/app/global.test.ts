@@ -2,7 +2,6 @@
 // See LICENSE.txt for license information.
 
 import {Tutorial} from '@constants';
-import {GLOBAL_IDENTIFIERS} from '@constants/database';
 import DatabaseManager from '@database/manager';
 import {
     getDeviceToken,
@@ -32,9 +31,10 @@ import {
     removeLastViewedThreadIdAndServer,
     storePushDisabledInServerAcknowledged,
     removePushDisabledInServerAcknowledged,
+    storePushSigningKey,
+    removePushSigningKey,
     storeScheduledPostTutorial,
     storeScheduledPostsListTutorial,
-    storeLowConnectivityMonitor,
 } from './global';
 
 const serverUrl = 'server.test.com';
@@ -177,6 +177,20 @@ describe('/app/actions/app/global', () => {
         expect(storedValue).toBe(false);
     });
 
+    test('removePushSigningKey deletes the record instead of leaving an empty value behind', async () => {
+        await storePushSigningKey(serverUrl, 'signing-key-1');
+        let records = await queryGlobalValue(`pushSigningKey${serverUrl}`)?.fetch();
+        expect(records?.[0]?.value).toBe('signing-key-1');
+
+        await removePushSigningKey(serverUrl);
+        records = await queryGlobalValue(`pushSigningKey${serverUrl}`)?.fetch();
+        expect(records?.length).toBe(0);
+    });
+
+    test('removePushSigningKey does not throw when there is no cached key', async () => {
+        await expect(removePushSigningKey(serverUrl)).resolves.toMatchObject({});
+    });
+
     test('storeGlobal catch error', async () => {
         delete DatabaseManager.appDatabase;
 
@@ -204,18 +218,5 @@ describe('/app/actions/app/global', () => {
         await storeScheduledPostsListTutorial();
         records = await queryGlobalValue(Tutorial.SCHEDULED_POSTS_LIST)?.fetch();
         expect(records?.[0]?.value).toBe(true);
-    });
-
-    test('storeLowConnectivityMonitor', async () => {
-        let records = await queryGlobalValue(GLOBAL_IDENTIFIERS.LOW_CONNECTIVITY_MONITOR)?.fetch();
-        expect(records?.[0]?.value).toBeUndefined();
-
-        await storeLowConnectivityMonitor(true);
-        records = await queryGlobalValue(GLOBAL_IDENTIFIERS.LOW_CONNECTIVITY_MONITOR)?.fetch();
-        expect(records?.[0]?.value).toBe(true);
-
-        await storeLowConnectivityMonitor(false);
-        records = await queryGlobalValue(GLOBAL_IDENTIFIERS.LOW_CONNECTIVITY_MONITOR)?.fetch();
-        expect(records?.[0]?.value).toBe(false);
     });
 });

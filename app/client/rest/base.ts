@@ -13,7 +13,7 @@ export default class ClientBase extends ClientTracking {
         super(apiClient);
 
         if (bearerToken || preauthSecret) {
-            this.setClientCredentials(bearerToken || '', preauthSecret || '');
+            this.setClientCredentials(bearerToken ?? '', preauthSecret);
         }
         if (csrfToken) {
             this.setCSRFToken(csrfToken);
@@ -28,6 +28,10 @@ export default class ClientBase extends ClientTracking {
 
     getBaseRoute() {
         return this.apiClient.baseUrl || '';
+    }
+
+    getAPIRoute() {
+        return `${this.getBaseRoute()}${this.urlVersion}`;
     }
 
     getAbsoluteUrl(baseUrl?: string) {
@@ -105,6 +109,18 @@ export default class ClientBase extends ClientTracking {
 
     getSharedChannelsRoute() {
         return `${this.urlVersion}/sharedchannels`;
+    }
+
+    getRemoteClustersRoute() {
+        return `${this.urlVersion}/remotecluster`;
+    }
+
+    getChannelRemotesRoute(channelId: string) {
+        return `${this.getSharedChannelsRoute()}/${channelId}/remotes`;
+    }
+
+    getRemoteClusterChannelRoute(remoteId: string, channelId: string) {
+        return `${this.getRemoteClustersRoute()}/${remoteId}/channels/${channelId}`;
     }
 
     getChannelMembersRoute(channelId: string) {

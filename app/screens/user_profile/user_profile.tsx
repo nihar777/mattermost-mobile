@@ -3,17 +3,19 @@
 
 import moment from 'moment';
 import mtz from 'moment-timezone';
-import React, {useEffect, useMemo} from 'react';
+import React, {useMemo} from 'react';
 import {defineMessages, useIntl} from 'react-intl';
 import {useSafeAreaInsets} from 'react-native-safe-area-context';
 
 import {fetchTeamAndChannelMembership} from '@actions/remote/user';
+import {getDialablePhones, NO_PHONES} from '@calls/utils';
 import {Screens} from '@constants';
 import {useServerUrl} from '@context/server';
+import useDidMount from '@hooks/did_mount';
 import {getLocaleFromLanguage} from '@i18n';
 import BottomSheet from '@screens/bottom_sheet';
 import {bottomSheetSnapPoint} from '@utils/helpers';
-import {getUserCustomStatus, getUserTimezone, isCustomStatusExpired} from '@utils/user';
+import {getUserCustomStatus, getUserTimezone, isBot, isCustomStatusExpired, isDeactivated} from '@utils/user';
 
 import ManageUserOptions, {DIVIDER_MARGIN} from './manage_user_options';
 import UserProfileOptions, {type OptionsType} from './options';
@@ -27,14 +29,13 @@ import type {AvailableScreens} from '@typings/screens/navigation';
 type Props = {
     canChangeMemberRoles: boolean;
     channelId?: string;
-    closeButtonId: string;
     currentUserId: string;
     enablePostIconOverride: boolean;
     enablePostUsernameOverride: boolean;
     isChannelAdmin: boolean;
     canManageAndRemoveMembers?: boolean;
     isCustomStatusEnabled: boolean;
-    isDirectMessage: boolean;
+    isDirectMessageWithUser: boolean;
     isDefaultChannel: boolean;
     isMilitaryTime: boolean;
     isSystemAdmin: boolean;
@@ -66,18 +67,33 @@ const messages = defineMessages({
 });
 const channelContextScreens: AvailableScreens[] = [Screens.CHANNEL, Screens.THREAD];
 
+type ShouldShowUserProfileOptionsProps = {
+    channelContext: boolean;
+    isDirectMessageWithUser: boolean;
+    manageMode: boolean;
+    override: boolean;
+};
+
+export function shouldShowUserProfileOptions({
+    channelContext,
+    isDirectMessageWithUser,
+    manageMode,
+    override,
+}: ShouldShowUserProfileOptionsProps) {
+    return (!isDirectMessageWithUser || !channelContext) && !override && !manageMode;
+}
+
 const UserProfile = ({
     canChangeMemberRoles,
     canManageAndRemoveMembers,
     channelId,
-    closeButtonId,
     currentUserId,
     enablePostIconOverride,
     enablePostUsernameOverride,
     isChannelAdmin,
     isCustomStatusEnabled,
     isDefaultChannel,
-    isDirectMessage,
+    isDirectMessageWithUser,
     isMilitaryTime,
     isSystemAdmin,
     isTeamAdmin,
@@ -113,10 +129,23 @@ const UserProfile = ({
     }
 
     const showCustomStatus = isCustomStatusEnabled && Boolean(customStatus) && !user.isBot && !isCustomStatusExpired(user);
-    const showUserProfileOptions = (!isDirectMessage || !channelContext) && !override && !manageMode;
+    const showUserProfileOptions = shouldShowUserProfileOptions({
+        channelContext,
+        isDirectMessageWithUser,
+        manageMode,
+        override,
+    });
     const showNickname = Boolean(user.nickname) && !override && !user.isBot && !manageMode;
     const showPosition = Boolean(user.position) && !override && !user.isBot && !manageMode;
     const showLocalTime = Boolean(localTime) && !override && !user.isBot && !manageMode;
+
+    // The server rejects calling yourself, a bot or a deactivated user.
+    const phones = useMemo(() => {
+        if (user.id === currentUserId || isBot(user) || isDeactivated(user)) {
+            return NO_PHONES;
+        }
+        return getDialablePhones(Object.values(customAttributesSet ?? {}));
+    }, [customAttributesSet, user, currentUserId]);
 
     const headerText = manageMode ? formatMessage(messages.manageMember) : undefined;
 
@@ -171,11 +200,11 @@ const UserProfile = ({
         canManageAndRemoveMembers,
     ]);
 
-    useEffect(() => {
+    useDidMount(() => {
         if (currentUserId !== user.id) {
             fetchTeamAndChannelMembership(serverUrl, user.id, teamId, channelId);
         }
-    }, []);
+    });
 
     const renderContent = () => {
         return (
@@ -200,6 +229,7 @@ const UserProfile = ({
                         type={showOptions}
                         username={user.username}
                         userId={user.id}
+                        phones={phones}
                     />
                 }
                 {!manageMode && (
@@ -212,6 +242,7 @@ const UserProfile = ({
                         user={user}
                         enableCustomAttributes={enableCustomAttributes}
                         customAttributesSet={customAttributesSet}
+                        callTargetUserId={phones.length ? user.id : undefined}
                     />
                 )}
                 {manageMode && channelId && (canManageAndRemoveMembers || canChangeMemberRoles) &&
@@ -230,8 +261,7 @@ const UserProfile = ({
     return (
         <BottomSheet
             renderContent={renderContent}
-            closeButtonId={closeButtonId}
-            componentId={Screens.USER_PROFILE}
+            screen={Screens.USER_PROFILE}
             initialSnapIndex={1}
             snapPoints={snapPoints}
             testID='user_profile'

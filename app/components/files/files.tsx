@@ -1,24 +1,24 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import React, {useCallback, useEffect, useMemo, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useReducer, useState} from 'react';
 import {DeviceEventEmitter, type StyleProp, StyleSheet, View, type ViewStyle} from 'react-native';
 import Animated from 'react-native-reanimated';
 
 import {Events} from '@constants';
 import {GalleryInit} from '@context/gallery';
+import {usePostConfig} from '@context/post_config';
 import {useIsTablet} from '@hooks/device';
 import {useImageAttachments} from '@hooks/files';
+import {useIsInViewPort} from '@hooks/in_viewport';
 import {usePreventDoubleTap} from '@hooks/utils';
-import {isImage, isVideo} from '@utils/file';
+import {fileExists, isImage, isVideo} from '@utils/file';
 import {fileToGalleryItem, openGalleryAtIndex} from '@utils/gallery';
 import {getViewPortWidth} from '@utils/images';
 
 import File from './file';
 
 type FilesProps = {
-    canDownloadFiles: boolean;
-    enableSecureFilePreview: boolean;
     failed?: boolean;
     filesInfo: FileInfo[];
     layoutWidth?: number;
@@ -54,8 +54,6 @@ const styles = StyleSheet.create({
 });
 
 const Files = ({
-    canDownloadFiles,
-    enableSecureFilePreview,
     failed,
     filesInfo,
     isReplyPost,
@@ -66,10 +64,18 @@ const Files = ({
     isPermalinkPreview = false,
 }: FilesProps) => {
     const galleryIdentifier = `${postId}-fileAttachments-${location}`;
-    const [inViewPort, setInViewPort] = useState(false);
+    const inViewPort = useIsInViewPort(location, postId ?? '');
     const isTablet = useIsTablet();
+    const {canDownloadFiles, enableSecureFilePreview} = usePostConfig();
 
-    const {images: imageAttachments, nonImages: nonImageAttachments} = useImageAttachments(filesInfo);
+    // Validate local paths asynchronously after render
+    const [validatedFilesInfo, setValidatedFilesInfo] = useState(filesInfo);
+
+    const {images: imageAttachments, nonImages: nonImageAttachments} = useImageAttachments(validatedFilesInfo);
+
+    // Force re-render when a file is rejected (to move it from images to nonImages)
+    const [, forceUpdate] = useReducer((x: number) => x + 1, 0);
+
     const [filesForGallery, setFilesForGallery] = useState(() => [...imageAttachments, ...nonImageAttachments]);
 
     const attachmentIndex = (fileId: string) => {
@@ -77,7 +83,7 @@ const Files = ({
     };
 
     const handlePreviewPress = usePreventDoubleTap(useCallback((idx: number) => {
-        const items = filesForGallery.map((f) => fileToGalleryItem(f, f.user_id, postProps));
+        const items = filesForGallery.map((f) => fileToGalleryItem(f, f.user_id, postProps, 0, f.id));
         openGalleryAtIndex(galleryIdentifier, idx, items);
     }, [filesForGallery, galleryIdentifier, postProps]));
 
@@ -165,18 +171,56 @@ const Files = ({
     };
 
     useEffect(() => {
-        const onScrollEnd = DeviceEventEmitter.addListener(Events.ITEM_IN_VIEWPORT, (viewableItems) => {
-            if (`${location}-${postId}` in viewableItems) {
-                setInViewPort(true);
-            }
-        });
-
-        return () => onScrollEnd.remove();
-    }, [location, postId]);
-
-    useEffect(() => {
         setFilesForGallery([...imageAttachments, ...nonImageAttachments]);
     }, [imageAttachments, nonImageAttachments]);
+
+    // Validate local paths asynchronously in background
+    useEffect(() => {
+        let isCancelled = false;
+
+        const validateFiles = () => {
+            // If no files have localPath, skip validation but still update state
+            const hasLocalPaths = filesInfo.some((f) => f.localPath);
+            if (!hasLocalPaths) {
+                if (!isCancelled) {
+                    setValidatedFilesInfo(filesInfo);
+                }
+                return;
+            }
+
+            // Validate each file's localPath
+            const validated = filesInfo.map((file) => {
+                if (file.localPath && !fileExists(file.localPath)) {
+                    return {...file, localPath: ''};
+                }
+                return file;
+            });
+
+            // Only update state if component is still mounted
+            if (!isCancelled) {
+                setValidatedFilesInfo(validated);
+            }
+        };
+
+        validateFiles();
+
+        return () => {
+            isCancelled = true;
+        };
+    }, [filesInfo]);
+
+    // Listen for file rejection events and re-render if one of our files is rejected
+    // This handles the race condition where files render before rejection status is known
+    useEffect(() => {
+        const fileIds = new Set(filesInfo.map((f) => f.id));
+        const onFileRejected = ({fileId}: {fileId: string}) => {
+            if (fileIds.has(fileId)) {
+                forceUpdate();
+            }
+        };
+        const listener = DeviceEventEmitter.addListener(Events.FILE_REJECTED, onFileRejected);
+        return () => listener.remove();
+    }, [filesInfo]);
 
     return (
         <GalleryInit galleryIdentifier={galleryIdentifier}>

@@ -12,6 +12,38 @@ npm install
 
 navigate to the `detox` folder and run `npm install`
 
+## Configure your server details
+`detox/e2e/support/test_config.ts` defaults to one local server on port `8065`.
+For iOS, both the test runner and simulator use `http://localhost:8065`. For
+Android, the test runner uses `http://localhost:8065` while the emulator uses
+`http://10.0.2.2:8065`.
+
+If you use a remote server, set the logical site variable to a URL reachable
+from both the host test runner and the device:
+```sh
+  export SITE_1_URL="https://your-server.example.com"
+  export ADMIN_USERNAME="your-username"
+  export ADMIN_PASSWORD="your-password"
+  export ADMIN_EMAIL="your-email"
+```
+
+You can instead create a `detox/.env` file:
+```sh
+  # detox/.env
+  SITE_1_URL=https://your-server.example.com
+  ADMIN_USERNAME=your-username
+  ADMIN_PASSWORD=your-password
+  ADMIN_EMAIL=your-email@example.com
+```
+
+**Note**: no need to provide all variables, only the ones that differ.
+
+`SITE_2_URL` and `SITE_3_URL` are only needed for tests that add distinct
+Mattermost servers, such as `server_login/server_list.e2e.ts`. If they are
+unset, their URL helpers alias site 1 and tests that require distinct servers
+are skipped. The five-server `ANDROID_SITE_*` and `IOS_SITE_*` topology is
+assigned by CI and is not required for ordinary local runs.
+
 ## Android
 
 ### Build Detox Android App
@@ -19,8 +51,6 @@ navigate to the `detox` folder and run `npm install`
 To build the Detox Android app, navigate to the `detox` folder and run:
 
 ```sh
-npm run e2e:android-inject-settings
-
 npm run e2e:android-build
 ```
 
@@ -48,24 +78,48 @@ npm run e2e:android-test
 npm run e2e:android-test <path to test file>
 ```
 
+Local runs now default to a lower-memory setup so they coexist better with other tools:
+- Detox uses `1` worker unless you set `DETOX_MAX_WORKERS`.
+- Detox caps Node heap at `4096MB` unless you already set `NODE_OPTIONS`.
+- Android Detox builds cap Gradle heap at `3072MB` and use at most `2` Gradle workers unless you override `MM_GRADLE_XMX_MB` or `MM_GRADLE_WORKERS_MAX`.
+- Android emulator RAM defaults to `3072MB` when created or refreshed; override with `MM_ANDROID_EMULATOR_RAM_MB`.
+
 ## iOS
 
 ### Build iOS Simulator
 
-To build the iOS simulator for Detox, navigate to the `detox` folder and run:
+To build the iOS simulator for Detox, from the project folder run:
 
 ```sh
 npm run e2e:ios-build
 ```
 
-This will build the Simulor .zip file at the root folder.
+This will build the Simulator .zip file at the root folder.
 
-Create a folder named `mobile-artifacts` at the project root. Unzip the zip file and move the mattermost app under `mobile-artifacts.`
+Create a folder named `mobile-artifacts` at the project root. Move the zip file under `mobile-artifacts` and unzip it there.
 
 ```sh
 # From project root
 mkdir mobile-artifacts
 ```
+
+### Configure your local
+Update `detox/.detoxrc.json` to specify which device you want to run it. Change:
+```json
+ "device": {
+     "type": "__DEVICE_NAME__",
+     "os": "__DEVICE_OS_VERSION__"
+ },
+```
+to something like:
+```json
+ "device": {
+     "type": "iPhone 17 Pro",
+     "os": "iOS 26.4"
+ },
+```
+
+To get your values run `xcrun simctl list devices` to find both the device and iOS version.
 
 ### Run iOS Tests
 
@@ -79,6 +133,31 @@ npm run e2e:ios-test
 npm run e2e:android-test path to test file.
 ```
 
+### Disabling Password Autofill
+
+from iOS v26 password autofill can interfere with login tests by automatically filling credentials. To disable this feature on your simulator:
+
+```sh
+# Interactive mode - select simulator from list
+npm run e2e:ios-disable-autofill
+
+# Or specify simulator ID directly
+npm run e2e:ios-disable-autofill -- --simulator-id SIMULATOR_UDID
+```
+
+**When to use this:**
+- if using iOS 26 or later
+- Before running iOS E2E tests if you notice password fields being auto-filled
+- When login tests fail unexpectedly due to autofill interference
+- After creating a new iOS simulator for testing
+
+**Note:** CI environments automatically disable this setting, so this is only needed for local development.
+
+**Finding your simulator ID:**
+```sh
+xcrun simctl list devices | grep Booted
+```
+
 #### TIP : For iOS, you can download the simulator from `~Mobile: Test build` or `~Release: Mobile Apps` channel in the community.
 
 ### Results
@@ -86,75 +165,41 @@ npm run e2e:android-test path to test file.
 The Local Runs generate artifacts under `detox/artifacts/ios-debug-**` or `detox/artifacts/android-debug-**`.
 You can see the html report, failure screenshot under that folder.
 
-# Playbooks Tests (AI-Powered Testing)
+## Webhook sidecar (mm_blocks / interactive dialog specs)
 
-The Playbooks tests leverage AI-powered testing through the Wix Pilot framework, enabling natural language test creation and execution.
+The `mm_blocks_*` and interactive-dialog specs register integrations that the
+Mattermost server calls back into. `detox/webhook_server.js` serves those
+callbacks on `:3000`, and the server must be able to reach it:
 
-### How It Works
+- **Local server** (`SITE_1_URL=http://localhost:8065`): no tunnel needed, the
+  server reaches `127.0.0.1:3000` directly.
 
-The Playbooks tests utilize the [pilot library](https://wix-pilot.com/docs/guides/technical-overview), which connects to Anthropic Claude via the `ClaudePromptHandler`. This innovative approach allows you to:
+  ```sh
+  cd detox && npm run start:webhook
+  ```
 
-- Write tests using natural language prompts
-- Automatically translate prompts into executable test steps
-- Maintain tests more intuitively through conversational interfaces
-- Handle complex scenarios with AI-generated test logic
+- **Remote/cloud test server**: the server cannot reach your machine, so the
+  sidecar needs a public HTTPS origin. `detox/scripts/start_webhook_sidecar.sh`
+  starts `webhook_server.js` and resolves that origin, in priority order:
 
-The system integrates seamlessly with your existing Detox test infrastructure while adding AI capabilities.
+  | Env | Behaviour |
+  |-----|-----------|
+  | `WEBHOOK_PUBLIC_BASE_URL` | Use an already-routable HTTPS origin as-is (named tunnel, ngrok, reverse proxy). Preferred. |
+  | `WEBHOOK_PUBLIC_BASE_URL` + `CLOUDFLARED_TUNNEL_TOKEN` | Run a named Cloudflare tunnel for that hostname. The token is passed via `TUNNEL_TOKEN` because argv is world-readable. |
+  | neither | Fall back to a `trycloudflare.com` quick tunnel. Time-boxed and DNS-flaky, so treat it as a last resort. |
 
-### Best Practices
+  ```sh
+  cd detox
+  SITE_1_URL="https://your-test-server" \
+  WEBHOOK_PUBLIC_BASE_URL="https://your-tunnel-hostname" \
+  bash scripts/start_webhook_sidecar.sh
+  ```
 
-For reliable and effective Playbooks tests, follow these guidelines from the [Pilot Best Practices Guide](https://wix-pilot.com/docs/guides/pilot-best-practices):
+  Pin a different `cloudflared` with `CLOUDFLARED_VERSION`; the script defaults to
+  a known-good release rather than `latest`.
 
-1. **Prompt Clarity**:
-   - Write clear, concise prompts
-   - Use specific action-oriented language
-   - Avoid ambiguous phrasing
-
-2. **Test Design**:
-   - Keep prompts focused on single scenarios
-   - Use deterministic language to prevent flaky tests
-   - Structure complex tests as sequences of simple prompts
-
-3. **Maintenance**:
-   - Review AI-generated test steps before committing
-   - Version control both prompts and generated code
-   - Monitor test stability regularly
-
-4. **Integration**:
-   - Combine AI tests with traditional assertions
-   - Use AI for complex scenarios, traditional methods for simple verifications
-   - Document which tests are AI-generated
-
-### Getting Started
-
-To run Playbooks tests:
-
-1. **Set up your environment**:
-   ```sh
-   export ANTHROPIC_API_KEY='your-api-key-here'
-   ```
-
-2. **Run tests normally**:
-   - The system will automatically initialize the `ClaudePromptHandler` when the API key is detected
-   - No additional configuration is required beyond the API key
-
-3. **Execution examples**:
-   ```sh
-   # Run all Playbooks tests
-   npm run e2e:android-test tests/playbooks/
-   
-   # Run a specific Playbook test
-   npm run e2e:ios-test tests/playbooks/playbooks_basic.e2e.ts
-   ```
-
-### Technical Notes
-
-- The Pilot framework handles the translation between natural language prompts and executable code
-- Tests are cached locally after generation for faster subsequent runs
-- All AI interactions are logged in the test artifacts for debugging
-- The system falls back to traditional testing methods if the API key isn't available
-
-For complete documentation, see:
-- [Wix Pilot Technical Overview](https://wix-pilot.com/docs/guides/technical-overview)
-- [Pilot Best Practices Guide](https://wix-pilot.com/docs/guides/pilot-best-practices)
-
+The script always exits 0 — it exports `WEBHOOK_SIDECAR_READY` and
+`WEBHOOK_CALLBACKS_REACHABLE` instead of failing, and specs that need a webhook
+fail fast on their own health check. A quick tunnel passes outbound health checks
+but does not reliably deliver server-to-sidecar callbacks, so it reports
+`WEBHOOK_CALLBACKS_REACHABLE=false`.

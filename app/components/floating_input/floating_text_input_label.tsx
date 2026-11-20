@@ -3,15 +3,22 @@
 
 // Note: This file has been adapted from the library https://github.com/csath/react-native-reanimated-text-input
 
+import {RUNNING_E2E} from '@env';
+import {BottomSheetTextInput} from '@gorhom/bottom-sheet';
 import React, {useState, useRef, useImperativeHandle, forwardRef, useMemo, useCallback} from 'react';
 import {type LayoutChangeEvent, type NativeSyntheticEvent, type StyleProp, type TargetedEvent, TextInput, type TextInputFocusEventData, type TextInputProps, type TextStyle} from 'react-native';
 
 import {changeOpacity, getKeyboardAppearanceFromTheme, makeStyleSheetFromTheme} from '@utils/theme';
+import {typography} from '@utils/typography';
 
 import FloatingInputContainer from './floating_input_container';
 import {onExecution} from './utils';
 
 const DEFAULT_INPUT_HEIGHT = 48;
+
+// Expose the input's value to the accessibility tree only in E2E builds so Maestro
+// can read the typed value. Gated so real builds are byte-for-byte unchanged.
+const isRunningE2e = RUNNING_E2E === 'true';
 
 const getStyleSheet = makeStyleSheetFromTheme((theme: Theme) => ({
     input: {
@@ -22,11 +29,11 @@ const getStyleSheet = makeStyleSheetFromTheme((theme: Theme) => ({
         paddingTop: 0,
         paddingBottom: 0,
         flexDirection: 'row',
-        fontFamily: 'OpenSans',
-        fontSize: 16,
         color: theme.centerChannelColor,
         borderColor: changeOpacity(theme.centerChannelColor, 0.16),
         borderRadius: 4,
+        ...typography('Body', 200),
+        lineHeight: undefined,
     },
 }));
 
@@ -36,7 +43,10 @@ export type FloatingTextInputRef = {
     isFocused: () => boolean;
 }
 
+type TextInputHandle = Pick<TextInput, 'blur' | 'focus' | 'isFocused'>;
+
 type FloatingTextInputProps = /*TextInputProps &*/ {
+    bottomSheetInput?: boolean;
     editable?: boolean;
     endAdornment?: React.ReactNode;
     error?: string;
@@ -68,6 +78,7 @@ type FloatingTextInputProps = /*TextInputProps &*/ {
 }
 
 const FloatingTextInput = forwardRef<FloatingTextInputRef, FloatingTextInputProps>(({
+    bottomSheetInput = false,
     editable = true,
     error,
     endAdornment,
@@ -87,8 +98,12 @@ const FloatingTextInput = forwardRef<FloatingTextInputRef, FloatingTextInputProp
 }: FloatingTextInputProps, ref) => {
     const [focused, setIsFocused] = useState(false);
     const focusedLabel = Boolean(focused || Boolean(value) || placeholder);
-    const inputRef = useRef<TextInput>(null);
+    const inputRef = useRef<TextInputHandle>(null);
     const styles = getStyleSheet(theme);
+
+    const setInputRef = useCallback((instance: TextInputHandle | null | undefined) => {
+        inputRef.current = instance ?? null;
+    }, []);
 
     useImperativeHandle(ref, () => ({
         blur: () => inputRef.current?.blur(),
@@ -126,6 +141,25 @@ const FloatingTextInput = forwardRef<FloatingTextInputRef, FloatingTextInputProp
         inputRef.current?.focus();
     }, []);
 
+    const inputProps: TextInputProps = {
+        ...textInputProps,
+        editable,
+        style: combinedTextInputStyle,
+        placeholder,
+        placeholderTextColor: changeOpacity(theme.centerChannelColor, 0.64),
+        multiline,
+        textAlignVertical: 'top',
+        value,
+        accessibilityValue: isRunningE2e ? {text: value} : undefined,
+        onFocus: onTextInputFocus,
+        onBlur: onTextInputBlur,
+        underlineColorAndroid: 'transparent',
+        testID,
+        keyboardAppearance: getKeyboardAppearanceFromTheme(theme),
+        autoCorrect: !rawInput,
+        autoCapitalize: rawInput ? 'none' : undefined,
+    };
+
     return (
         <FloatingInputContainer
             hasValue={Boolean(value)}
@@ -141,24 +175,17 @@ const FloatingTextInput = forwardRef<FloatingTextInputRef, FloatingTextInputProp
             editable={editable}
             testID={testID || 'floating-text-input-label'}
         >
-            <TextInput
-                {...textInputProps}
-                editable={editable}
-                style={combinedTextInputStyle}
-                placeholder={placeholder}
-                placeholderTextColor={changeOpacity(theme.centerChannelColor, 0.64)}
-                multiline={multiline}
-                textAlignVertical='top'
-                value={value}
-                onFocus={onTextInputFocus}
-                onBlur={onTextInputBlur}
-                ref={inputRef}
-                underlineColorAndroid='transparent'
-                testID={testID}
-                keyboardAppearance={getKeyboardAppearanceFromTheme(theme)}
-                autoCorrect={!rawInput}
-                autoCapitalize={rawInput ? 'none' : undefined}
-            />
+            {bottomSheetInput ? (
+                <BottomSheetTextInput
+                    {...inputProps}
+                    ref={setInputRef}
+                />
+            ) : (
+                <TextInput
+                    {...inputProps}
+                    ref={setInputRef}
+                />
+            )}
             {endAdornment}
         </FloatingInputContainer>
     );

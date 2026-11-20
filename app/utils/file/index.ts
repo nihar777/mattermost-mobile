@@ -3,25 +3,24 @@
 
 import Model from '@nozbe/watermelondb/Model';
 import {applicationName} from 'expo-application';
-import {
-    cacheDirectory, deleteAsync, documentDirectory, getInfoAsync,
-    type FileInfo as ExpoFileInfo, makeDirectoryAsync,
-} from 'expo-file-system';
+import {Directory, File, Paths, type FileInfo as ExpoFileInfo} from 'expo-file-system';
 import mimeDB from 'mime-db';
 import {Alert, Linking, Platform} from 'react-native';
 import Permissions, {PERMISSIONS} from 'react-native-permissions';
 
-import {Files} from '@constants';
+import {Files, ServerErrors} from '@constants';
+import {getFullErrorMessage} from '@utils/errors';
 import {generateId} from '@utils/general';
 import keyMirror from '@utils/key_mirror';
-import {logError} from '@utils/log';
-import {deleteEntitiesFile, getIOSAppGroupDetails} from '@utils/mattermost_managed';
+import {logDebug, logError} from '@utils/log';
+import {getIOSAppGroupDetails} from '@utils/mattermost_managed';
 import {urlSafeBase64Encode} from '@utils/security';
 
 import type {PastedFile} from '@mattermost/react-native-paste-input';
+import type {DocumentPickerResponse} from '@react-native-documents/picker';
+import type {RevokedFile} from '@typings/database/database';
 import type FileModel from '@typings/database/models/servers/file';
 import type {IntlShape} from 'react-intl';
-import type {DocumentPickerResponse} from 'react-native-document-picker';
 import type {Asset} from 'react-native-image-picker';
 
 const EXTRACT_TYPE_REGEXP = /^\s*([^;\s]*)(?:;|\s|$)/;
@@ -65,6 +64,8 @@ const SUPPORTED_DOCS_FORMAT = Platform.select({
         'application/vnd.apple.keynote',
     ],
 });
+
+const SUPPORTED_IMAGE_FORMAT = ['png', 'jpg', 'jpeg', 'bmp', 'tiff', 'svg', 'xcf', 'gif', 'webp'];
 
 const SUPPORTED_VIDEO_FORMAT = Platform.select({
     ios: ['video/mp4', 'video/x-m4v', 'video/quicktime'],
@@ -148,52 +149,59 @@ function populateMaps() {
     });
 }
 
-export async function deleteV1Data() {
-    const dir = Platform.OS === 'ios' ? getIOSAppGroupDetails().appGroupSharedDirectory : documentDirectory;
-
-    try {
-        const directory = `${dir}/mmkv`;
-        const mmkvDirInfo = await getInfoAsync(directory);
-        if (mmkvDirInfo.exists) {
-            await deleteAsync(directory);
-        }
-    } catch {
-        // do nothing
-    }
-
-    try {
-        const entitiesInfo = await getInfoAsync(`${dir}/entities`);
-        if (entitiesInfo.exists) {
-            deleteEntitiesFile();
-        }
-    } catch (e) {
-        // do nothing
-    }
-}
-
-export async function deleteFileCache(serverUrl: string) {
+export function deleteFileCache(serverUrl: string) {
     const serverDir = urlSafeBase64Encode(serverUrl);
     return deleteFileCacheByDir(serverDir);
 }
 
-export async function deleteFileCacheByDir(dir: string) {
+export function deleteFileCacheByDir(dir: string) {
     if (Platform.OS === 'ios') {
         const appGroupCacheDir = `${getIOSAppGroupDetails().appGroupSharedDirectory}/Library/Caches/${dir}`;
-        await deleteFilesInDir(appGroupCacheDir);
+        deleteFilesInDir(appGroupCacheDir);
     }
 
-    const cacheDir = `${cacheDirectory}/${dir}`;
-    await deleteFilesInDir(cacheDir);
+    const cacheDir = `${Paths.cache.uri}/${dir}`;
+    deleteFilesInDir(cacheDir);
 
     return true;
 }
 
-async function deleteFilesInDir(directory: string) {
+/**
+ * Per-file eviction, for when the server confirms a denial: removing the file records does not
+ * remove the downloaded bytes, which would stay readable on disk. Each file is looked for both where
+ * it was saved and where downloads land by default, because opening a document never records its path.
+ * Failures are swallowed: a file that cannot be removed must not stop the denial being recorded.
+ */
+export function deleteDownloadedFiles(serverUrl: string, files: RevokedFile[]) {
+    for (const f of files) {
+        const paths = new Set<string>();
+        if (f.localPath) {
+            try {
+                paths.add(decodeURIComponent(f.localPath));
+            } catch {
+                paths.add(f.localPath);
+            }
+        }
+        paths.add(getLocalFilePathFromFile(serverUrl, f));
+
+        for (const path of paths) {
+            try {
+                const file = new File(pathWithPrefix('file://', path));
+                if (file.exists) {
+                    file.delete();
+                }
+            } catch (error) {
+                logDebug('deleteDownloadedFiles: could not remove a cached file', getFullErrorMessage(error));
+            }
+        }
+    }
+}
+
+function deleteFilesInDir(directory: string) {
     if (directory) {
-        const cacheDirInfo = await getInfoAsync(directory);
-        if (cacheDirInfo.exists) {
-            await deleteAsync(directory, {idempotent: true});
-            await makeDirectoryAsync(directory, {intermediates: true});
+        const dir = new Directory(directory);
+        if (dir.exists) {
+            dir.delete();
         }
     }
 }
@@ -266,6 +274,11 @@ export const isGif = (file?: FileInfo | FileModel) => {
     return mime === 'image/gif';
 };
 
+export function extractExtension(filename: string) {
+    const ext = filename.split('.').pop() || '';
+    return ext.startsWith('.') ? ext.slice(1).toLowerCase() : ext.toLowerCase();
+}
+
 export const isImage = (file?: FileInfo | FileModel) => {
     if (!file) {
         return false;
@@ -275,9 +288,20 @@ export const isImage = (file?: FileInfo | FileModel) => {
         return true;
     }
 
+    // A draft persisted before its file metadata resolved has neither, despite the types.
+    if (!file.extension && !file.name) {
+        return false;
+    }
+
+    const fileExt = extractExtension(file.extension || file.name);
+
+    if (!SUPPORTED_IMAGE_FORMAT.includes(fileExt)) {
+        return false;
+    }
+
     let mimeType = 'mime_type' in file ? file.mime_type : file.mimeType;
     if (!mimeType) {
-        mimeType = lookupMimeType(file.extension) || lookupMimeType(file.name);
+        mimeType = lookupMimeType(fileExt);
     }
 
     return Boolean(mimeType?.startsWith('image/'));
@@ -389,7 +413,7 @@ export function getFileType(file: FileInfo | ExtractedFileInfo): string {
     }) || 'other';
 }
 
-export function getLocalFilePathFromFile(serverUrl: string, file: FileInfo | FileModel) {
+export function getLocalFilePathFromFile(serverUrl: string, file: Pick<FileInfo, 'id' | 'name' | 'extension' | 'mime_type'> | FileModel) {
     const fileIdPath = file.id?.replace(/[^0-9a-z]/g, '');
     if (serverUrl) {
         const server = urlSafeBase64Encode(serverUrl);
@@ -415,11 +439,11 @@ export function getLocalFilePathFromFile(serverUrl: string, file: FileInfo | Fil
                 }
             }
 
-            return `${cacheDirectory}${server}/${filename}-${fileIdPath}.${extension}`;
+            return `${Paths.cache.uri}${server}/Files/${filename}-${fileIdPath}.${extension}`;
         } else if (file?.id && hasValidExtension) {
-            return `${cacheDirectory}${server}/${fileIdPath}.${file.extension}`;
+            return `${Paths.cache.uri}${server}/Files/${fileIdPath}.${file.extension}`;
         } else if (file?.id) {
-            return `${cacheDirectory}${server}/${fileIdPath}`;
+            return `${Paths.cache.uri}${server}/Files/${fileIdPath}`;
         }
     }
 
@@ -448,8 +472,8 @@ export async function extractFileInfo(files: Array<Asset | DocumentPickerRespons
         } else {
             const localPath = file.uri || '';
             try {
-                const fileInfo = await getInfoAsync(localPath, {size: true});
-                if ('size' in fileInfo) {
+                const fileInfo = new File(localPath).info();
+                if (fileInfo.exists) {
                     outFile.size = fileInfo.size || 0;
                     outFile.name = localPath.substring(localPath.lastIndexOf('/') + 1);
                 }
@@ -496,10 +520,39 @@ export function uploadDisabledWarning(intl: IntlShape) {
     });
 }
 
-export const fileExists = async (path: string) => {
+export function uploadDisabledByPolicyWarning(intl: IntlShape) {
+    return intl.formatMessage({
+        id: 'mobile.file_upload.disabled_by_policy',
+        defaultMessage: 'File uploads are restricted in this channel',
+    });
+}
+
+export function getUploadErrorMessage(intl: IntlShape, errorMessage: string, errorName?: string) {
+    // The client may not know about a denial yet (the decision is still loading or went stale), so the
+    // server's own refusal is shown in the same words the disabled button would have used.
+    if (errorName === ServerErrors.UPLOAD_DENIED_BY_POLICY_ERROR) {
+        return uploadDisabledByPolicyWarning(intl);
+    }
+
+    // iOS: Alamofire wraps all network errors with this prefix
+    const isIosNetworkError = errorMessage.startsWith('URLSessionTask failed with error:');
+
+    // Android: Network exceptions from java.net package
+    const isAndroidNetworkError = errorName?.startsWith('java.net.') ?? false;
+
+    if (isIosNetworkError || isAndroidNetworkError) {
+        return intl.formatMessage({
+            id: 'mobile.file_upload.network_unavailable',
+            defaultMessage: "File couldn't be uploaded. Check your connection and try again.",
+        });
+    }
+
+    return errorMessage;
+}
+
+export const fileExists = (path: string) => {
     try {
-        const file = await getInfoAsync(path);
-        return file.exists;
+        return new File(path).exists;
     } catch {
         return false;
     }
@@ -556,32 +609,25 @@ export const hasWriteStoragePermission = async (intl: IntlShape) => {
     return true;
 };
 
-export const getAllFilesInCachesDirectory = async (serverUrl: string) => {
+export const getAllFilesInCachesDirectory = (serverUrl: string) => {
     try {
-        const files: ExpoFileInfo[] = [];
+        const infos: ExpoFileInfo[] = [];
 
-        const promises = [getInfoAsync(`${cacheDirectory}/${urlSafeBase64Encode(serverUrl)}`, {size: true})];
+        const paths = [`${Paths.cache.uri}/${urlSafeBase64Encode(serverUrl)}`];
         if (Platform.OS === 'ios') {
-            const cacheDir = `${getIOSAppGroupDetails().appGroupSharedDirectory}/Library/Caches/${urlSafeBase64Encode(serverUrl)}`;
-            promises.push(getInfoAsync(cacheDir, {size: true}));
+            paths.push(`${getIOSAppGroupDetails().appGroupSharedDirectory}/Library/Caches/${urlSafeBase64Encode(serverUrl)}`);
         }
 
-        const dirs = await Promise.allSettled(promises);
-        dirs.forEach((p) => {
-            if (p.status === 'fulfilled' && 'size' in p.value) {
-                files.push(p.value);
+        for (const p of paths) {
+            const info = new Directory(p).info();
+            if (info.exists) {
+                infos.push(info);
             }
-        });
+        }
 
-        const flattenedFiles = files.flat();
-        const totalSize = flattenedFiles.reduce((acc, file) => {
-            if ('size' in file) {
-                return acc + file.size;
-            }
-            return acc;
-        }, 0);
+        const totalSize = infos.reduce((acc, info) => acc + (info.size ?? 0), 0);
         return {
-            files: flattenedFiles,
+            files: infos,
             totalSize,
         };
     } catch (error) {
@@ -594,16 +640,18 @@ export const pathWithPrefix = (prefix: string, path: string) => {
     return `${p}${path}`;
 };
 
-export const deleteFile = async (path: string) => {
-    await deleteAsync(pathWithPrefix('file://', path));
+export const deleteFile = (path: string) => {
+    try {
+        new File(pathWithPrefix('file://', path)).delete();
+    } catch { /* file may not exist */ }
 };
 
-export const filesLocalPathValidation = async (files: FileModel[], authorId: string) => {
+export const filesLocalPathValidation = (files: FileModel[], authorId: string) => {
     const filesInfo: FileInfo[] = [];
-    for await (const f of files) {
+    for (const f of files) {
         const info = f.toFileInfo(authorId);
         if (info.localPath) {
-            const exists = await fileExists(info.localPath);
+            const exists = fileExists(info.localPath);
             if (!exists) {
                 info.localPath = '';
             }
@@ -613,3 +661,11 @@ export const filesLocalPathValidation = async (files: FileModel[], authorId: str
 
     return filesInfo;
 };
+
+/**
+ * Convert FileModel array to FileInfo array
+ * Note: Does NOT validate local paths - validation is done by Files component
+ */
+export function fileModelsToFileInfo(files: FileModel[], userId: string): FileInfo[] {
+    return files.map((f) => f.toFileInfo(userId));
+}

@@ -5,7 +5,6 @@ import {Button} from '@rneui/base';
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {useIntl} from 'react-intl';
 import {View, Text, Platform, type Insets} from 'react-native';
-import {Shadow} from 'react-native-shadow-2';
 
 import {uploadFile} from '@actions/remote/file';
 import CompassIcon from '@components/compass_icon';
@@ -13,10 +12,13 @@ import FileIcon from '@components/files/file_icon';
 import FormattedText from '@components/formatted_text';
 import ProgressBar from '@components/progress_bar';
 import TouchableWithFeedback from '@components/touchable_with_feedback';
+import {ServerErrors} from '@constants';
 import {useServerUrl} from '@context/server';
 import {useTheme} from '@context/theme';
 import {useIsTablet} from '@hooks/device';
-import {fileSizeWarning, getExtensionFromMime, getFormattedFileSize} from '@utils/file';
+import useDidMount from '@hooks/did_mount';
+import RenderPermissionsStore from '@store/render_permissions_store';
+import {fileSizeWarning, getExtensionFromMime, getFormattedFileSize, uploadDisabledByPolicyWarning} from '@utils/file';
 import PickerUtil from '@utils/file/file_picker';
 import {changeOpacity, makeStyleSheetFromTheme} from '@utils/theme';
 import {typography} from '@utils/typography';
@@ -49,6 +51,7 @@ const getStyleSheet = makeStyleSheetFromTheme((theme: Theme) => ({
         borderColor: changeOpacity(theme.centerChannelColor, 0.16),
         borderWidth: 1,
         borderRadius: 4,
+        boxShadow: '4px 4px 4px rgba(61, 60, 64, 0.08)',
     },
     fileContainer: {
         height: 64,
@@ -116,7 +119,6 @@ const getStyleSheet = makeStyleSheetFromTheme((theme: Theme) => ({
     },
 }));
 
-const shadowSides = {top: false, bottom: true, end: true, start: false};
 const hitSlop: Insets = {top: 10, bottom: 10, left: 10, right: 10};
 
 const BookmarkFile = ({channelId, close, disabled, initialFile, maxFileSize, setBookmark}: Props) => {
@@ -130,8 +132,8 @@ const BookmarkFile = ({channelId, close, disabled, initialFile, maxFileSize, set
     const [uploading, setUploading] = useState(false);
     const [failed, setFailed] = useState(false);
     const styles = getStyleSheet(theme);
-    const subContainerStyle = useMemo(() => [styles.viewContainer, {paddingHorizontal: isTablet ? 42 : 0}], [isTablet]);
-    const cancelUpload = useRef<() => void | undefined>();
+    const subContainerStyle = useMemo(() => [styles.viewContainer, {paddingHorizontal: isTablet ? 42 : 0}], [isTablet, styles]);
+    const cancelUpload = useRef<(() => void) | undefined>(undefined);
 
     const onProgress = useCallback((p: number, bytes: number) => {
         if (!file) {
@@ -143,12 +145,31 @@ const BookmarkFile = ({channelId, close, disabled, initialFile, maxFileSize, set
 
         setProgress(p);
         setFile(f);
-    }, []);
+    }, [file]);
+
+    const setUploadError = useCallback((serverErrorId?: string) => {
+        setProgress(0);
+        setUploading(false);
+        setFailed(true);
+
+        // Retrying cannot help when a permission policy refused the upload, and the channel's stored
+        // decision that allowed it is out of date.
+        if (serverErrorId === ServerErrors.UPLOAD_DENIED_BY_POLICY_ERROR) {
+            RenderPermissionsStore.expireEntry(serverUrl, channelId);
+            setError(uploadDisabledByPolicyWarning(intl));
+            return;
+        }
+
+        setError(intl.formatMessage({
+            id: 'channel_bookmark.add.file_upload_error',
+            defaultMessage: 'Error uploading file. Please try again.',
+        }));
+    }, [intl, serverUrl, channelId]);
 
     const onComplete = useCallback((response: ClientResponse) => {
         cancelUpload.current = undefined;
         if (response.code !== 201 || !response.data) {
-            setUploadError();
+            setUploadError(response.data?.id as string | undefined);
             return;
         }
 
@@ -165,23 +186,12 @@ const BookmarkFile = ({channelId, close, disabled, initialFile, maxFileSize, set
         setProgress(1);
         setFailed(false);
         setError('');
-    }, []);
+    }, [setBookmark, setUploadError]);
 
     const onError = useCallback(() => {
         cancelUpload.current = undefined;
         setUploadError();
-    }, []);
-
-    const setUploadError = useCallback(() => {
-        setProgress(0);
-        setUploading(false);
-        setFailed(true);
-
-        setError(intl.formatMessage({
-            id: 'channel_bookmark.add.file_upload_error',
-            defaultMessage: 'Error uploading file. Please try again.',
-        }));
-    }, [file, intl]);
+    }, [setUploadError]);
 
     const startUpload = useCallback((fileInfo: FileInfo | ExtractedFileInfo) => {
         setUploading(true);
@@ -206,7 +216,7 @@ const BookmarkFile = ({channelId, close, disabled, initialFile, maxFileSize, set
             setUploadError();
             cancelUpload.current?.();
         }
-    }, [channelId, onProgress, onComplete, onError, serverUrl]);
+    }, [serverUrl, channelId, onProgress, onComplete, onError, setUploadError]);
 
     const browseFile = useCallback(async () => {
         const picker = new PickerUtil(intl, (files) => {
@@ -223,12 +233,12 @@ const BookmarkFile = ({channelId, close, disabled, initialFile, maxFileSize, set
         if (res.error) {
             close();
         }
-    }, [close, startUpload]);
+    }, [close, intl, startUpload]);
 
     const removeAndUpload = useCallback(() => {
         cancelUpload.current?.();
         browseFile();
-    }, [file, browseFile]);
+    }, [browseFile]);
 
     const retry = useCallback(() => {
         cancelUpload.current?.();
@@ -237,15 +247,23 @@ const BookmarkFile = ({channelId, close, disabled, initialFile, maxFileSize, set
         }
     }, [file, startUpload]);
 
-    useEffect(() => {
+    useDidMount(() => {
+        // Defer opening the document picker until after the host modal has
+        // finished its presentation animation. Presenting a UIViewController
+        // (the picker) while another modal is mid-animation causes UIKit to
+        // silently drop the presentation.
+        let timer: ReturnType<typeof setTimeout> | undefined;
         if (!initialFile) {
-            browseFile();
+            timer = setTimeout(browseFile, 500);
         }
 
         return () => {
+            if (timer) {
+                clearTimeout(timer);
+            }
             cancelUpload.current?.();
         };
-    }, []);
+    });
 
     useEffect(() => {
         if (uploading) {
@@ -260,6 +278,10 @@ const BookmarkFile = ({channelId, close, disabled, initialFile, maxFileSize, set
         if (!file?.id && file?.name) {
             setBookmark(file);
         }
+
+    // We don't care about `setBookmark` changes as long as
+    // it is up to date when the effect runs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [file, intl, maxFileSize, uploading]);
 
     let info;
@@ -294,15 +316,13 @@ const BookmarkFile = ({channelId, close, disabled, initialFile, maxFileSize, set
                     defaultMessage='Attachment'
                     style={styles.title}
                 />
-                <Shadow
-                    style={styles.shadowContainer}
-                    startColor='rgba(61, 60, 64, 0.08)'
-                    distance={4}
-                    sides={shadowSides}
-                >
+                <View style={styles.shadowContainer}>
                     <View style={styles.fileContainer}>
                         <FileIcon file={file}/>
-                        <View style={styles.fileInfoContainer}>
+                        <View
+                            style={styles.fileInfoContainer}
+                            testID={file?.id ? 'channel_bookmark.file.upload_complete' : undefined}
+                        >
                             <Text
                                 numberOfLines={1}
                                 ellipsizeMode='tail'
@@ -340,7 +360,7 @@ const BookmarkFile = ({channelId, close, disabled, initialFile, maxFileSize, set
                             />
                         </View>
                     </TouchableWithFeedback>
-                </Shadow>
+                </View>
                 {uploading &&
                 <View style={styles.progressContainer}>
                     <ProgressBar

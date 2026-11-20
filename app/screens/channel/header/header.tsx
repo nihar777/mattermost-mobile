@@ -3,49 +3,55 @@
 
 import React, {useCallback, useEffect, useMemo} from 'react';
 import {useIntl} from 'react-intl';
-import {Keyboard, Platform, Text, View} from 'react-native';
+import {DeviceEventEmitter, Platform, Text, View} from 'react-native';
 
+import {fetchCustomProfileAttributes} from '@actions/remote/custom_profile';
+import {useAgentsConfig} from '@agents/store/agents_config';
+import {useNavigationHeaderCallButtonForDM} from '@calls/hooks';
 import {getCallsConfig} from '@calls/state';
 import {CHANNEL_ACTIONS_OPTIONS_HEIGHT} from '@components/channel_actions/channel_actions';
+import ChannelAttributeLabels from '@components/channel_attribute_labels';
+import ChannelBanner from '@components/channel_banner';
 import CompassIcon from '@components/compass_icon';
 import CustomStatusEmoji from '@components/custom_status/custom_status_emoji';
 import NavigationHeader from '@components/navigation_header';
 import {ITEM_HEIGHT} from '@components/option_item';
 import OtherMentionsBadge from '@components/other_mentions_badge';
 import RoundedHeaderContext from '@components/rounded_header_context';
-import {General, Screens} from '@constants';
+import {Events, General, Screens} from '@constants';
 import {useServerUrl} from '@context/server';
 import {useTheme} from '@context/theme';
 import {useIsTablet} from '@hooks/device';
 import {useDefaultHeaderHeight} from '@hooks/header';
 import {usePreventDoubleTap} from '@hooks/utils';
 import {fetchPlaybookRunsForChannel} from '@playbooks/actions/remote/runs';
-import {goToPlaybookRun, goToPlaybookRuns} from '@playbooks/screens/navigation';
-import {BOTTOM_SHEET_ANDROID_OFFSET} from '@screens/bottom_sheet';
-import ChannelBanner from '@screens/channel/header/channel_banner';
-import {bottomSheet, popTopScreen, showModal} from '@screens/navigation';
+import {goToCreateQuickChecklist, goToPlaybookRun, goToPlaybookRuns} from '@playbooks/screens/navigation';
+import {bottomSheet, navigateBack, navigateToScreen} from '@screens/navigation';
 import EphemeralStore from '@store/ephemeral_store';
-import {isTypeDMorGM} from '@utils/channel';
-import {bottomSheetSnapPoint} from '@utils/helpers';
+import {isDMChannel, isTypeDMorGM} from '@utils/channel';
 import {changeOpacity, makeStyleSheetFromTheme} from '@utils/theme';
 import {typography} from '@utils/typography';
 
 import ChannelHeaderBookmarks from './bookmarks';
 import QuickActions, {MARGIN, SEPARATOR_HEIGHT} from './quick_actions';
 
-import type {HeaderRightButton} from '@components/navigation_header/header';
-import type {AvailableScreens} from '@typings/screens/navigation';
+import type {DialablePhone} from '@calls/types/calls';
+import type {NavigationButtonProps} from '@components/navigation_button';
+import type {ResolvedChannelAttribute} from '@utils/channel_attributes';
 
 type ChannelProps = {
     canAddBookmarks: boolean;
+    canCallDMUser: boolean;
+    dmPhoneUserId?: string;
+    dmUserPhones: DialablePhone[];
     channelId: string;
     channelType: ChannelType;
+    currentUserId: string;
     customStatus?: UserCustomStatus;
     isBookmarksEnabled: boolean;
     isCustomStatusEnabled: boolean;
     isCustomStatusExpired: boolean;
     hasBookmarks: boolean;
-    componentId?: AvailableScreens;
     displayName: string;
     isOwnDirectMessage: boolean;
     memberCount?: number;
@@ -59,20 +65,25 @@ type ChannelProps = {
     playbooksActiveRuns: number;
     isPlaybooksEnabled: boolean;
     activeRunId?: string;
+    isChannelAutotranslated: boolean;
+    channelAttributes: ResolvedChannelAttribute[];
 
     // searchTerm: string;
 };
+
+const PHONE_ATTRIBUTES_TTL_MS = 5 * 60 * 1000;
+const lastPhoneAttributesFetch = new Map<string, number>();
 
 const getStyleSheet = makeStyleSheetFromTheme((theme: Theme) => ({
     customStatusContainer: {
         flexDirection: 'row',
         height: 15,
+        alignItems: 'center',
         left: Platform.select({ios: undefined, default: -2}),
         marginTop: Platform.select({ios: undefined, default: 1}),
     },
     customStatusEmoji: {
         marginRight: 5,
-        marginTop: Platform.select({ios: undefined, default: -2}),
     },
     customStatusText: {
         alignItems: 'center',
@@ -90,9 +101,12 @@ const getStyleSheet = makeStyleSheetFromTheme((theme: Theme) => ({
 
 const ChannelHeader = ({
     canAddBookmarks,
+    canCallDMUser,
+    dmPhoneUserId,
+    dmUserPhones,
     channelId,
     channelType,
-    componentId,
+    currentUserId,
     customStatus,
     displayName,
     hasBookmarks,
@@ -111,6 +125,8 @@ const ChannelHeader = ({
     hasPlaybookRuns,
     isPlaybooksEnabled,
     activeRunId,
+    isChannelAutotranslated,
+    channelAttributes,
 }: ChannelProps) => {
     const intl = useIntl();
     const isTablet = useIsTablet();
@@ -120,6 +136,7 @@ const ChannelHeader = ({
     const serverUrl = useServerUrl();
 
     const callsConfig = getCallsConfig(serverUrl);
+    const {pluginEnabled: agentsEnabled} = useAgentsConfig(serverUrl);
 
     // NOTE: callsEnabledInChannel will be true/false (not undefined) based on explicit state + the DefaultEnabled system setting
     //   which ultimately comes from channel/index.tsx, and observeIsCallsEnabledInChannel
@@ -129,6 +146,8 @@ const ChannelHeader = ({
     }
 
     const isDMorGM = isTypeDMorGM(channelType);
+    const isDM = isDMChannel(channelType);
+    const navigationHeaderCallButton = useNavigationHeaderCallButtonForDM(channelId, channelType, dmPhoneUserId, dmUserPhones);
     const contextStyle = useMemo(() => ({
         top: defaultHeight,
     }), [defaultHeight]);
@@ -142,9 +161,9 @@ const ChannelHeader = ({
     }, [isTablet, channelId, teamId]);
 
     const onBackPress = useCallback(() => {
-        Keyboard.dismiss();
-        popTopScreen(componentId);
-    }, [componentId]);
+        DeviceEventEmitter.emit(Events.BLUR_AND_DISMISS_KEYBOARD);
+        navigateBack();
+    }, []);
 
     const onTitlePress = usePreventDoubleTap(useCallback((() => {
         let title;
@@ -160,27 +179,10 @@ const ChannelHeader = ({
                 break;
         }
 
-        const closeButton = CompassIcon.getImageSourceSync('close', 24, theme.sidebarHeaderTextColor);
-        const closeButtonId = 'close-channel-info';
-
-        const options = {
-            topBar: {
-                leftButtons: [{
-                    id: closeButtonId,
-                    icon: closeButton,
-                    testID: 'close.channel_info.button',
-                }],
-            },
-        };
-        showModal(Screens.CHANNEL_INFO, title, {channelId, closeButtonId}, options);
-    }), [channelId, channelType, intl, theme]));
+        navigateToScreen(Screens.CHANNEL_INFO, {channelId, title, groupCallsAllowed});
+    }), [channelId, channelType, groupCallsAllowed, intl]));
 
     const onChannelQuickAction = useCallback(() => {
-        if (isTablet) {
-            onTitlePress();
-            return;
-        }
-
         // When calls is enabled, we need space to move the "Copy Link" from a button to an option
         let items = 2;
         if (callsAvailable && !isDMorGM) {
@@ -189,10 +191,10 @@ const ChannelHeader = ({
         if (hasPlaybookRuns && !isDMorGM) {
             items += 1;
         }
-        let height = CHANNEL_ACTIONS_OPTIONS_HEIGHT + SEPARATOR_HEIGHT + MARGIN + (items * ITEM_HEIGHT);
-        if (Platform.OS === 'android') {
-            height += BOTTOM_SHEET_ANDROID_OFFSET;
+        if (agentsEnabled) {
+            items += 1; // Ask Agents action (shown in all channel types)
         }
+        const height = CHANNEL_ACTIONS_OPTIONS_HEIGHT + SEPARATOR_HEIGHT + (MARGIN * 2) + (items * ITEM_HEIGHT);
 
         const renderContent = () => {
             return (
@@ -205,52 +207,53 @@ const ChannelHeader = ({
             );
         };
 
-        bottomSheet({
-            title: '',
-            renderContent,
-            snapPoints: [1, bottomSheetSnapPoint(1, height)],
-            theme,
-            closeButtonId: 'close-channel-quick-actions',
-        });
-    }, [isTablet, callsAvailable, isDMorGM, hasPlaybookRuns, theme, onTitlePress, channelId]);
+        bottomSheet(renderContent, [1, height]);
+    }, [callsAvailable, isDMorGM, hasPlaybookRuns, agentsEnabled, channelId]);
 
     const openPlaybooksRuns = useCallback(() => {
-        if (activeRunId) {
-            goToPlaybookRun(intl, activeRunId);
+        // If no active runs, create a new one instead
+        if (playbooksActiveRuns === 0) {
+            goToCreateQuickChecklist(
+                channelId,
+                displayName,
+                currentUserId,
+                teamId,
+            );
             return;
         }
-        goToPlaybookRuns(intl, channelId, displayName);
-    }, [activeRunId, channelId, displayName, intl]);
+
+        if (activeRunId) {
+            goToPlaybookRun(activeRunId);
+            return;
+        }
+
+        goToPlaybookRuns(channelId, displayName);
+    }, [playbooksActiveRuns, activeRunId, channelId, displayName, currentUserId, teamId]);
 
     const rightButtons = useMemo(() => {
-        const buttons: HeaderRightButton[] = [];
-        if (playbooksActiveRuns && !isDMorGM) {
+        const buttons: NavigationButtonProps[] = [];
+        if (isPlaybooksEnabled && !isDMorGM) {
             buttons.push({
+                id: 'playbooks',
                 iconName: 'product-playbooks',
                 onPress: openPlaybooksRuns,
-                buttonType: 'opacity',
-                count: playbooksActiveRuns,
+                count: playbooksActiveRuns || '+',
             });
         }
 
-        // {
-        //     iconName: 'magnify',
-        //     onPress: () => {
-        //         DeviceEventEmitter.emit(Navigation.NAVIGATE_TO_TAB, {screen: 'Search', params: {searchTerm: `in: ${searchTerm}`}});
-        //         if (!isTablet) {
-        //             popTopScreen(componentId);
-        //         }
-        //     },
-        // },
+        if (isDM && callsAvailable && canCallDMUser && navigationHeaderCallButton) {
+            buttons.push(navigationHeaderCallButton);
+        }
+
         buttons.push({
+            id: 'channel-quick-actions',
             iconName: Platform.select({android: 'dots-vertical', default: 'dots-horizontal'}),
             onPress: onChannelQuickAction,
-            buttonType: 'opacity',
             testID: 'channel_header.channel_quick_actions.button',
         });
 
         return buttons;
-    }, [playbooksActiveRuns, isDMorGM, onChannelQuickAction, openPlaybooksRuns]);
+    }, [isPlaybooksEnabled, playbooksActiveRuns, isDMorGM, onChannelQuickAction, openPlaybooksRuns, isDM, callsAvailable, canCallDMUser, navigationHeaderCallButton]);
 
     let title = displayName;
     if (isOwnDirectMessage) {
@@ -300,6 +303,33 @@ const ChannelHeader = ({
         return undefined;
     }, [memberCount, customStatus, isCustomStatusExpired, theme.sidebarHeaderTextColor, styles.customStatusContainer, styles.customStatusEmoji, styles.customStatusText, styles.subtitle, isCustomStatusEnabled]);
 
+    // Chips take the subtitle line, which is what the design shows and the only
+    // line available: the header is a fixed height and cannot grow a third row.
+    // So they are passed only when the channel actually has designated values —
+    // otherwise the member count would be displaced by an empty row.
+    //
+    // Suppressed on DMs and GMs, where assigning attributes is later work.
+    const subtitleComponent = useMemo(() => {
+        if (isDMorGM || channelAttributes.length === 0) {
+            return undefined;
+        }
+
+        return <ChannelAttributeLabels attributes={channelAttributes}/>;
+    }, [isDMorGM, channelAttributes]);
+
+    const titleCompanion = useMemo(() => {
+        if (isChannelAutotranslated) {
+            return (
+                <CompassIcon
+                    name='translate'
+                    size={16}
+                    color={changeOpacity(theme.sidebarHeaderTextColor, 0.72)}
+                />
+            );
+        }
+        return undefined;
+    }, [isChannelAutotranslated, theme.sidebarHeaderTextColor]);
+
     useEffect(() => {
         const asyncEffect = async () => {
             if (isPlaybooksEnabled && !EphemeralStore.getChannelPlaybooksSynced(serverUrl, channelId)) {
@@ -308,6 +338,24 @@ const ChannelHeader = ({
         };
         asyncEffect();
     }, [channelId, serverUrl, isPlaybooksEnabled]);
+
+    useEffect(() => {
+        if (!dmPhoneUserId || !callsConfig.EnableSIPOutbound) {
+            return;
+        }
+
+        const key = `${serverUrl}:${dmPhoneUserId}`;
+        const now = Date.now();
+        if (now - (lastPhoneAttributesFetch.get(key) ?? 0) < PHONE_ATTRIBUTES_TTL_MS) {
+            return;
+        }
+        lastPhoneAttributesFetch.set(key, now);
+        fetchCustomProfileAttributes(serverUrl, dmPhoneUserId, true).then(({error}) => {
+            if (error && lastPhoneAttributesFetch.get(key) === now) {
+                lastPhoneAttributesFetch.delete(key);
+            }
+        });
+    }, [dmPhoneUserId, callsConfig.EnableSIPOutbound, serverUrl]);
 
     const showBookmarkBar = isBookmarksEnabled && hasBookmarks && shouldRenderBookmarks;
 
@@ -322,7 +370,9 @@ const ChannelHeader = ({
                 showBackButton={!isTablet || !isTabletView}
                 subtitle={subtitle}
                 subtitleCompanion={subtitleCompanion}
+                subtitleComponent={subtitleComponent}
                 title={title}
+                titleCompanion={titleCompanion}
             />
             <View style={contextStyle}>
                 <RoundedHeaderContext/>

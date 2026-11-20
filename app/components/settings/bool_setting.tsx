@@ -24,6 +24,7 @@ type Props = {
     onChange: (value: boolean) => void;
     testID: string;
     location: AvailableScreens;
+    labelPosition?: 'before' | 'after';
 }
 
 const getStyleSheet = makeStyleSheetFromTheme((theme: Theme) => {
@@ -32,8 +33,10 @@ const getStyleSheet = makeStyleSheetFromTheme((theme: Theme) => {
             backgroundColor: theme.centerChannelBg,
             flexDirection: 'row',
             alignItems: 'center',
+            justifyContent: 'space-between',
             paddingHorizontal: 15,
-            height: 40,
+            paddingVertical: 10,
+            minHeight: 40,
         },
         disabled: {
             backgroundColor: changeOpacity(theme.centerChannelColor, 0.1),
@@ -41,10 +44,8 @@ const getStyleSheet = makeStyleSheetFromTheme((theme: Theme) => {
         placeholderText: {
             color: changeOpacity(theme.centerChannelColor, 0.5),
             fontSize: 15,
-        },
-        inputSwitch: {
-            position: 'absolute',
-            right: 12,
+            width: '80%',
+            flexWrap: 'wrap',
         },
         separator: {
             backgroundColor: changeOpacity(theme.centerChannelColor, 0.1),
@@ -66,11 +67,26 @@ function BoolSetting({
     onChange,
     testID,
     location,
+    labelPosition,
 }: Props) {
     const theme = useTheme();
     const style = getStyleSheet(theme);
 
     const inputContainerStyle = useMemo(() => (disabled ? [style.inputContainer, style.disabled] : style.inputContainer), [style, disabled]);
+
+    const placeholderTextEl = (
+        <Text style={style.placeholderText}>
+            {placeholder}
+        </Text>
+    );
+    const switchEl = (
+        <Switch
+            onValueChange={onChange}
+            value={value}
+            disabled={disabled}
+            testID={`${testID}.toggled.${value}.button`}
+        />
+    );
 
     return (
         <>
@@ -84,16 +100,18 @@ function BoolSetting({
                     <View style={style.separator}/>
                 </>
             )}
-            <View style={[inputContainerStyle]}>
-                <Text style={style.placeholderText}>
-                    {placeholder}
-                </Text>
-                <Switch
-                    onValueChange={onChange}
-                    value={value}
-                    style={style.inputSwitch}
-                    disabled={disabled}
-                />
+            <View style={inputContainerStyle}>
+                {labelPosition === 'after' ? (
+                    <>
+                        {switchEl}
+                        {placeholderTextEl}
+                    </>
+                ) : (
+                    <>
+                        {placeholderTextEl}
+                        {switchEl}
+                    </>
+                )}
             </View>
             <View style={style.separator}/>
             <View>

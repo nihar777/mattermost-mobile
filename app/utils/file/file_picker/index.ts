@@ -2,9 +2,9 @@
 // See LICENSE.txt for license information.
 
 import RNUtils from '@mattermost/rnutils';
+import {pick, keepLocalCopy, type DocumentPickerResponse, type FileToCopy} from '@react-native-documents/picker';
 import {applicationName} from 'expo-application';
 import {Alert, Linking, Platform, StatusBar} from 'react-native';
-import DocumentPicker, {type DocumentPickerResponse} from 'react-native-document-picker';
 import {type Asset, type CameraOptions, type ImageLibraryOptions, type ImagePickerResponse, launchCamera, launchImageLibrary} from 'react-native-image-picker';
 import Permissions from 'react-native-permissions';
 
@@ -100,7 +100,7 @@ export default class FilePickerUtil {
         const out = await extractFileInfo(files);
 
         if (out.length > 0) {
-            dismissBottomSheet();
+            await dismissBottomSheet();
             this.uploadFiles(out);
         }
     };
@@ -219,63 +219,6 @@ export default class FilePickerUtil {
         return true;
     };
 
-    private hasWriteStoragePermission = async () => {
-        if (Platform.OS === 'android' && Platform.Version <= 28) {
-            const storagePermission = Permissions.PERMISSIONS.ANDROID.WRITE_EXTERNAL_STORAGE;
-            let permissionRequest;
-            const hasPermissionToStorage = await Permissions.check(storagePermission);
-            switch (hasPermissionToStorage) {
-                case Permissions.RESULTS.DENIED:
-                    permissionRequest = await Permissions.request(storagePermission);
-                    return permissionRequest === Permissions.RESULTS.GRANTED;
-                case Permissions.RESULTS.BLOCKED: {
-                    const {title, text} = this.getPermissionDeniedMessage('storage');
-
-                    Alert.alert(title, text, [
-                        {
-                            text: this.intl.formatMessage({
-                                id: 'mobile.permission_denied_dismiss',
-                                defaultMessage: "Don't Allow",
-                            }),
-                        },
-                        {
-                            text: this.intl.formatMessage({
-                                id: 'mobile.permission_denied_retry',
-                                defaultMessage: 'Settings',
-                            }),
-                            onPress: () => Linking.openSettings(),
-                        },
-                    ]);
-                    return false;
-                }
-                default: return true;
-            }
-        }
-
-        return true;
-    };
-
-    private buildUri = async (doc: DocumentPickerResponse) => {
-        let uri: string = doc.fileCopyUri || doc.uri;
-
-        if (Platform.OS === 'android') {
-            if (doc.fileCopyUri) {
-                uri = doc.fileCopyUri;
-            } else {
-                // For android we need to retrieve the realPath in case the file being imported is from the cloud
-                const newUri = await RNUtils.getRealFilePath(doc.uri);
-                if (newUri == null) {
-                    return {doc: undefined};
-                }
-
-                uri = newUri;
-            }
-        }
-
-        doc.uri = uri;
-        return {doc};
-    };
-
     attachFileFromCamera = async (customOptions?: CameraOptions) => {
         let options = customOptions;
         if (!options) {
@@ -289,12 +232,7 @@ export default class FilePickerUtil {
 
         const hasCameraPermission = await this.hasPhotoPermission('camera');
 
-        let hasWriteToStoragePermission = true;
-        if (Platform.OS === 'android' && Platform.Version <= 28) {
-            hasWriteToStoragePermission = await this.hasWriteStoragePermission();
-        }
-
-        if (hasCameraPermission && hasWriteToStoragePermission) {
+        if (hasCameraPermission) {
             launchCamera(options, async (response: ImagePickerResponse) => {
                 StatusBar.setHidden(false);
 
@@ -314,13 +252,35 @@ export default class FilePickerUtil {
 
         if (hasPermission) {
             try {
-                const docResponse = (await DocumentPicker.pick({allowMultiSelection, type: [fileType], copyTo: 'cachesDirectory'}));
-                const proDocs = docResponse.map(async (d: DocumentPickerResponse) => {
-                    const {doc} = await this.buildUri(d);
-                    return doc;
+                const picks = (await pick({allowMultiSelection, type: [fileType]}));
+                const picksMap = new Map<string, DocumentPickerResponse>(picks.map((p) => [p.uri, p]));
+                const files = Array.from(picksMap.values()).map((p): FileToCopy => ({
+                    uri: p.uri,
+                    fileName: p.name ?? 'fallbackName',
+                }));
+
+                if (files.length === 0) {
+                    return {error: undefined};
+                }
+
+                const docResponse = await keepLocalCopy({
+                    files: files as [FileToCopy, ...FileToCopy[]],
+                    destination: 'cachesDirectory',
                 });
 
-                const docs = (await Promise.all(proDocs)).filter(
+                const proDocs = docResponse.map((d) => {
+                    const source = picksMap.get(d.sourceUri);
+                    if (d.status === 'success' && source) {
+                        return {
+                            ...source,
+                            uri: d.localUri,
+                        };
+                    }
+
+                    return undefined;
+                });
+
+                const docs = proDocs.filter(
                     (item): item is DocumentPickerResponse => item !== undefined,
                 );
 

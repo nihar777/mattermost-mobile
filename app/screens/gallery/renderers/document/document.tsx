@@ -9,6 +9,8 @@ import Animated from 'react-native-reanimated';
 
 import FileIcon from '@components/files/file_icon';
 import {Events, Preferences} from '@constants';
+import {useServerUrl} from '@context/server';
+import SecurityManager from '@managers/security_manager';
 import DownloadWithAction from '@screens/gallery/footer/download_with_action';
 import {buttonBackgroundStyle, buttonTextStyle} from '@utils/buttonStyles';
 import {isDocument, isPdf} from '@utils/file';
@@ -23,6 +25,8 @@ type Props = {
     enableSecureFilePreview: boolean;
     item: GalleryItemType;
     hideHeaderAndFooter: (hide?: boolean) => void;
+    width: number;
+    height: number;
 }
 
 const styles = StyleSheet.create({
@@ -54,6 +58,10 @@ const messages = defineMessages({
         id: 'gallery.unsupported',
         defaultMessage: "Preview isn't supported for this file type. Try downloading or sharing to open it in another app.",
     },
+    unsupportedAndBlockedDownload: {
+        id: 'gallery.unsupported_and_blocked_download',
+        defaultMessage: "Preview isn't supported for this file type, and downloads are disabled by your administrator.",
+    },
     openFile: {
         id: 'gallery.open_file',
         defaultMessage: 'Open file',
@@ -64,8 +72,9 @@ const messages = defineMessages({
     },
 });
 
-const DocumentRenderer = ({canDownloadFiles, enableSecureFilePreview, item, hideHeaderAndFooter}: Props) => {
+const DocumentRenderer = ({canDownloadFiles, enableSecureFilePreview, item, hideHeaderAndFooter, width, height}: Props) => {
     const {formatMessage} = useIntl();
+    const serverUrl = useServerUrl();
     const file = useMemo(() => galleryItemToFileInfo(item), [item]);
     const [enabled, setEnabled] = useState(true);
     const isSupported = useMemo(() => isDocument(file), [file]);
@@ -81,13 +90,16 @@ const DocumentRenderer = ({canDownloadFiles, enableSecureFilePreview, item, hide
     }, [canDownloadFiles, enableSecureFilePreview, file, isSupported]);
 
     const optionText = useMemo(() => {
+        const allowSaveToLocation = SecurityManager.canSaveToLocation(serverUrl, 'FilesApp');
         if (enableSecureFilePreview && !isPdf(file)) {
             return formatMessage(messages.onlyPdf);
-        } else if (!isSupported) {
+        } else if (!isSupported && allowSaveToLocation) {
             return formatMessage(messages.unsupported);
+        } else if (!isSupported && !allowSaveToLocation) {
+            return formatMessage(messages.unsupportedAndBlockedDownload);
         }
         return formatMessage(messages.openFile);
-    }, [enableSecureFilePreview, file, formatMessage, isSupported]);
+    }, [enableSecureFilePreview, file, formatMessage, isSupported, serverUrl]);
 
     const setGalleryAction = useCallback((action: GalleryAction) => {
         DeviceEventEmitter.emit(Events.GALLERY_ACTIONS, action);
@@ -102,7 +114,6 @@ const DocumentRenderer = ({canDownloadFiles, enableSecureFilePreview, item, hide
 
     const handlePdfPreview = useCallback(() => {
         if (enableSecureFilePreview && isPdf(file)) {
-            DeviceEventEmitter.emit(Events.CLOSE_GALLERY);
             return;
         }
 
@@ -112,7 +123,7 @@ const DocumentRenderer = ({canDownloadFiles, enableSecureFilePreview, item, hide
     return (
         <>
             <Pressable onPress={handlePdfPreview}>
-                <Animated.View style={styles.container}>
+                <Animated.View style={[styles.container, {width, height}]}>
                     <FileIcon
                         backgroundColor='transparent'
                         file={file}

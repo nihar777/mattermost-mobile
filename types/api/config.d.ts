@@ -22,6 +22,8 @@ interface ClientConfig {
     BuildHash: string;
     BuildHashEnterprise: string;
     BuildNumber: string;
+    BurnOnReadMaximumTimeToLiveSeconds: string;
+    BurnOnReadDurationSeconds: string;
     CloseUnusedDirectMessages: string;
     CollapsedThreads: string;
     CustomBrandText: string;
@@ -44,8 +46,10 @@ interface ClientConfig {
     EmailLoginButtonColor: string;
     EmailLoginButtonTextColor: string;
     EmailNotificationContentsType: string;
+    EnableAttributeBasedAccessControl?: string;
     EnableBanner: string;
     EnableBotAccountCreation: string;
+    EnableBurnOnRead: string;
     EnableChannelViewedMessages: string;
     EnableClientMetrics?: string;
     EnableCluster: string;
@@ -62,6 +66,7 @@ interface ClientConfig {
     EnableEmailBatching: string;
     EnableEmailInvitations: string;
     EnableEmojiPicker: string;
+    EnableGuestMagicLink: string;
     EnableFileAttachments: string;
     EnableGifPicker: string;
     EnableGuestAccounts: string;
@@ -70,6 +75,7 @@ interface ClientConfig {
     EnableLatex: string;
     EnableLdap: string;
     EnableLinkPreviews: string;
+    EnableManagedChannelCategories?: string;
     EnablePermalinkPreviews: string;
     EnableMarketplace: string;
     EnableMetrics: string;
@@ -112,6 +118,7 @@ interface ClientConfig {
     ExperimentalEnableClickToReply: string;
     ExperimentalEnableDefaultChannelLeaveJoinMessages: string;
     ExperimentalEnablePostMetadata: string;
+    ExperimentalEnableWatermark: string;
     ExperimentalGroupUnreadChannels: string;
     ExperimentalHideTownSquareinLHS: string;
     ExperimentalNormalizeMarkdownLinks: string;
@@ -121,10 +128,18 @@ interface ClientConfig {
     ExperimentalViewArchivedChannels: string;
     ExtendSessionLengthWithActivity: string;
     FeatureFlagAppsEnabled?: string;
+    FeatureFlagChannelAttributes?: string;
+    FeatureFlagChannelAttributesRequired?: string;
+    FeatureFlagClassificationMarkings?: string;
     FeatureFlagCollapsedThreads?: string;
     FeatureFlagPostPriority?: string;
     FeatureFlagChannelBookmarks?: string;
+    FeatureFlagChannelPermissionActions?: string;
     FeatureFlagCustomProfileAttributes?: string;
+    FeatureFlagMmBlocksEnabled?: string;
+    FeatureFlagPermissionPolicies?: string;
+    FeatureFlagRecurringScheduledPosts?: string;
+    FeatureFlagSessionAttributes?: string;
     ForgotPasswordLink?: string;
     GfycatApiKey: string;
     GfycatApiSecret: string;
@@ -136,6 +151,9 @@ interface ClientConfig {
     IosAppDownloadLink: string;
     IosLatestVersion: string;
     IosMinVersion: string;
+    IntuneMAMEnabled?: string;
+    IntuneScope?: string;
+    IntuneAuthService?: string;
     LdapFirstNameAttributeSet: string;
     LdapLastNameAttributeSet: string;
     LdapLoginButtonBorderColor: string;
@@ -154,6 +172,10 @@ interface ClientConfig {
     MobileAllowPdfLinkNavigation: string;
     MobileEnableBiometrics: string;
     MobileEnableSecureFilePreview: string;
+    MobileEphemeralModeEnabled?: string;
+    MobileEphemeralModeDisconnectionTimeoutSeconds?: string;
+    MobileEphemeralModeOfflinePersistenceTimerHours?: string;
+    MobileEphemeralModeAutoCacheCleanupDays?: string;
     MobileJailbreakProtection: string;
     MobilePreventScreenCapture: string;
     MobileExternalBrowser: string;
@@ -207,6 +229,12 @@ interface ClientConfig {
     WebsocketPort: string;
     WebsocketSecurePort: string;
     WebsocketURL: string;
+    BurnOnReadDurationSeconds: string;
+
+    // Autotranslations
+    AutoTranslationLanguages: string;
+    EnableAutoTranslation: string;
+    RestrictDMAndGMAutotranslation: string;
 }
 
 type SecurityClientConfig = Pick<ClientConfig, 'MobileEnableBiometrics' | 'MobileJailbreakProtection' | 'MobilePreventScreenCapture' | 'SiteName'>

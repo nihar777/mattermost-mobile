@@ -1,19 +1,25 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import {act, fireEvent, screen} from '@testing-library/react-native';
+import {act, fireEvent, screen, waitFor} from '@testing-library/react-native';
 import React from 'react';
 
 import {dismissBottomSheet} from '@screens/navigation';
 import {ScheduledPostOptions} from '@screens/scheduled_post_options/scheduled_post_picker';
+import CallbackStore from '@store/callback_store';
 import {renderWithEverything} from '@test/intl-test-helper';
 import TestHelper from '@test/test_helper';
+import {advanceTimers, enableFakeTimers} from '@test/timer_helpers';
 import {showScheduledPostCreationErrorSnackbar} from '@utils/snack_bar';
 
 import type Database from '@nozbe/watermelondb/Database';
 
 jest.mock('@screens/navigation', () => ({
     dismissBottomSheet: jest.fn(),
+}));
+
+jest.mock('@utils/keyboard', () => ({
+    dismissKeyboard: jest.fn(),
 }));
 
 jest.mock('@utils/snack_bar', () => ({
@@ -30,6 +36,8 @@ describe('ScheduledPostOptions', () => {
     const baseProps = {
         onSchedule: jest.fn().mockResolvedValue({data: true}),
         currentUserTimezone: timezone,
+        hasFiles: false,
+        isRecurringEnabled: false,
     };
     let database: Database;
 
@@ -40,7 +48,10 @@ describe('ScheduledPostOptions', () => {
 
     beforeEach(() => {
         jest.clearAllMocks();
-        jest.useFakeTimers();
+
+        // Pin the clock to a Tuesday in America/New_York: the picker's options depend on the
+        // weekday in the user's timezone, so an unpinned clock passes or fails by the day.
+        jest.useFakeTimers({now: 1735693200000, doNotFake: ['nextTick']});
     });
 
     afterEach(() => {
@@ -80,14 +91,14 @@ describe('ScheduledPostOptions', () => {
         expect(dismissBottomSheet).not.toHaveBeenCalled();
     });
 
-    it('handles successful scheduling flow', () => {
+    it('handles successful scheduling flow', async () => {
         const onSchedule = jest.fn().mockResolvedValue({data: true});
         jest.spyOn(Date, 'now').mockImplementation(() => 1735693200000); //1st Jan 2025, Wednesday 12:00 AM (New year!!!)
 
+        CallbackStore.setCallback(onSchedule);
         renderWithEverything(
             <ScheduledPostOptions
                 {...baseProps}
-                onSchedule={onSchedule}
             />,
             {database},
         );
@@ -99,24 +110,21 @@ describe('ScheduledPostOptions', () => {
         const scheduleButton = screen.getByTestId('scheduled_post_create_button');
         fireEvent.press(scheduleButton);
 
-        act(() => {
-            jest.runAllTimers();
+        await waitFor(() => {
+            expect(onSchedule).toHaveBeenCalledWith(expect.objectContaining({
+                scheduled_at: expect.any(Number),
+            }));
         });
-
-        // Verify scheduling flow
-        expect(onSchedule).toHaveBeenCalledWith(expect.objectContaining({
-            scheduled_at: expect.any(Number),
-        }));
         expect(dismissBottomSheet).toHaveBeenCalled();
     });
 
-    it('handles scheduling errors correctly', () => {
+    it('handles scheduling errors correctly', async () => {
         const error = 'Network error';
         const onSchedule = jest.fn().mockResolvedValue({error});
+        CallbackStore.setCallback(onSchedule);
         renderWithEverything(
             <ScheduledPostOptions
                 {...baseProps}
-                onSchedule={onSchedule}
             />,
             {database},
         );
@@ -128,17 +136,14 @@ describe('ScheduledPostOptions', () => {
         const scheduleButton = screen.getByTestId('scheduled_post_create_button');
         fireEvent.press(scheduleButton);
 
-        act(() => {
-            jest.runAllTimers();
+        await waitFor(() => {
+            expect(showScheduledPostCreationErrorSnackbar).toHaveBeenCalledWith(error);
         });
-
-        // Verify error handling
         expect(onSchedule).toHaveBeenCalled();
-        expect(showScheduledPostCreationErrorSnackbar).toHaveBeenCalledWith(error);
         expect(dismissBottomSheet).not.toHaveBeenCalled();
     });
 
-    it('updates UI state during scheduling', () => {
+    it('updates UI state during scheduling', async () => {
         const slowSchedule = jest.fn().mockImplementation(() => {
             return new Promise((resolve) => {
                 setTimeout(() => {
@@ -147,10 +152,10 @@ describe('ScheduledPostOptions', () => {
             });
         });
 
+        CallbackStore.setCallback(slowSchedule);
         renderWithEverything(
             <ScheduledPostOptions
                 {...baseProps}
-                onSchedule={slowSchedule}
             />,
             {database},
         );
@@ -164,11 +169,129 @@ describe('ScheduledPostOptions', () => {
         // Verify loading state
         expect(screen.getByTestId('scheduled_post_create_button')).toBeDisabled();
 
-        // Fast-forward timers and verify completion
-        act(() => {
+        await act(async () => {
             jest.runAllTimers();
+            await Promise.resolve();
         });
 
         expect(dismissBottomSheet).toHaveBeenCalled();
+    });
+
+    describe('repeat weekly', () => {
+        const repeatWeeklyTestID = 'scheduled_post_options.repeat_weekly';
+
+        // These tests await the scheduling promise, so process.nextTick has to stay real.
+        beforeEach(enableFakeTimers);
+
+        const renderWithRecurrenceEnabled = () => {
+            jest.spyOn(Date, 'now').mockImplementation(() => 1735693200000); //1st Jan 2025, Wednesday 12:00 AM (New year!!!)
+            const onSchedule = jest.fn().mockResolvedValue({data: true});
+            CallbackStore.setCallback(onSchedule);
+
+            const {rerender} = renderWithEverything(
+                <ScheduledPostOptions
+                    {...baseProps}
+                    isRecurringEnabled={true}
+                />,
+                {database},
+            );
+
+            return {onSchedule, rerender};
+        };
+
+        const schedule = async () => {
+            fireEvent.press(screen.getByTestId('scheduled_post_create_button'));
+            await act(async () => {
+                await advanceTimers(0);
+            });
+        };
+
+        const scheduleAtMondayWithRepeatWeekly = async (repeatWeekly: boolean) => {
+            const {onSchedule} = renderWithRecurrenceEnabled();
+
+            fireEvent.press(screen.getByText(/Monday at/));
+            if (repeatWeekly) {
+                fireEvent(screen.getByTestId(`${repeatWeeklyTestID}.toggled.false.button`), 'valueChange', true);
+            }
+            await schedule();
+
+            return onSchedule;
+        };
+
+        it('should not render the toggle when the feature flag is off', () => {
+            renderWithEverything(<ScheduledPostOptions {...baseProps}/>, {database});
+
+            expect(screen.queryByTestId(repeatWeeklyTestID)).toBeNull();
+        });
+
+        // A file belongs to the first post it is sent with, so the server rejects a recurring post
+        // that has attachments.
+        it('should not render the toggle when the draft has attachments', () => {
+            renderWithEverything(
+                <ScheduledPostOptions
+                    {...baseProps}
+                    hasFiles={true}
+                    isRecurringEnabled={true}
+                />,
+                {database},
+            );
+
+            expect(screen.queryByTestId(repeatWeeklyTestID)).toBeNull();
+        });
+
+        it('should render the toggle off by default when recurrence is available', () => {
+            renderWithEverything(
+                <ScheduledPostOptions
+                    {...baseProps}
+                    isRecurringEnabled={true}
+                />,
+                {database},
+            );
+
+            expect(screen.getByText('Repeat weekly')).toBeVisible();
+            expect(screen.getByTestId(`${repeatWeeklyTestID}.toggled.false.button`)).toBeVisible();
+        });
+
+        it('should schedule with the user timezone when the toggle is on', async () => {
+            const onSchedule = await scheduleAtMondayWithRepeatWeekly(true);
+
+            expect(onSchedule).toHaveBeenCalledWith(expect.objectContaining({
+                repeat_type: 'weekly',
+                repeat_timezone: 'America/New_York',
+            }));
+        });
+
+        it('should schedule a one-time post when the toggle is left off', async () => {
+            const onSchedule = await scheduleAtMondayWithRepeatWeekly(false);
+
+            expect(onSchedule).toHaveBeenCalledWith(expect.objectContaining({
+                repeat_type: '',
+                repeat_timezone: '',
+            }));
+        });
+
+        // The toggle can stop being offered while the sheet is open, and the user cannot untick a
+        // toggle they can no longer see.
+        it('should schedule a one-time post when the toggle stops being offered after being turned on', async () => {
+            const {onSchedule, rerender} = renderWithRecurrenceEnabled();
+
+            fireEvent.press(screen.getByText(/Monday at/));
+            fireEvent(screen.getByTestId(`${repeatWeeklyTestID}.toggled.false.button`), 'valueChange', true);
+
+            rerender(
+                <ScheduledPostOptions
+                    {...baseProps}
+                    isRecurringEnabled={false}
+                />,
+            );
+            expect(screen.queryByTestId(repeatWeeklyTestID)).toBeNull();
+
+            await schedule();
+
+            expect(onSchedule).toHaveBeenCalledWith(expect.objectContaining({
+                repeat_type: '',
+                repeat_timezone: '',
+            }));
+        });
     });
 });

@@ -23,6 +23,9 @@ declare class PlaybookRunModel extends Model {
     // Foreign key to the playbook that generated this run
     playbookId: string;
 
+    // The type of run ('playbook' or 'channelChecklist')
+    type: PlaybookRunType;
+
     // ID of the post that created the run (nullable)
     postId: string | null;
 
@@ -58,6 +61,9 @@ declare class PlaybookRunModel extends Model {
 
     // An array of user IDs that participate in the run
     participantIds: string[];
+
+    // The run's task_state_modified events only, not its full timeline
+    timelineEvents: TimelineEvent[];
 
     // Summary of the playbook run
     summary: string;

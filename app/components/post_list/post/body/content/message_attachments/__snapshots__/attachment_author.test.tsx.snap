@@ -26,9 +26,13 @@ exports[`AttachmentAuthor it matches snapshot when both name and icon are provid
     onLoadStart={[Function]}
     onProgress={[Function]}
     placeholder={[]}
+    sfEffect={null}
     source={
       [
         {
+          "cacheKey": "attachment-author-icon-aHR0cHM6Ly9pbWFnZXMuY29tL2ltYWdlLnBuZw==",
+          "cachePath": "",
+          "headers": undefined,
           "uri": "https://images.com/image.png",
         },
       ]
@@ -40,6 +44,8 @@ exports[`AttachmentAuthor it matches snapshot when both name and icon are provid
         "width": 12,
       }
     }
+    symbolSize={null}
+    symbolWeight={null}
     transition={null}
     width={12}
   />
@@ -88,9 +94,13 @@ exports[`AttachmentAuthor it matches snapshot when only icon is provided 1`] = `
     onLoadStart={[Function]}
     onProgress={[Function]}
     placeholder={[]}
+    sfEffect={null}
     source={
       [
         {
+          "cacheKey": "attachment-author-icon-aHR0cHM6Ly9pbWFnZXMuY29tL2ltYWdlLnBuZw==",
+          "cachePath": "",
+          "headers": undefined,
           "uri": "https://images.com/image.png",
         },
       ]
@@ -102,6 +112,8 @@ exports[`AttachmentAuthor it matches snapshot when only icon is provided 1`] = `
         "width": 12,
       }
     }
+    symbolSize={null}
+    symbolWeight={null}
     transition={null}
     width={12}
   />

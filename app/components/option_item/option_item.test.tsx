@@ -40,6 +40,7 @@ describe('OptionItem', () => {
         const label = getByText('Test Option');
         expect(label).toBeTruthy();
         expect(label).toHaveStyle({fontWeight: '400'});
+        expect(label.props.numberOfLines).toBe(2);
 
         // No description
         expect(queryByTestId('option-item.description')).toBeNull();
@@ -65,6 +66,16 @@ describe('OptionItem', () => {
         expect(queryByTestId('option-item.arrow.icon')).toBeNull();
     });
 
+    it('respects custom label number of lines', () => {
+        const props = getBaseProps();
+        props.labelNumberOfLines = 1;
+
+        const {getByText} = renderWithIntlAndTheme(<OptionItem {...props}/>);
+
+        const label = getByText('Test Option');
+        expect(label.props.numberOfLines).toBe(1);
+    });
+
     it('renders with description when provided', () => {
         const props = getBaseProps();
         props.description = 'Test description';
@@ -88,13 +99,13 @@ describe('OptionItem', () => {
 
     it('renders with icon when provided', () => {
         const props = getBaseProps();
-        props.icon = 'test-icon';
+        props.icon = 'play';
         props.iconColor = '#ff0000';
 
         const {getByTestId, rerender} = renderWithIntlAndTheme(<OptionItem {...props}/>);
 
         let optionItem = getByTestId('option-item.icon.mock');
-        expect(optionItem.props.icon).toBe('test-icon');
+        expect(optionItem.props.icon).toBe('play');
         expect(optionItem.props.iconColor).toBe('#ff0000');
         expect(optionItem.props.destructive).toBeFalsy();
 
@@ -222,7 +233,7 @@ describe('OptionItem', () => {
 
         const {getByTestId, rerender, queryByTestId} = renderWithIntlAndTheme(<OptionItem {...props}/>);
 
-        let selectedIcon = getByTestId('option-item.selected');
+        let selectedIcon: any | null = getByTestId('option-item.selected');
         expect(selectedIcon).toBeTruthy();
 
         props.selected = false;
@@ -240,26 +251,26 @@ describe('OptionItem', () => {
 
         const {getByTestId, rerender, queryByTestId} = renderWithIntlAndTheme(<OptionItem {...props}/>);
 
-        let radioItem = getByTestId('option-item.selected');
+        let radioItem: any | null = getByTestId('option-item.selected');
         expect(radioItem).toBeTruthy();
-        expect(radioItem.props.checkedBody).toBe(true);
-        expect(radioItem.props.selected).toBe(true);
+        expect(radioItem?.props.checkedBody).toBe(true);
+        expect(radioItem?.props.selected).toBe(true);
 
         props.selected = false;
         rerender(<OptionItem {...props}/>);
 
         radioItem = queryByTestId('option-item.not_selected');
         expect(radioItem).toBeTruthy();
-        expect(radioItem.props.checkedBody).toBe(true);
-        expect(radioItem.props.selected).toBe(false);
+        expect(radioItem?.props.checkedBody).toBe(true);
+        expect(radioItem?.props.selected).toBe(false);
 
         props.isRadioCheckmark = false;
         rerender(<OptionItem {...props}/>);
 
         radioItem = queryByTestId('option-item.not_selected');
         expect(radioItem).toBeTruthy();
-        expect(radioItem.props.checkedBody).toBe(false);
-        expect(radioItem.props.selected).toBe(false);
+        expect(radioItem?.props.checkedBody).toBe(false);
+        expect(radioItem?.props.selected).toBe(false);
     });
 
     it('shows toggle type correctly', () => {
@@ -374,5 +385,42 @@ describe('OptionItem', () => {
             fireEvent.press(optionItem);
         });
         expect(props.action).not.toHaveBeenCalled();
+    });
+
+    it('should not call action when a disabled option is pressed', () => {
+        const props = getBaseProps();
+        props.action = jest.fn();
+        props.disabled = true;
+
+        const {getByTestId} = renderWithIntlAndTheme(<OptionItem {...props}/>);
+
+        act(() => {
+            fireEvent.press(getByTestId('option-item'));
+        });
+        expect(props.action).not.toHaveBeenCalled();
+    });
+
+    it('should disable the switch of a disabled toggle', () => {
+        const props = getBaseProps();
+        props.type = 'toggle';
+        props.selected = true;
+        props.action = jest.fn();
+        props.disabled = true;
+
+        const {getByTestId} = renderWithIntlAndTheme(<OptionItem {...props}/>);
+
+        expect(getByTestId('option-item.toggled.true.button')).toHaveProp('disabled', true);
+    });
+
+    it('should show destructive info styling when isInfoDestructive is true', () => {
+        const props = getBaseProps();
+        props.info = 'Test info';
+        props.isInfoDestructive = true;
+        props.destructive = false;
+
+        const {getByText} = renderWithIntlAndTheme(<OptionItem {...props}/>);
+
+        const info = getByText('Test info');
+        expect(info).toHaveStyle({color: Preferences.THEMES.denim.dndIndicator});
     });
 });

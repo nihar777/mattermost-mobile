@@ -52,10 +52,12 @@ describe('EditPostInput', () => {
             },
         ],
         version: '10.5.0',
-        inputRef: {current: undefined},
+        inputRef: {current: null},
         onTextSelectionChange: jest.fn(),
         onChangeText: jest.fn(),
         addFiles: jest.fn(),
+        updateValue: jest.fn(),
+        updateCursorPosition: jest.fn(),
     };
 
     beforeAll(async () => {
@@ -74,12 +76,6 @@ describe('EditPostInput', () => {
         expect(getByTestId('file-2')).toBeVisible();
     });
 
-    it('should match the count of the attachments in edit mode', () => {
-        const {getByTestId} = renderWithEverything(<EditPostInput {...baseProps}/>, {database, serverUrl});
-        expect(getByTestId('uploads')).toBeVisible();
-        expect(getByTestId('uploads').children).toHaveLength(2);
-    });
-
     it('should not render attachments if the server version is less than 10.5.0', () => {
         const props = {...baseProps, version: '10.4.0'};
         const {queryByTestId} = renderWithEverything(<EditPostInput {...props}/>, {database, serverUrl});
@@ -91,9 +87,7 @@ describe('EditPostInput', () => {
         const {queryByTestId} = renderWithEverything(<EditPostInput {...props}/>, {database, serverUrl});
         expect(queryByTestId('edit_post.quick_actions')).toBeNull();
         expect(queryByTestId('edit_post.quick_actions.at_input_action')).toBeNull();
-        expect(queryByTestId('edit_post.quick_actions.file_action')).toBeNull();
-        expect(queryByTestId('edit_post.quick_actions.image_action')).toBeNull();
-        expect(queryByTestId('edit_post.quick_actions.camera_action')).toBeNull();
+        expect(queryByTestId('edit_post.quick_actions.attachment_action')).toBeNull();
     });
 
     it('should not render both uploads and quick actions when server version is unsupported', () => {
@@ -106,10 +100,8 @@ describe('EditPostInput', () => {
     it('should render quick actions in edit mode', () => {
         const {getByTestId, queryByTestId} = renderWithEverything(<EditPostInput {...baseProps}/>, {database, serverUrl});
         expect(getByTestId('edit_post.quick_actions')).toBeVisible();
+        expect(getByTestId('edit_post.quick_actions.attachment_action')).toBeVisible();
         expect(getByTestId('edit_post.quick_actions.at_input_action')).toBeVisible();
-        expect(getByTestId('edit_post.quick_actions.file_action')).toBeVisible();
-        expect(getByTestId('edit_post.quick_actions.image_action')).toBeVisible();
-        expect(getByTestId('edit_post.quick_actions.camera_action')).toBeVisible();
         expect(queryByTestId('edit_post.quick_actions.slash_input_action')).toBeNull();
         expect(queryByTestId('edit_post.quick_actions.post_priority_action')).toBeNull();
     });

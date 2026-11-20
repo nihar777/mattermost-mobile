@@ -10,15 +10,21 @@ import {renderWithEverything, waitFor} from '@test/intl-test-helper';
 import TestHelper from '@test/test_helper';
 
 import ChecklistItemComponent from './checklist_item';
+import {getTaskActivity} from './task_activity';
 
 import ChecklistItem from './';
 
 import type ServerDataOperator from '@database/operator/server_data_operator';
 import type {Database} from '@nozbe/watermelondb';
+import type PlaybookChecklistItemModel from '@playbooks/types/database/models/playbook_checklist_item';
 
 jest.mock('./checklist_item');
+jest.mock('./task_activity', () => {
+    const actual = jest.requireActual('./task_activity');
+    return {...actual, getTaskActivity: jest.fn(actual.getTaskActivity)};
+});
 jest.mocked(ChecklistItemComponent).mockImplementation(
-    (props) => React.createElement('ChecklistItem', {testID: 'checklist-item', ...props}),
+    (props: ComponentProps<typeof ChecklistItemComponent>) => React.createElement('ChecklistItem', {testID: 'checklist-item', ...props}),
 );
 
 const serverUrl = 'server-url';
@@ -46,6 +52,7 @@ describe('ChecklistItem', () => {
         it('should set the correct teammate name display', async () => {
             const props = {
                 item: TestHelper.fakePlaybookChecklistItem(checklistId, {id: itemId}),
+                timelineEvents: [],
                 channelId: 'channel-id',
                 checklistNumber: 0,
                 itemNumber: 0,
@@ -78,6 +85,7 @@ describe('ChecklistItem', () => {
         it('should set the correct channel type', async () => {
             const props = {
                 item: TestHelper.fakePlaybookChecklistItem(checklistId, {id: itemId}),
+                timelineEvents: [],
                 channelId: 'channel-id',
                 checklistNumber: 0,
                 itemNumber: 0,
@@ -137,6 +145,7 @@ describe('ChecklistItem', () => {
         function getBaseProps(): ComponentProps<typeof ChecklistItem> {
             return {
                 item: TestHelper.fakePlaybookChecklistItem(checklistId, {id: itemId}),
+                timelineEvents: [],
                 channelId: 'channel-id',
                 checklistNumber: 0,
                 itemNumber: 0,
@@ -185,6 +194,45 @@ describe('ChecklistItem', () => {
             expect(checklistItem).toBeTruthy();
             expect(checklistItem.props.assignee).toBeUndefined();
         });
+
+        it('should resolve and refresh the task activity actor from timeline events', async () => {
+            const actorId = 'activity-actor-id';
+            await operator.handleUsers({
+                prepareRecordsOnly: false,
+                users: [TestHelper.fakeUser({id: actorId, username: 'activity-actor'})],
+            });
+            const props = getBaseProps();
+            props.item = TestHelper.fakePlaybookChecklistItem(checklistId, {
+                id: itemId,
+                state: 'closed',
+                state_modified: 1000,
+                title: 'Task title',
+            });
+
+            const {getByTestId, rerender} = renderWithEverything(<ChecklistItem {...props}/>, {database});
+            const checklistItem = getByTestId('checklist-item');
+            expect(checklistItem.props.activity).toEqual({action: 'check', timestamp: 1000, actorUserId: undefined});
+            expect(checklistItem.props.activityActor).toBeUndefined();
+
+            props.timelineEvents = [{
+                id: 'event-id',
+                playbook_run_id: 'run-id',
+                create_at: 1000,
+                event_at: 1000,
+                event_type: 'task_state_modified',
+                summary: '',
+                details: JSON.stringify({action: 'check'}),
+                post_id: '',
+                subject_user_id: actorId,
+                creator_user_id: actorId,
+            }];
+            rerender(<ChecklistItem {...props}/>);
+
+            await waitFor(() => {
+                expect(checklistItem.props.activity.actorUserId).toBe(actorId);
+                expect(checklistItem.props.activityActor.id).toBe(actorId);
+            });
+        });
     });
 
     describe('local run', () => {
@@ -195,6 +243,7 @@ describe('ChecklistItem', () => {
             });
             return {
                 item: model[0],
+                timelineEvents: [],
                 channelId: 'channel-id',
                 checklistNumber: 0,
                 itemNumber: 0,
@@ -202,6 +251,58 @@ describe('ChecklistItem', () => {
                 isDisabled: false,
             };
         }
+
+        const taskEvent = (id: string, taskId: string, eventAt: number): TimelineEvent => ({
+            id,
+            playbook_run_id: 'run-id',
+            create_at: eventAt,
+            event_at: eventAt,
+            event_type: 'task_state_modified',
+            summary: '',
+            details: JSON.stringify({action: 'check', item_id: taskId}),
+            post_id: '',
+            subject_user_id: 'user-id',
+            creator_user_id: 'user-id',
+        });
+
+        it('should not re-render when a run change leaves this task activity the same', async () => {
+            const run = TestHelper.fakePlaybookRun({id: 'run-id', update_at: 1, timeline_events: [taskEvent('ours', itemId, 1000)]});
+            await operator.handlePlaybookRun({runs: [run], prepareRecordsOnly: false});
+            const [item] = await operator.handlePlaybookChecklistItem({
+                prepareRecordsOnly: false,
+                items: [TestHelper.fakePlaybookChecklistItem(checklistId, {id: itemId, state: 'closed', state_modified: 1000})],
+            });
+            const props = {...(await getBaseProps()), item, timelineEvents: undefined};
+
+            const {getByTestId} = renderWithEverything(<ChecklistItem {...props}/>, {database});
+            await waitFor(() => expect(getByTestId('checklist-item').props.activity?.actorUserId).toBe('user-id'));
+            const renders = jest.mocked(ChecklistItemComponent).mock.calls.length;
+
+            await act(async () => {
+                await operator.handlePlaybookRun({
+                    runs: [{...run, update_at: 2, timeline_events: [taskEvent('ours', itemId, 1000), taskEvent('theirs', 'other-item', 2000)]}],
+                    prepareRecordsOnly: false,
+                });
+            });
+
+            expect(jest.mocked(ChecklistItemComponent).mock.calls.length).toBe(renders);
+        });
+
+        it('should not recompute task activity when a run change leaves its timeline events the same', async () => {
+            const run = TestHelper.fakePlaybookRun({id: 'run-id', update_at: 1, name: 'Before', timeline_events: [taskEvent('ours', itemId, 1000)]});
+            await operator.handlePlaybookRun({runs: [run], prepareRecordsOnly: false});
+            const props = {...(await getBaseProps()), timelineEvents: undefined};
+
+            renderWithEverything(<ChecklistItem {...props}/>, {database});
+            await waitFor(() => expect(getTaskActivity).toHaveBeenCalled());
+            jest.mocked(getTaskActivity).mockClear();
+
+            await act(async () => {
+                await operator.handlePlaybookRun({runs: [{...run, update_at: 2, name: 'After'}], prepareRecordsOnly: false});
+            });
+
+            expect(getTaskActivity).not.toHaveBeenCalled();
+        });
 
         it('should render correctly without data', async () => {
             const props = await getBaseProps();
@@ -226,7 +327,7 @@ describe('ChecklistItem', () => {
 
             database.write(async () => {
                 if ('update' in props.item) { // check to comply with typescript
-                    props.item.update((item) => {
+                    props.item.update((item: PlaybookChecklistItemModel) => {
                         item.assigneeId = assigneeId;
                     });
                 }
@@ -246,7 +347,7 @@ describe('ChecklistItem', () => {
             const props = await getBaseProps();
             database.write(async () => {
                 if ('update' in props.item) { // check to comply with typescript
-                    props.item.update((item) => {
+                    props.item.update((item: PlaybookChecklistItemModel) => {
                         item.assigneeId = '';
                     });
                 }

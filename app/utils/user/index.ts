@@ -544,7 +544,7 @@ export const convertProfileAttributesToCustomAttributes = (
     fields?.forEach((field) => {
         const customType = useDisplayType ? getDisplayType(field) : field.type;
         fieldsMap.set(field.id, {
-            name: field.name,
+            name: (field.attrs?.display_name as string | undefined) || field.name,
             type: customType,
             sort_order: field.attrs?.sort_order ?? Number.MAX_SAFE_INTEGER,
             originalField: field,
@@ -727,4 +727,22 @@ export const convertValueFromServer = (value: string | string[], fieldType: stri
 
 export const isCustomFieldSamlLinked = (customField?: CustomProfileFieldModel): boolean => {
     return Boolean(customField?.attrs?.saml);
+};
+
+export const isCustomFieldReadOnly = (customField?: CustomProfileFieldModel): boolean => {
+    return isCustomFieldSamlLinked(customField) || customField?.attrs?.managed === 'admin';
+};
+
+/**
+ * Order-insensitive comparison of space-separated role lists. An unknown previous value reads as a
+ * change, so a caller deciding whether to invalidate something fails closed.
+ */
+export const haveSameRoles = (previous: string | undefined, next: string) => {
+    if (previous === undefined) {
+        return false;
+    }
+    const toSet = (roles: string) => new Set(roles.split(' ').filter(Boolean));
+    const a = toSet(previous);
+    const b = toSet(next);
+    return a.size === b.size && [...a].every((role) => b.has(role));
 };

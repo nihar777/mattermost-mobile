@@ -9,7 +9,7 @@ import type ClientBase from './base';
 
 export interface ClientChannelsMix {
     getAllChannels: (page?: number, perPage?: number, notAssociatedToGroup?: string, excludeDefaultChannels?: boolean, includeTotalCount?: boolean) => Promise<any>;
-    createChannel: (channel: Channel) => Promise<Channel>;
+    createChannel: (channel: Channel, propertyValues?: PropertyValuePatchItem[]) => Promise<Channel>;
     createDirectChannel: (userIds: string[]) => Promise<Channel>;
     createGroupChannel: (userIds: string[]) => Promise<Channel>;
     deleteChannel: (channelId: string) => Promise<any>;
@@ -19,12 +19,22 @@ export interface ClientChannelsMix {
     updateChannelPrivacy: (channelId: string, privacy: any) => Promise<Channel>;
     patchChannel: (channelId: string, channelPatch: Partial<Channel>) => Promise<Channel>;
     updateChannelNotifyProps: (props: ChannelNotifyProps & {channel_id: string; user_id: string}) => Promise<any>;
+    setChannelAutotranslation: (channelId: string, enabled: boolean) => Promise<Channel>;
+    setMyChannelAutotranslation: (channelId: string, enabled: boolean) => Promise<ChannelMembership>;
     getChannel: (channelId: string, groupLabel?: RequestGroupLabel) => Promise<Channel>;
     getChannelByName: (teamId: string, channelName: string, includeDeleted?: boolean) => Promise<Channel>;
     getChannelByNameAndTeamName: (teamName: string, channelName: string, includeDeleted?: boolean) => Promise<Channel>;
     getChannels: (teamId: string, page?: number, perPage?: number) => Promise<Channel[]>;
     getArchivedChannels: (teamId: string, page?: number, perPage?: number) => Promise<Channel[]>;
     getSharedChannels: (teamId: string, page?: number, perPage?: number) => Promise<Channel[]>;
+    getRemoteClusters: (options?: {
+        excludePlugins?: boolean;
+        notInChannel?: string;
+        onlyConfirmed?: boolean;
+    }) => Promise<RemoteClusterInfo[]>;
+    getChannelSharedRemotes: (channelId: string) => Promise<RemoteClusterInfo[]>;
+    shareChannelWithRemote: (channelId: string, remoteId: string) => Promise<void>;
+    unshareChannelFromRemote: (channelId: string, remoteId: string) => Promise<void>;
     getMyChannels: (teamId: string, includeDeleted?: boolean, lastDeleteAt?: number, groupLabel?: RequestGroupLabel) => Promise<Channel[]>;
     getMyChannelMember: (channelId: string) => Promise<ChannelMembership>;
     getMyChannelMembers: (teamId: string, groupLabel?: RequestGroupLabel) => Promise<ChannelMembership[]>;
@@ -49,6 +59,7 @@ export interface ClientChannelsMix {
     convertGroupMessageToPrivateChannel: (channelId: string, teamId: string, displayName: string, name: string) => Promise<Channel>;
     getAllChannelsFromAllTeams: (lastDeleteAt: number, includeDeleted: boolean, groupLabel?: RequestGroupLabel) => Promise<Channel[]>;
     getAllMyChannelMembersFromAllTeams: (page: number, perPage: number, groupLabel?: RequestGroupLabel) => Promise<ChannelMembership[]>;
+    getManagedCategories: (teamId: string, groupLabel?: RequestGroupLabel) => Promise<Record<string, string>>;
 }
 
 const ClientChannels = <TBase extends Constructor<ClientBase>>(superclass: TBase) => class extends superclass {
@@ -90,10 +101,21 @@ const ClientChannels = <TBase extends Constructor<ClientBase>>(superclass: TBase
         );
     };
 
-    createChannel = async (channel: Channel) => {
+    getManagedCategories = async (teamId: string, groupLabel?: RequestGroupLabel) => {
+        return this.doFetch(
+            `${this.getTeamRoute(teamId)}/channels/managed_categories`,
+            {method: 'get', groupLabel},
+        );
+    };
+
+    // property_values rides the create request itself rather than a second call,
+    // so the server can refuse a channel that would not satisfy its own required
+    // attributes. Omitted entirely when empty: a server with the feature or
+    // licence off 400s a create body that carries the key at all.
+    createChannel = async (channel: Channel, propertyValues?: PropertyValuePatchItem[]) => {
         return this.doFetch(
             `${this.getChannelsRoute()}`,
-            {method: 'post', body: channel},
+            {method: 'post', body: {...channel, ...(propertyValues?.length && {property_values: propertyValues})}},
         );
     };
 
@@ -157,6 +179,17 @@ const ClientChannels = <TBase extends Constructor<ClientBase>>(superclass: TBase
         );
     };
 
+    setChannelAutotranslation = async (channelId: string, enabled: boolean) => {
+        return this.patchChannel(channelId, {autotranslation: enabled});
+    };
+
+    setMyChannelAutotranslation = async (channelId: string, enabled: boolean) => {
+        return this.doFetch(
+            `${this.getChannelMemberRoute(channelId, 'me')}/autotranslation`,
+            {method: 'put', body: {autotranslation_disabled: !enabled}},
+        );
+    };
+
     getChannel = async (channelId: string, groupLabel?: RequestGroupLabel) => {
         return this.doFetch(
             this.getChannelRoute(channelId),
@@ -204,6 +237,48 @@ const ClientChannels = <TBase extends Constructor<ClientBase>>(superclass: TBase
         return this.doFetch(
             `${this.getSharedChannelsRoute()}/${teamId}${buildQueryString({page, per_page: perPage})}`,
             {method: 'get'},
+        );
+    };
+
+    getRemoteClusters = async (options: {
+        excludePlugins?: boolean;
+        notInChannel?: string;
+        onlyConfirmed?: boolean;
+    } = {}) => {
+        const params: Record<string, string | boolean> = {};
+        if (options.excludePlugins !== undefined) {
+            params.exclude_plugins = options.excludePlugins;
+        }
+        if (options.notInChannel !== undefined) {
+            params.not_in_channel = options.notInChannel;
+        }
+        if (options.onlyConfirmed !== undefined) {
+            params.only_confirmed = options.onlyConfirmed;
+        }
+        return this.doFetch(
+            `${this.getRemoteClustersRoute()}${buildQueryString(params)}`,
+            {method: 'get'},
+        );
+    };
+
+    getChannelSharedRemotes = async (channelId: string) => {
+        return this.doFetch(
+            `${this.getChannelRemotesRoute(channelId)}`,
+            {method: 'get'},
+        );
+    };
+
+    shareChannelWithRemote = async (channelId: string, remoteId: string) => {
+        return this.doFetch(
+            `${this.getRemoteClusterChannelRoute(remoteId, channelId)}/invite`,
+            {method: 'post'},
+        );
+    };
+
+    unshareChannelFromRemote = async (channelId: string, remoteId: string) => {
+        return this.doFetch(
+            `${this.getRemoteClusterChannelRoute(remoteId, channelId)}/uninvite`,
+            {method: 'post'},
         );
     };
 

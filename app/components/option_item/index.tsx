@@ -5,7 +5,7 @@ import React, {useCallback, useMemo} from 'react';
 import {type LayoutChangeEvent, Platform, Switch, Text, TouchableOpacity, View} from 'react-native';
 
 import UserChip from '@components/chips/user_chip';
-import CompassIcon from '@components/compass_icon';
+import CompassIcon, {type CompassIconName} from '@components/compass_icon';
 import TouchableWithFeedback from '@components/touchable_with_feedback';
 import {useTheme} from '@context/theme';
 import {changeOpacity, makeStyleSheetFromTheme} from '@utils/theme';
@@ -48,17 +48,19 @@ const getStyleSheet = makeStyleSheetFromTheme((theme: Theme) => {
     return {
         actionContainer: {
             flexDirection: 'row',
-            alignItems: 'flex-start',
+            alignItems: 'center',
             justifyContent: 'flex-end',
-            marginTop: 2,
         },
         container: {
             flexDirection: 'row',
-            alignItems: 'flex-start',
+            alignItems: 'center',
             minHeight: ITEM_HEIGHT,
             gap: 12,
             justifyContent: 'space-between',
             paddingVertical: 12,
+        },
+        disabled: {
+            opacity: 0.6,
         },
         destructive: {
             color: theme.dndIndicator,
@@ -116,9 +118,11 @@ export type OptionItemProps = {
     action?: (React.Dispatch<React.SetStateAction<string | boolean>>)|((value: string | boolean) => void);
     description?: string;
     destructive?: boolean;
-    icon?: string;
+    disabled?: boolean;
+    icon?: CompassIconName;
     iconColor?: string;
     info?: string | UserChipData;
+    isInfoDestructive?: boolean;
     inline?: boolean;
     label: string;
     onRemove?: () => void;
@@ -128,6 +132,7 @@ export type OptionItemProps = {
     value?: string;
     onLayout?: (event: LayoutChangeEvent) => void;
     descriptionNumberOfLines?: number;
+    labelNumberOfLines?: number;
     longInfo?: boolean;
     nonDestructiveDescription?: boolean;
     isRadioCheckmark?: boolean;
@@ -137,9 +142,11 @@ const OptionItem = ({
     action,
     description,
     destructive,
+    disabled = false,
     icon,
     iconColor,
     info,
+    isInfoDestructive = false,
     inline = false,
     label,
     onRemove,
@@ -149,6 +156,7 @@ const OptionItem = ({
     value,
     onLayout,
     descriptionNumberOfLines,
+    labelNumberOfLines = 2,
     longInfo,
     nonDestructiveDescription = false,
     isRadioCheckmark = false,
@@ -161,8 +169,9 @@ const OptionItem = ({
 
     const labelContainerStyle = useMemo(() => {
         const extraStyle = longInfo ? {flex: undefined} : {};
-        return [styles.labelContainer, extraStyle];
-    }, [longInfo, styles.labelContainer]);
+        const alignmentStyle = description ? {alignItems: 'flex-start' as const} : {};
+        return [styles.labelContainer, extraStyle, alignmentStyle];
+    }, [longInfo, styles.labelContainer, description]);
 
     const labelStyle = useMemo(() => {
         return isInLine ? styles.inlineLabel : styles.label;
@@ -193,6 +202,10 @@ const OptionItem = ({
         const extraStyle = longInfo ? styles.shrink : {};
         return [styles.actionContainer, extraStyle];
     }, [longInfo, styles.actionContainer, styles.shrink]);
+
+    const containerStyle = useMemo(() => {
+        return disabled ? [styles.container, styles.disabled] : styles.container;
+    }, [disabled, styles.container, styles.disabled]);
 
     let actionComponent;
     let radioComponent;
@@ -228,6 +241,7 @@ const OptionItem = ({
                 value={selected}
                 trackColor={trackColor}
                 thumbColor={thumbColor}
+                disabled={disabled}
                 testID={`${testID}.toggled.${selected}.button`}
             />
         );
@@ -276,7 +290,7 @@ const OptionItem = ({
     } else if (info) {
         infoComponent = (
             <Text
-                style={[styles.info, !actionComponent && styles.iconContainer, destructive && {color: theme.dndIndicator}]}
+                style={[styles.info, !actionComponent && styles.iconContainer, (destructive || isInfoDestructive) && {color: theme.dndIndicator}]}
                 testID={`${testID}.info`}
                 numberOfLines={1}
             >
@@ -297,7 +311,7 @@ const OptionItem = ({
     const component = (
         <View
             testID={testID}
-            style={styles.container}
+            style={containerStyle}
             onLayout={onLayout}
         >
             <View style={labelContainerStyle}>
@@ -315,7 +329,7 @@ const OptionItem = ({
                     <Text
                         style={labelTextStyle}
                         testID={`${testID}.label`}
-                        numberOfLines={1}
+                        numberOfLines={labelNumberOfLines}
                     >
                         {label}
                     </Text>
@@ -340,7 +354,10 @@ const OptionItem = ({
     );
     if ((Object.values(TouchableOptionTypes) as string[]).includes(type)) {
         return (
-            <TouchableOpacity onPress={onPress}>
+            <TouchableOpacity
+                onPress={onPress}
+                disabled={disabled}
+            >
                 {component}
             </TouchableOpacity>
         );

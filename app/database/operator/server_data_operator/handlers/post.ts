@@ -5,6 +5,7 @@ import {Q} from '@nozbe/watermelondb';
 
 import {ActionType} from '@constants';
 import {MM_TABLES} from '@constants/database';
+import {PostTypes} from '@constants/post';
 import {buildDraftKey} from '@database/operator/server_data_operator/comparators';
 import {
     transformDraftRecord,
@@ -16,18 +17,19 @@ import {
 import {getRawRecordPairs, getUniqueRawsBy, getValidRecordsForUpdate} from '@database/operator/utils/general';
 import {createPostsChain, getPostListEdges} from '@database/operator/utils/post';
 import {queryScheduledPostsForTeam} from '@queries/servers/scheduled_post';
-import {getCurrentTeamId} from '@queries/servers/system';
+import {getCurrentTeamId, isRedactionEnforced} from '@queries/servers/system';
 import FileModel from '@typings/database/models/servers/file';
 import ScheduledPostModel from '@typings/database/models/servers/scheduled_post';
+import {isUnrevealedBoRPost} from '@utils/bor';
 import {safeParseJSON} from '@utils/helpers';
-import {logWarning} from '@utils/log';
+import {logDebug, logWarning} from '@utils/log';
 
 import {shouldUpdateScheduledPostRecord} from '../comparators/scheduled_post';
 
 import type ServerDataOperatorBase from '.';
 import type Database from '@nozbe/watermelondb/Database';
 import type Model from '@nozbe/watermelondb/Model';
-import type {HandleDraftArgs, HandleFilesArgs, HandlePostsArgs, HandleScheduledPostErrorCodeArgs, HandleScheduledPostsArgs, RecordPair} from '@typings/database/database';
+import type {HandleDraftArgs, HandleFilesArgs, HandlePostsArgs, HandlePostsResult, HandleScheduledPostErrorCodeArgs, HandleScheduledPostsArgs, PostWithRedactionEpoch, RecordPair, RevokedFile} from '@typings/database/database';
 import type DraftModel from '@typings/database/models/servers/draft';
 import type PostModel from '@typings/database/models/servers/post';
 import type PostsInChannelModel from '@typings/database/models/servers/posts_in_channel';
@@ -49,7 +51,7 @@ export interface PostHandlerMix {
     handleUpdateScheduledPostErrorCode: ({scheduledPostId, errorCode, prepareRecordsOnly}: HandleScheduledPostErrorCodeArgs) => Promise<ScheduledPostModel>;
     handleDraft: ({drafts, prepareRecordsOnly}: HandleDraftArgs) => Promise<DraftModel[]>;
     handleFiles: ({files, prepareRecordsOnly}: HandleFilesArgs) => Promise<FileModel[]>;
-    handlePosts: ({actionType, order, posts, previousPostId, prepareRecordsOnly}: HandlePostsArgs) => Promise<Model[]>;
+    handlePosts: ({actionType, order, posts, previousPostId, prepareRecordsOnly}: HandlePostsArgs) => Promise<HandlePostsResult>;
     handlePostsInChannel: (posts: Post[]) => Promise<void>;
     handlePostsInThread: (rootPosts: PostsInThread[]) => Promise<void>;
 
@@ -110,7 +112,221 @@ const mergePostInChannelChunks = async (newChunk: PostsInChannelModel, existingC
 
 export const exportedForTest = {
     mergePostInChannelChunks,
+    isNewerRedactionGeneration,
+    shouldUpdateForBoRPost,
+    shouldUpdateForRedaction,
 };
+
+/**
+ * A response dispatched under epoch G1 can arrive after one dispatched under G2 was stored. Such posts
+ * are left exactly as G2 stored them, row and records alike: clamping only the epoch would label a
+ * record verified at G2 while it carries G1's metadata. The next fetch re-delivers the current state.
+ */
+async function getSupersededPostIds(database: Database, posts: Post[], epoch?: number): Promise<Set<string>> {
+    if (epoch === undefined) {
+        return new Set();
+    }
+
+    const stored = await database.get<PostModel>(POST).query(
+        Q.where('id', Q.oneOf(posts.map((p) => p.id))),
+        Q.where('redaction_verified_epoch', Q.gt(epoch)),
+    ).fetch();
+    return new Set(stored.map((p) => p.id));
+}
+
+/**
+ * Whether the stored linked post lets an embed copy of it write file rows. The server caches embeds,
+ * so a copy can still list a file an edit has since removed. A newer stored decision wins, and a stored
+ * denial only yields to a copy from a strictly newer epoch: at the same epoch, or stored without one
+ * (epoch 0), the two answers cannot be ordered, so the denial wins.
+ */
+function isEmbedCopyCurrent(linked: PostModel, copy: Post, epoch?: number): boolean {
+    if (linked.deleteAt > 0 || copy.update_at < linked.updateAt) {
+        return false;
+    }
+
+    // Only reached while nothing is redacted, so the copy is the server's current answer.
+    if (epoch === undefined) {
+        return true;
+    }
+
+    const storedEpoch = linked.redactionVerifiedEpoch;
+    if (storedEpoch > epoch) {
+        return false;
+    }
+
+    if ((linked.metadata?.redacted_file_count ?? 0) === 0) {
+        return true;
+    }
+
+    return storedEpoch > 0 && storedEpoch < epoch;
+}
+
+/**
+ * A permalink embed carries the linked post's files as the server just judged them for this user, so
+ * it restores rows a denial destroyed, or that a payload without metadata (a thread) never wrote,
+ * without re-fetching the linked post. It is only a copy: the linked post's own metadata wins whenever
+ * that post is in the batch, and the stored linked post decides whether the copy is current. Rows are
+ * only written for a linked post we hold: nothing else would ever clean them up, data retention
+ * included, and the preview renders nothing without the post.
+ */
+async function getTrustedPermalinkEmbedFiles(database: Database, embeds: PermalinkEmbedData[], batchPostIds: Set<string>, epoch?: number): Promise<FileInfo[]> {
+    const candidates = embeds.filter((e) => (
+        e.post_id &&
+        e.post?.metadata?.files?.length &&
+        !batchPostIds.has(e.post_id) &&
+        (e.post?.delete_at ?? 0) === 0 &&
+        (e.post?.metadata?.redacted_file_count ?? 0) === 0
+    ));
+    if (!candidates.length) {
+        return [];
+    }
+
+    // Without an epoch the payload is only an honest "allowed" while nothing is redacted; a
+    // notification fetched before a denial must not restore what the denial removed.
+    if (epoch === undefined && await isRedactionEnforced(database)) {
+        return [];
+    }
+
+    const stored = await database.get<PostModel>(POST).query(
+        Q.where('id', Q.oneOf([...new Set(candidates.map((e) => e.post_id))])),
+    ).fetch();
+    const storedById = new Map(stored.map((p) => [p.id, p]));
+
+    // Keyed by id: several hosts can embed the same linked post, and processRecords does not dedupe.
+    const files = new Map<string, FileInfo>();
+    for (const embed of candidates) {
+        const copy = embed.post as Post;
+        const linked = storedById.get(embed.post_id);
+        if (!linked || !isEmbedCopyCurrent(linked, copy, epoch)) {
+            continue;
+        }
+
+        // A row is owned by its post_id, so a file filed under another post would bypass precedence.
+        for (const file of copy.metadata?.files ?? []) {
+            if (file.id && file.post_id === embed.post_id) {
+                files.set(file.id, file);
+            }
+        }
+    }
+
+    return Array.from(files.values());
+}
+
+/**
+ * Re-verifying a post whose access did not change returns it with the same update_at and redaction
+ * metadata, so without this the newer epoch is never stored and the post stays unverified for good.
+ * An older update_at is still refused: a newer epoch must not roll back an edit.
+ */
+function isNewerRedactionGeneration(e: PostModel, n: Post): boolean {
+    const incoming = (n as PostWithRedactionEpoch).redaction_verified_epoch;
+    if (incoming === undefined) {
+        return false;
+    }
+    return incoming > (e.redactionVerifiedEpoch ?? 0) && n.update_at >= e.updateAt;
+}
+
+function shouldUpdateForBoRPost(e: PostModel, n: Post): boolean {
+    const bothBoRPost = e.type === PostTypes.BURN_ON_READ && n.type === PostTypes.BURN_ON_READ;
+    if (!bothBoRPost) {
+        return false;
+    }
+
+    const borPostGotRevealed = isUnrevealedBoRPost(e) && !isUnrevealedBoRPost(n);
+    const borPostGotReadByAll = e.metadata?.expire_at === undefined && n.metadata?.expire_at !== undefined;
+
+    // Since a user can't un-see a BoR post, we consider an update if the recipients list length has changed
+    const borRecipientsUpdated = (e.metadata?.recipients || []).length !== (n.metadata?.recipients || []).length;
+    return borPostGotRevealed || borRecipientsUpdated || borPostGotReadByAll;
+}
+
+/**
+ * ABAC file-access decisions are made at render time and bump no post row, so `update_at` is
+ * unchanged when a post's attachments become (in)accessible. Compare the redaction state
+ * explicitly, both for the post itself and for the permalink previews it embeds — the server
+ * recalculates embedded post metadata per user on every channel fetch.
+ */
+function shouldUpdateForRedaction(e: PostModel, n: Post): boolean {
+    // No metadata says nothing about attachments: thread payloads carry their root post without it.
+    if (!n.metadata) {
+        return false;
+    }
+
+    if ((n.metadata.redacted_file_count ?? 0) !== (e.metadata?.redacted_file_count ?? 0)) {
+        return true;
+    }
+
+    const newEmbeds = n.metadata?.embeds ?? [];
+    if (!newEmbeds.length) {
+        return false;
+    }
+
+    // Keyed by the linked post id: embed order is not contractual, and unrelated embeds
+    // (an opengraph preview resolving) must not be read as a redaction change.
+    const oldCounts = new Map<string, number>();
+    for (const embed of e.metadata?.embeds ?? []) {
+        if (embed.type === 'permalink') {
+            const data = embed.data as PermalinkEmbedData | undefined;
+            if (data?.post_id) {
+                oldCounts.set(data.post_id, data.post?.metadata?.redacted_file_count ?? 0);
+            }
+        }
+    }
+
+    for (const embed of newEmbeds) {
+        if (embed.type !== 'permalink') {
+            continue;
+        }
+
+        const data = embed.data as PermalinkEmbedData | undefined;
+        if (!data?.post_id) {
+            continue;
+        }
+
+        // A permalink the stored post did not have yet counts as a change: its files are
+        // rendered from this embed, so it must be persisted for the preview to be correct.
+        const oldCount = oldCounts.get(data.post_id);
+        if (oldCount === undefined || oldCount !== (data.post?.metadata?.redacted_file_count ?? 0)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * A write without an epoch (a natively fetched notification payload, a local mutation) keeps the
+ * stored stamp, which is only safe while it leaves the redaction state alone. When it changes that
+ * state the stamp would vouch for a decision it never saw: an allowed payload fetched before a denial
+ * and stored after it would render its files as verified. Such posts drop to epoch 0 instead, so they
+ * stay hidden until a sanitized response re-checks them.
+ */
+async function resetEpochForUnstampedRedactionChanges(database: Database, posts: Post[]) {
+    const candidates = posts.filter((p) => p.metadata && (
+        Boolean(p.file_ids?.length) ||
+        (p.metadata.redacted_file_count ?? 0) > 0 ||
+        Boolean(p.metadata.embeds?.some((embed) => embed.type === 'permalink'))
+    ));
+    if (!candidates.length) {
+        return;
+    }
+
+    // A stored stamp of 0 has nothing to reset.
+    const stored = await database.get<PostModel>(POST).query(
+        Q.where('id', Q.oneOf(candidates.map((p) => p.id))),
+        Q.where('redaction_verified_epoch', Q.gt(0)),
+    ).fetch();
+    if (!stored.length) {
+        return;
+    }
+    const storedById = new Map(stored.map((p) => [p.id, p]));
+    for (const post of posts) {
+        const existing = storedById.get(post.id);
+        if (existing && shouldUpdateForRedaction(existing, post)) {
+            (post as PostWithRedactionEpoch).redaction_verified_epoch = 0;
+        }
+    }
+}
 
 const PostHandler = <TBase extends Constructor<ServerDataOperatorBase>>(superclass: TBase) => class extends superclass {
     /**
@@ -266,9 +482,11 @@ const PostHandler = <TBase extends Constructor<ServerDataOperatorBase>>(supercla
      * @param {RawPost[]} handlePosts.posts
      * @param {string | undefined} handlePosts.previousPostId
      * @param {boolean | undefined} handlePosts.prepareRecordsOnly
-     * @returns {Promise<Model[]>}
+     * @param {boolean | undefined} handlePosts.skipPostsInChannel - store the posts without recording them in PostsInChannel
+     * @param {number | undefined} handlePosts.redactionVerifiedEpoch - epoch the (ABAC-sanitized) response was requested under; omit for local or unsanitized posts
+     * @returns {Promise<HandlePostsResult>} the prepared models, and revokedFiles: files of posts reported as redacted; delete their bytes only after the batch commits
      */
-    handlePosts = async ({actionType, order, posts, previousPostId = '', prepareRecordsOnly = false}: HandlePostsArgs): Promise<Model[]> => {
+    handlePosts = async ({actionType, order, posts, previousPostId = '', prepareRecordsOnly = false, skipPostsInChannel = false, redactionVerifiedEpoch}: HandlePostsArgs): Promise<HandlePostsResult> => {
         const tableName = POST;
 
         // We rely on the posts array; if it is empty, we stop processing
@@ -276,15 +494,17 @@ const PostHandler = <TBase extends Constructor<ServerDataOperatorBase>>(supercla
             logWarning(
                 'An empty or undefined "posts" array has been passed to the handlePosts method',
             );
-            return [];
+            return {models: [], revokedFiles: []};
         }
 
         const emojis: CustomEmoji[] = [];
         const files: FileInfo[] = [];
+        const permalinkEmbeds: PermalinkEmbedData[] = [];
         const postsReactions: ReactionsPerPost[] = [];
         const pendingPostsToDelete: Post[] = [];
         const postsInThread: Record<string, Post[]> = {};
         const receivedFilesSet = new Set<string>();
+        const supersededPostIds = await getSupersededPostIds(this.database, posts, redactionVerifiedEpoch);
 
         // Let's process the post data
         for (const post of posts) {
@@ -304,6 +524,10 @@ const PostHandler = <TBase extends Constructor<ServerDataOperatorBase>>(supercla
                 }
             }
 
+            // The comparator already refuses the row; its records must not be applied either, or a
+            // stale allowed payload would restore the files a newer denial removed.
+            const isSuperseded = supersededPostIds.has(post.id);
+
             // Process the metadata of each post
             if (post?.metadata && Object.keys(post?.metadata).length > 0) {
                 // parsing into json since notifications are sending metadata as a string
@@ -311,26 +535,51 @@ const PostHandler = <TBase extends Constructor<ServerDataOperatorBase>>(supercla
 
                 // Extracts reaction from post's metadata
                 if (data.reactions) {
-                    postsReactions.push({post_id: post.id, reactions: data.reactions});
+                    if (!isSuperseded) {
+                        postsReactions.push({post_id: post.id, reactions: data.reactions});
+                    }
                     delete data.reactions;
                 }
 
                 // Extracts emojis from post's metadata
                 if (data.emojis) {
-                    emojis.push(...data.emojis);
+                    if (!isSuperseded) {
+                        emojis.push(...data.emojis);
+                    }
                     delete data.emojis;
                 }
 
                 // Extracts files from post's metadata
                 if (data.files) {
-                    files.push(...data.files);
+                    if (!isSuperseded) {
+                        files.push(...data.files);
+                    }
                     delete data.files;
+                }
+
+                if (data.embeds && !isSuperseded) {
+                    for (const embed of data.embeds) {
+                        if (embed.type === 'permalink' && embed.data) {
+                            permalinkEmbeds.push(embed.data as PermalinkEmbedData);
+                        }
+                    }
                 }
 
                 post.metadata = data;
             }
 
-            post.file_ids?.forEach((fileId) => receivedFilesSet.add(fileId));
+            if (redactionVerifiedEpoch !== undefined) {
+                (post as PostWithRedactionEpoch).redaction_verified_epoch = redactionVerifiedEpoch;
+            }
+
+            if (!isSuperseded) {
+                post.file_ids?.forEach((fileId) => receivedFilesSet.add(fileId));
+            }
+        }
+
+        // After the loop: notification metadata only becomes an object once parsed above.
+        if (redactionVerifiedEpoch === undefined) {
+            await resetEpochForUnstampedRedactionChanges(this.database, posts);
         }
 
         // Get unique posts in case they are duplicated
@@ -338,6 +587,11 @@ const PostHandler = <TBase extends Constructor<ServerDataOperatorBase>>(supercla
             raws: posts,
             key: 'id',
         }) as Post[];
+
+        // Not added to receivedFilesSet: the deletion loop below only reads rows of posts in this batch,
+        // and a linked post whose files come from an embed is never one of them.
+        const batchPostIds = new Set(uniquePosts.map((p) => p.id));
+        files.push(...await getTrustedPermalinkEmbedFiles(this.database, permalinkEmbeds, batchPostIds, redactionVerifiedEpoch));
 
         const deletedPostIds = uniquePosts.reduce((result, post) => {
             if (post.delete_at > 0) {
@@ -364,7 +618,26 @@ const PostHandler = <TBase extends Constructor<ServerDataOperatorBase>>(supercla
             deleteRawValues: pendingPostsToDelete,
             tableName,
             fieldName: 'id',
-            shouldUpdate: (e: PostModel, n: Post) => n.update_at > e.updateAt,
+            shouldUpdate: (e: PostModel, n: Post) => {
+                if (supersededPostIds.has(e.id)) {
+                    return false;
+                }
+
+                if (isNewerRedactionGeneration(e, n)) {
+                    return true;
+                }
+
+                if (shouldUpdateForBoRPost(e, n)) {
+                    return true;
+                }
+
+                // ABAC decisions never move update_at; an older payload must not roll back an edit.
+                if (n.update_at >= e.updateAt && shouldUpdateForRedaction(e, n)) {
+                    return true;
+                }
+
+                return n.update_at > e.updateAt;
+            },
         }));
 
         const preparedPosts = (await this.prepareRecords({
@@ -390,9 +663,16 @@ const PostHandler = <TBase extends Constructor<ServerDataOperatorBase>>(supercla
             batch.push(...postFiles);
         }
 
+        // Reported as redacted, not merely absent from this payload, so the downloaded bytes go too.
+        const redactedPostIds = new Set(uniquePosts.filter((p) => (p.metadata?.redacted_file_count ?? 0) > 0).map((p) => p.id));
+        const revokedFiles: RevokedFile[] = [];
+
         const allFiles = await database.get<FileModel>(MM_TABLES.SERVER.FILE).query(Q.where('post_id', Q.oneOf(uniquePosts.map((p) => p.id)))).fetch();
         allFiles.forEach((f) => {
-            if (!receivedFilesSet.has(f.id)) {
+            if (!receivedFilesSet.has(f.id) && !supersededPostIds.has(f.postId)) {
+                if (redactedPostIds.has(f.postId)) {
+                    revokedFiles.push({id: f.id, name: f.name, extension: f.extension, mime_type: f.mimeType, localPath: f.localPath ?? undefined});
+                }
                 batch.push(f.prepareDestroyPermanently());
             }
         });
@@ -402,7 +682,7 @@ const PostHandler = <TBase extends Constructor<ServerDataOperatorBase>>(supercla
             batch.push(...postEmojis);
         }
 
-        if (actionType !== ActionType.POSTS.RECEIVED_IN_THREAD) {
+        if (actionType !== ActionType.POSTS.RECEIVED_IN_THREAD && !skipPostsInChannel) {
             // link the newly received posts
             const linkedPosts = createPostsChain({order, posts, previousPostId});
             if (linkedPosts.length) {
@@ -421,10 +701,10 @@ const PostHandler = <TBase extends Constructor<ServerDataOperatorBase>>(supercla
         }
 
         if (batch.length && !prepareRecordsOnly) {
-            await this.batchRecords(batch, 'handlePosts');
+            await this.batchRecords(batch, 'handlePosts', true);
         }
 
-        return batch;
+        return {models: batch, revokedFiles};
     };
 
     /**
@@ -525,7 +805,17 @@ const PostHandler = <TBase extends Constructor<ServerDataOperatorBase>>(supercla
             return [];
         }
 
-        const {firstPost, lastPost} = getPostListEdges(posts);
+        // Deleted posts are dropped before persistence (see handlePosts), so they must not
+        // define the PostsInChannel interval. Otherwise a deleted post newer than the existing
+        // interval creates an empty, orphaned chunk that becomes postsInChannel[0] and hides the
+        // entire channel (MM-66467). Build the interval only from posts that will actually exist.
+        const validPosts = posts.filter((post) => post.delete_at === 0);
+        if (!validPosts.length) {
+            logDebug('handleReceivedPostsInChannel received only deleted posts; skipping interval creation');
+            return [];
+        }
+
+        const {firstPost, lastPost} = getPostListEdges(validPosts);
         const channelId = firstPost.channel_id;
         const earliest = firstPost.create_at;
         const latest = lastPost.create_at;
@@ -580,7 +870,7 @@ const PostHandler = <TBase extends Constructor<ServerDataOperatorBase>>(supercla
         models.push(...await this._mergePostInChannelChunks(targetChunk, chunks, prepareRecordsOnly));
 
         if (!prepareRecordsOnly) {
-            this.batchRecords(models, 'handleReceivedPostsInChannel');
+            await this.batchRecords(models, 'handleReceivedPostsInChannel');
         }
 
         return models;
@@ -621,7 +911,7 @@ const PostHandler = <TBase extends Constructor<ServerDataOperatorBase>>(supercla
         })];
 
         if (!prepareRecordsOnly) {
-            this.batchRecords(models, 'handleReceivedPostsInChannelSince');
+            await this.batchRecords(models, 'handleReceivedPostsInChannelSince');
         }
 
         return models;
@@ -666,7 +956,7 @@ const PostHandler = <TBase extends Constructor<ServerDataOperatorBase>>(supercla
         models.push(...(await this._mergePostInChannelChunks(targetChunk, chunks, prepareRecordsOnly)));
 
         if (!prepareRecordsOnly) {
-            this.batchRecords(models, 'handleReceivedPostsInChannelBefore');
+            await this.batchRecords(models, 'handleReceivedPostsInChannelBefore');
         }
 
         return models;
@@ -711,7 +1001,7 @@ const PostHandler = <TBase extends Constructor<ServerDataOperatorBase>>(supercla
         });
 
         if (!prepareRecordsOnly) {
-            this.batchRecords([targetChunk], 'handleReceivedNewPostForChannel');
+            await this.batchRecords([targetChunk], 'handleReceivedNewPostForChannel');
         }
         return [targetChunk];
     };

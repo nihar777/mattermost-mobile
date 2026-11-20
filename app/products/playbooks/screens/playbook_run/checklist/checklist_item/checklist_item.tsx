@@ -11,19 +11,27 @@ import UserChip from '@components/chips/user_chip';
 import CompassIcon from '@components/compass_icon';
 import {getFriendlyDate} from '@components/friendly_date';
 import PressableOpacity from '@components/pressable_opacity';
+import {Screens} from '@constants';
 import {useServerUrl} from '@context/server';
 import {useTheme} from '@context/theme';
+import {useIsTablet} from '@hooks/device';
 import {restoreChecklistItem, runChecklistItem, skipChecklistItem, updateChecklistItem} from '@playbooks/actions/remote/checklist';
+import {goToFillRequirements} from '@playbooks/screens/navigation';
 import {isDueSoon, isOverdue} from '@playbooks/utils/run';
-import {bottomSheet, openUserProfileModal, popTo} from '@screens/navigation';
+import {bottomSheet, dismissAllRoutesAndPopToScreen} from '@screens/navigation';
+import {getFullErrorMessage} from '@utils/errors';
 import {logDebug} from '@utils/log';
+import {openUserProfile} from '@utils/navigation';
 import {showPlaybookErrorSnackbar} from '@utils/snack_bar';
 import {makeStyleSheetFromTheme, changeOpacity} from '@utils/theme';
 import {typography} from '@utils/typography';
 
 import Checkbox from './checkbox';
 import ChecklistItemBottomSheet, {BOTTOM_SHEET_HEIGHT} from './checklist_item_bottom_sheet';
+import RequirementsAccordion from './requirements_accordion';
+import TaskActivityIndicator from './task_activity_indicator';
 
+import type {TaskActivity} from './task_activity';
 import type PlaybookChecklistItemModel from '@playbooks/types/database/models/playbook_checklist_item';
 import type UserModel from '@typings/database/models/servers/user';
 
@@ -83,8 +91,13 @@ const getStyleSheet = makeStyleSheetFromTheme((theme) => ({
 
 type Props = {
     item: PlaybookChecklistItemModel | PlaybookChecklistItem;
+    timelineEvents: TimelineEvent[] | undefined;
+    activity?: TaskActivity;
+    activityActor?: UserModel;
     assignee?: UserModel;
     teammateNameDisplay: string;
+    timezone: string;
+    isMilitaryTime: boolean;
     channelId: string;
     checklistNumber: number;
     itemNumber: number;
@@ -92,12 +105,18 @@ type Props = {
     isDisabled: boolean;
     currentUserId: string;
     channelType: ChannelType;
+    taskRequirementsEnabled: boolean;
 }
 
 const ChecklistItem = ({
     item,
+    timelineEvents,
+    activity,
+    activityActor,
     assignee,
     teammateNameDisplay,
+    timezone,
+    isMilitaryTime,
     channelId,
     checklistNumber,
     itemNumber,
@@ -105,8 +124,10 @@ const ChecklistItem = ({
     isDisabled,
     currentUserId,
     channelType,
+    taskRequirementsEnabled,
 }: Props) => {
     const dueDate = 'dueDate' in item ? item.dueDate : item.due_date;
+    const isTable = useIsTablet();
     const theme = useTheme();
     const styles = getStyleSheet(theme);
     const intl = useIntl();
@@ -115,11 +136,10 @@ const ChecklistItem = ({
     const [isChecking, setIsChecking] = useState(false);
     const [isExecuting, setIsExecuting] = useState(false);
 
-    // Extract condition fields
     const conditionReason = 'conditionReason' in item ? item.conditionReason : item.condition_reason || '';
     const conditionAction = 'conditionAction' in item ? item.conditionAction : item.condition_action || '';
+    const requirements = useMemo(() => item.requirements ?? [], [item.requirements]);
 
-    // Determine icon display and color
     const showConditionIcon = conditionReason !== '' || conditionAction === 'shown_because_modified';
     const isErrorState = conditionAction === 'shown_because_modified';
     const iconColor = isErrorState ? theme.errorTextColor : changeOpacity(theme.centerChannelColor, 0.56);
@@ -128,14 +148,36 @@ const ChecklistItem = ({
     const skipped = item.state === 'skipped';
     const overdue = isOverdue(item);
     const dueSoon = isDueSoon(item);
+    const showRequirements = taskRequirementsEnabled && requirements.length > 0;
+
+    const openFillRequirements = useCallback((editMode: boolean) => {
+        goToFillRequirements({
+            playbookRunId,
+            itemId: item.id,
+            checklistNumber,
+            itemNumber,
+            taskTitle: item.title,
+            requirements,
+            currentState: item.state,
+            editMode,
+        });
+    }, [checklistNumber, item.id, item.state, item.title, itemNumber, playbookRunId, requirements]);
+
+    const onCompleteRequirements = useCallback(() => {
+        openFillRequirements(false);
+    }, [openFillRequirements]);
+
+    const onEditRequirementValues = useCallback(() => {
+        openFillRequirements(true);
+    }, [openFillRequirements]);
 
     const onUserChipPress = useCallback((userId: string) => {
-        openUserProfileModal(intl, theme, {
+        openUserProfile({
             userId,
             channelId,
-            location: 'PlaybookRun',
+            location: Screens.PLAYBOOK_RUN,
         });
-    }, [channelId, intl, theme]);
+    }, [channelId]);
 
     const executeCommand = useCallback(async () => {
         if (isExecuting) {
@@ -149,24 +191,30 @@ const ChecklistItem = ({
             return;
         }
 
-        popTo('Channel');
+        dismissAllRoutesAndPopToScreen(isTable ? Screens.HOME : Screens.CHANNEL);
         if (item.command?.startsWith('/call')) {
             await handleCallsSlashCommand(item.command, serverUrl, channelId, channelType, '', currentUserId, intl);
         }
-    }, [channelId, channelType, checklistNumber, currentUserId, intl, isExecuting, item.command, itemNumber, playbookRunId, serverUrl]);
+    }, [channelId, channelType, checklistNumber, currentUserId, intl, isExecuting, isTable, item.command, itemNumber, playbookRunId, serverUrl]);
 
     const toggleChecked = useCallback(async () => {
         if (isChecking) {
             return;
         }
+
+        if (showRequirements && !checked) {
+            openFillRequirements(false);
+            return;
+        }
+
         setIsChecking(true);
         const res = await updateChecklistItem(serverUrl, playbookRunId, item.id, checklistNumber, itemNumber, checked ? '' : 'closed');
         if (res.error) {
             showPlaybookErrorSnackbar();
-            logDebug('updateChecklistItem error', res.error);
+            logDebug('ChecklistItem.toggleChecked: update failed', getFullErrorMessage(res.error));
         }
         setIsChecking(false);
-    }, [isChecking, serverUrl, playbookRunId, item.id, checklistNumber, itemNumber, checked]);
+    }, [checked, checklistNumber, isChecking, item.id, itemNumber, openFillRequirements, playbookRunId, serverUrl, showRequirements]);
 
     const toggleSkipped = useCallback(async () => {
         if (isChecking) {
@@ -235,6 +283,7 @@ const ChecklistItem = ({
             conditionReason={conditionReason}
             showConditionIcon={showConditionIcon}
             conditionIconColor={iconColor}
+            timelineEvents={timelineEvents}
         />
     ), [
         playbookRunId,
@@ -250,19 +299,13 @@ const ChecklistItem = ({
         conditionReason,
         showConditionIcon,
         iconColor,
+        timelineEvents,
     ]);
 
     const onPress = useCallback(() => {
-        const initialHeight = BOTTOM_SHEET_HEIGHT.base + (isDisabled ? 0 : BOTTOM_SHEET_HEIGHT.actionButtons) + (showConditionIcon ? BOTTOM_SHEET_HEIGHT.conditionSection : 0);
-        bottomSheet({
-            title: intl.formatMessage({id: 'playbook_run.checklist.taskDetails', defaultMessage: 'Task Details'}),
-            renderContent: renderBottomSheet,
-            snapPoints: [1, initialHeight, '80%'],
-            theme,
-            closeButtonId: 'close-checklist-item',
-            scrollable: true,
-        });
-    }, [intl, isDisabled, renderBottomSheet, theme, showConditionIcon]);
+        const initialHeight = BOTTOM_SHEET_HEIGHT.base + (isDisabled ? 0 : BOTTOM_SHEET_HEIGHT.actionButtons) + (showConditionIcon ? BOTTOM_SHEET_HEIGHT.conditionSection : 0) + (activity ? BOTTOM_SHEET_HEIGHT.activitySection : 0);
+        bottomSheet(renderBottomSheet, [1, initialHeight, '80%']);
+    }, [activity, isDisabled, renderBottomSheet, showConditionIcon]);
 
     return (
         <View style={styles.checklistItem}>
@@ -292,8 +335,29 @@ const ChecklistItem = ({
                     </View>
                 </PressableOpacity>
 
-                {(assignee || dueDate || (item.command)) && (
+                {showRequirements && (
+                    <RequirementsAccordion
+                        requirements={requirements}
+                        isTaskComplete={checked}
+                        readOnly={isDisabled || skipped}
+                        onComplete={onCompleteRequirements}
+                        onEditValues={onEditRequirementValues}
+                    />
+                )}
+
+                {(activity || assignee || dueDate || (item.command)) && (
                     <View style={styles.chipsRow}>
+                        {activity && (
+                            <TaskActivityIndicator
+                                activity={activity}
+                                actor={activityActor}
+                                teammateNameDisplay={teammateNameDisplay}
+                                timezone={timezone}
+                                isMilitaryTime={isMilitaryTime}
+                                variant='chip'
+                                onActorPress={onUserChipPress}
+                            />
+                        )}
                         {assignee && (
                             <UserChip
                                 user={assignee}
